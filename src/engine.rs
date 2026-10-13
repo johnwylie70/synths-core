@@ -524,7 +524,7 @@ impl Engine {
             EV_PARAM => self.set_param_gliding(part, e.a as usize, e.x, e.y),
             EV_PITCH_BEND => self.set_param_gliding(part, BEND, e.x, e.y),
             EV_VOICE_PITCH | EV_VOICE_FREQ | EV_VOICE_VOLUME | EV_VOICE_PAN | EV_VOICE_POSITION | EV_VOICE_KILL => {
-                if e.a == 0 || !e.x.is_finite() {
+                if e.a == 0 || (e.kind != EV_VOICE_KILL && !e.x.is_finite()) {
                     return;
                 }
                 for v in self.voices.iter_mut() {

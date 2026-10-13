@@ -356,3 +356,19 @@ pub fn table_json() -> String {
     s.push_str("]}");
     s
 }
+
+/// A parameter as a row of the table in `docs/engine-api.md`. The document's
+/// table is made by `cargo run --example param_table`, and a test checks the
+/// two agree.
+pub fn doc_row(p: &ParamInfo) -> String {
+    let kind = if p.choices.is_empty() {
+        p.kind.name().to_string()
+    } else {
+        let list: Vec<String> = p.choices.split('|').enumerate().map(|(i, c)| format!("{i} {c}")).collect();
+        format!("choice: {}", list.join(", "))
+    };
+    format!(
+        "| {} | `{}` | {} | {} | {} | {} | {} | {} |",
+        p.id, p.name, kind, p.min, p.max, p.default, p.unit, p.help
+    )
+}
