@@ -74,6 +74,30 @@ fn run_input(level: f32, patch: &[(usize, f32)], globals: &[(usize, f32)]) -> f6
     took
 }
 
+/// Time the reverb by itself: `SECONDS` of a tone and hiss through one
+/// type, in the 16-frame pieces the engine gives it. Milliseconds per second of sound.
+fn run_reverb(kind: usize) -> f64 {
+    use synths_core::reverb::{Reverb, Settings};
+    let mut reverb = Reverb::new(SR);
+    let p = Settings { kind, ..Settings::default() };
+    let mut rng = synths_core::math::Rng::new(1);
+    let input: Vec<f32> = (0..16 * 512).map(|i| 0.3 * (i as f32 * 0.02).sin() + 0.1 * rng.bipolar()).collect();
+    let (mut l, mut r) = ([0.0f32; 16], [0.0f32; 16]);
+    let pieces = SECONDS * SR as usize / 16;
+    let mut sum = 0.0f32;
+    let start = Instant::now();
+    for i in 0..pieces {
+        let at = (i % 512) * 16;
+        reverb.process(&input[at..at + 16], &input[at..at + 16], &mut l, &mut r, &p);
+        sum += l[0] + r[15];
+        l = [0.0; 16];
+        r = [0.0; 16];
+    }
+    let took = start.elapsed().as_secs_f64();
+    assert!(sum.is_finite() && sum != 0.0);
+    took / SECONDS as f64 * 1000.0
+}
+
 fn main() {
     let simple: &[(usize, f32)] = &[(OSC1_WAVE, 2.0)];
     let full: &[(usize, f32)] = &[
@@ -110,6 +134,25 @@ fn main() {
             }
         }
     }
+
+    // The reverb by itself, which every part shares.
+    let reverb = synths_core::reverb::Reverb::new(SR);
+    println!("the reverb by itself ({} KB of memory at {SR} Hz):", reverb.bytes() / 1024);
+    for (kind, k) in synths_core::reverb::KINDS.iter().enumerate() {
+        let ms = run_reverb(kind);
+        println!("  {:10} {ms:6.3} ms per second of sound ({:.3}% of one core)", k.name, ms / 10.0);
+    }
+    let idle = {
+        let mut reverb = synths_core::reverb::Reverb::new(SR);
+        let p = synths_core::reverb::Settings::default();
+        let (mut l, mut r) = ([0.0f32; 16], [0.0f32; 16]);
+        let start = Instant::now();
+        for _ in 0..SECONDS * SR as usize / 16 {
+            reverb.process(&[0.0; 16], &[0.0; 16], &mut l, &mut r, &p);
+        }
+        start.elapsed().as_secs_f64() / SECONDS as f64 * 1000.0
+    };
+    println!("  {:10} {idle:6.3} ms", "idle");
 
     // The live input, and what each voice effect adds for the one part that uses it.
     println!("a live input (mono), through one part:");
