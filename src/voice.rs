@@ -219,7 +219,11 @@ impl Voice {
                 Some(Some(sm)) => sm.frames as f64,
                 _ => 0.0,
             };
-            self.players[i].start(p[OSC1_START + i * OSC_STRIDE] as f64 * frames);
+            let offset = p[OSC1_START + i * OSC_STRIDE] as f64 * frames;
+            match samples.get(slot) {
+                Some(Some(sm)) if p[OSC1_REVERSE + i] >= 0.5 => self.players[i].start_reversed(sm, offset),
+                _ => self.players[i].start(offset),
+            }
         }
         self.sub.reset(WAVE_SINE, if s.random_phase { self.rng.unipolar() } else { 0.0 });
         self.read_shapes(p, sample_rate);
@@ -378,6 +382,8 @@ impl Voice {
                     _ => 0.0,
                 };
                 let pl = &mut self.players[i];
+                pl.reverse = p[OSC1_REVERSE + i] >= 0.5;
+                pl.antialias = p[SAMPLE_ANTIALIAS] >= 0.5;
                 aim(&mut pl.inc, &mut pl.dinc, rate.min(1024.0), pitch_jump, inv_len);
             } else {
                 let mut hz = if keytrack { base_hz } else { note_to_hz(60.0 + bend) };

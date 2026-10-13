@@ -129,10 +129,14 @@ param_table! {
     32, OSC2_SYNC, "osc2.sync", Bool, 0, 1, 0, "", "", "Hard sync: oscillator 2 restarts its wave every time oscillator 1 does.";
     33, OSC2_RING, "osc2.ring", Float, 0, 1, 0, "", "", "Ring modulation: how much oscillator 2 is multiplied by oscillator 1.";
 
+    34, OSC1_REVERSE, "osc1.reverse", Bool, 0, 1, 0, "", "", "On: oscillator 1's sample plays backwards.";
+    35, OSC2_REVERSE, "osc2.reverse", Bool, 0, 1, 0, "", "", "On: oscillator 2's sample plays backwards.";
+
     // ---- sub oscillator and noise ----
     36, SUB_LEVEL, "sub.level", Float, 0, 1, 0, "gain", "", "How loud the sub oscillator is.";
     37, SUB_WAVE, "sub.wave", Choice, 0, 2, 0, "", "sine|square|triangle", "The shape of the sub oscillator.";
     38, SUB_OCTAVE, "sub.octave", Int, -2, -1, -1, "octaves", "", "One or two octaves below the note.";
+    39, SAMPLE_ANTIALIAS, "sample.antialias", Bool, 0, 1, 1, "", "", "On: a sample played faster than it was recorded is smoothed, so it does not turn harsh. Off: it is left raw, as an old sampler or a tracker of the 1980s would play it.";
     40, NOISE_LEVEL, "noise.level", Float, 0, 1, 0, "gain", "", "How loud the noise is.";
     41, NOISE_TYPE, "noise.type", Choice, 0, 3, 0, "", "white|pink|lfsr|lfsr_short", "white and pink are hiss; lfsr is the pitched noise of an 8-bit sound chip; lfsr_short is its buzzy, metallic version.";
     42, NOISE_PITCH, "noise.pitch", Float, -48, 48, 0, "semitones", "", "Tuning of the lfsr noise, which follows the note.";

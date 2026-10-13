@@ -158,3 +158,135 @@ fn bad_samples_are_refused_and_missing_ones_are_silent() {
     assert_eq!(e.active_voices(), 0);
     assert!(x[1024..].iter().all(|&v| v == 0.0));
 }
+
+#[test]
+fn a_one_shot_plays_backwards_from_its_last_frame() {
+    let mut e = ramp_engine(50);
+    e.set_param(0, OSC1_REVERSE, 1.0);
+    note_on(&mut e, 0, 0, 60.0);
+    let x = render(&mut e, 2000, 128).0;
+    let want: Vec<i32> = (0..50).rev().collect();
+    assert_eq!(&frames_played(&x[..50]), &want);
+    assert!(x[1000..].iter().all(|&v| v == 0.0));
+    assert_eq!(e.active_voices(), 0);
+    // `osc1.start` is then measured from the end.
+    let mut e = ramp_engine(1000);
+    e.set_param(0, OSC1_REVERSE, 1.0);
+    e.set_param(0, OSC1_START, 0.5);
+    note_on(&mut e, 0, 0, 60.0);
+    let got = frames_played(&render(&mut e, 600, 128).0);
+    assert_eq!((got[0], got[1], got[499]), (499, 498, 0));
+    assert_eq!(e.active_voices(), 0);
+}
+
+#[test]
+fn loops_play_backwards() {
+    // A forward loop goes round the other way, starting at its end.
+    let mut e = ramp_engine(50);
+    e.configure_sample(3, 60.0, 1, 10, 20).unwrap();
+    e.set_param(0, OSC1_REVERSE, 1.0);
+    note_on(&mut e, 0, 0, 60.0);
+    let got = frames_played(&render(&mut e, 200, 64).0);
+    for (i, &g) in got.iter().enumerate() {
+        assert_eq!(g, 19 - (i % 10) as i32, "output sample {i}");
+    }
+    // A ping-pong loop starts on its way back.
+    let mut e = ramp_engine(50);
+    e.configure_sample(3, 60.0, 2, 10, 14).unwrap();
+    e.set_param(0, OSC1_REVERSE, 1.0);
+    note_on(&mut e, 0, 0, 60.0);
+    let got = frames_played(&render(&mut e, 40, 7).0);
+    let want = [13, 12, 11, 10, 10, 11, 12, 13, 13, 12, 11, 10, 10, 11];
+    assert_eq!(&got[..want.len()], &want);
+    // Backwards at half speed, the curve between frames still runs true.
+    let mut e = ramp_engine(50);
+    e.configure_sample(3, 60.0, 1, 10, 30).unwrap();
+    e.set_param(0, OSC1_REVERSE, 1.0);
+    note_on(&mut e, 0, 0, 48.0);
+    let x = render(&mut e, 34, 64).0;
+    // (Away from the ends of the loop, where the ramp jumps.)
+    for (i, v) in x.iter().enumerate().skip(4) {
+        assert!((v - (29.0 - i as f32 * 0.5) / 1000.0).abs() < 1e-5, "output sample {i} is {v}");
+    }
+}
+
+#[test]
+fn a_sounding_sample_can_be_turned_round() {
+    let mut e = ramp_engine(1000);
+    note_on(&mut e, 0, 0, 60.0);
+    e.push(Event::param(96.0, 0, OSC1_REVERSE, 1.0, 0.0));
+    e.push(Event::param(128.0, 0, OSC1_REVERSE, 0.0, 0.0));
+    let got = frames_played(&render(&mut e, 200, 128).0);
+    assert_eq!(&got[94..99], &[94, 95, 96, 95, 94]);
+    assert_eq!(&got[126..131], &[66, 65, 64, 65, 66]);
+    // The same sound comes out whatever the block size.
+    let mut e = ramp_engine(1000);
+    note_on(&mut e, 0, 0, 60.0);
+    e.push(Event::param(96.0, 0, OSC1_REVERSE, 1.0, 0.0));
+    e.push(Event::param(128.0, 0, OSC1_REVERSE, 0.0, 0.0));
+    assert_eq!(frames_played(&render(&mut e, 200, 7).0), got);
+}
+
+/// A looped sample holding two tones, played `semitones` above its own pitch.
+fn two_tones(low: f32, high: f32, semitones: f32, antialias: f32, stereo: bool) -> Vec<f32> {
+    let mut e = plain_engine();
+    let tone = |i: usize| {
+        let t = std::f32::consts::TAU * i as f32 / SR;
+        0.4 * (t * low).sin() + 0.4 * (t * high).sin()
+    };
+    let data: Vec<f32> = if stereo { (0..4800).flat_map(|i| [tone(i), tone(i)]).collect() } else { (0..4800).map(tone).collect() };
+    e.load_sample(0, &data, if stereo { 2 } else { 1 }, SR).unwrap();
+    e.configure_sample(0, 60.0, 1, 0, 4800).unwrap();
+    e.set_param(0, OSC1_WAVE, 4.0);
+    e.set_param(0, SAMPLE_ANTIALIAS, antialias);
+    note_on(&mut e, 0, 0, 60.0 + semitones);
+    render(&mut e, 48000, 128).0
+}
+
+#[test]
+fn a_sample_pitched_far_up_is_smoothed() {
+    // 1 kHz and 15 kHz, two octaves up: 4 kHz, and 60 kHz, which 48 kHz
+    // cannot hold. Raw, it folds down to 12 kHz as loud as it went in.
+    for stereo in [false, true] {
+        let raw = two_tones(1000.0, 15000.0, 24.0, 0.0, stereo);
+        let smooth = two_tones(1000.0, 15000.0, 24.0, 1.0, stereo);
+        let raw_alias = db(amplitude_at(&raw[4800..], 12000.0, SR) / 0.4);
+        let alias = db(amplitude_at(&smooth[4800..], 12000.0, SR) / 0.4);
+        let kept = db(amplitude_at(&smooth[4800..], 4000.0, SR) / 0.4);
+        assert!(raw_alias > -3.0, "raw alias {raw_alias} dB");
+        assert!(alias < -24.0, "alias {alias} dB (stereo: {stereo})");
+        assert!(kept > -0.5 && kept < 0.1, "the 4 kHz tone is at {kept} dB");
+    }
+    // Three octaves and a bit: 2 kHz becomes 17.6 kHz and is kept; 11 kHz
+    // would be 96.9 kHz, and folds to 0.9 kHz.
+    let up = 12.0 * 8.81f32.log2();
+    let raw = two_tones(2000.0, 11000.0, up, 0.0, false);
+    let smooth = two_tones(2000.0, 11000.0, up, 1.0, false);
+    let fold = (11000.0 * 8.81f32 - 2.0 * SR).abs();
+    let raw_alias = db(amplitude_at(&raw[4800..], fold, SR) / 0.4);
+    let alias = db(amplitude_at(&smooth[4800..], fold, SR) / 0.4);
+    assert!(raw_alias > -3.0 && alias < raw_alias - 20.0, "alias {alias} dB, raw {raw_alias} dB");
+}
+
+#[test]
+fn smoothing_leaves_a_sample_at_or_below_its_own_pitch_alone() {
+    for semitones in [0.0, -7.0, -24.0] {
+        let raw = two_tones(1000.0, 9000.0, semitones, 0.0, false);
+        let smooth = two_tones(1000.0, 9000.0, semitones, 1.0, false);
+        assert_eq!(raw, smooth, "{semitones} semitones");
+    }
+    // Sliding up through its own pitch, there is no jump as the smoothing comes in.
+    let mut e = plain_engine();
+    let data: Vec<f32> = (0..4800).map(|i| 0.5 * (std::f32::consts::TAU * i as f32 * 5000.0 / SR).sin()).collect();
+    e.load_sample(0, &data, 1, SR).unwrap();
+    e.configure_sample(0, 60.0, 1, 0, 4800).unwrap();
+    e.set_param(0, OSC1_WAVE, 4.0);
+    e.push(Event::note_on(0.0, 0, 9, 58.0, 1.0));
+    e.push(Event::voice_pitch(0.0, 0, 9, 76.0, 1.0));
+    let x = render(&mut e, 48000, 128).0;
+    // The loudness of the tone falls gently as it rises; it never steps.
+    let level: Vec<f32> = x.chunks(480).map(rms).collect();
+    for w in level.windows(2) {
+        assert!((w[1] / w[0] - 1.0).abs() < 0.08, "{} then {}", w[0], w[1]);
+    }
+}

@@ -377,6 +377,8 @@ glide sent to every part uses all 64); past that a glide jumps straight to
 its value. A change to a patch parameter affects the notes already sounding
 on the part as well as new ones, except for what is only read when a note
 starts: `osc1.start`, `osc2.start`, `unison.*`, `mode` and `glide`.
+  (`osc1.reverse` is read all the time: changing it turns a sounding sample
+  round where it is.)
 
 **5 `pitch_bend`** The same as a `param` event for the `bend` parameter (id 4).
 The pitch moves by `x` times the part's `bend_range`.
@@ -474,9 +476,12 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 31 | `osc2.keytrack` | bool | 0 | 1 | 1 |  | On: the pitch follows the note. |
 | 32 | `osc2.sync` | bool | 0 | 1 | 0 |  | Hard sync: oscillator 2 restarts its wave every time oscillator 1 does. |
 | 33 | `osc2.ring` | float | 0 | 1 | 0 |  | Ring modulation: how much oscillator 2 is multiplied by oscillator 1. |
+| 34 | `osc1.reverse` | bool | 0 | 1 | 0 |  | On: oscillator 1's sample plays backwards. |
+| 35 | `osc2.reverse` | bool | 0 | 1 | 0 |  | On: oscillator 2's sample plays backwards. |
 | 36 | `sub.level` | float | 0 | 1 | 0 | gain | How loud the sub oscillator is. |
 | 37 | `sub.wave` | choice: 0 sine, 1 square, 2 triangle | 0 | 2 | 0 |  | The shape of the sub oscillator. |
 | 38 | `sub.octave` | int | -2 | -1 | -1 | octaves | One or two octaves below the note. |
+| 39 | `sample.antialias` | bool | 0 | 1 | 1 |  | On: a sample played faster than it was recorded is smoothed, so it does not turn harsh. Off: it is left raw, as an old sampler or a tracker of the 1980s would play it. |
 | 40 | `noise.level` | float | 0 | 1 | 0 | gain | How loud the noise is. |
 | 41 | `noise.type` | choice: 0 white, 1 pink, 2 lfsr, 3 lfsr_short | 0 | 3 | 0 |  | white and pink are hiss; lfsr is the pitched noise of an 8-bit sound chip; lfsr_short is its buzzy, metallic version. |
 | 42 | `noise.pitch` | float | -48 | 48 | 0 | semitones | Tuning of the lfsr noise, which follows the note. |
@@ -550,7 +555,8 @@ number; a `bool` is 0 or 1; a `choice` is a whole number that picks from the
 list shown.
 
 Oscillator 2's parameters are oscillator 1's with 8 added to the id (as far
-as `keytrack`), and LFO 2's are LFO 1's with 16 added.
+as `keytrack`; `osc2.reverse` is `osc1.reverse` with 1 added), and LFO 2's are
+LFO 1's with 16 added.
 
 A part's step macro is not in this table, because it is a list and not one
 number: it is set with `synths_macro_set`.
@@ -580,6 +586,7 @@ number: it is set with `synths_macro_set`.
 - **`osc1.keytrack`** Off, a wave plays at the pitch of note 60 and a sample
   at its own pitch, whatever note is played. Tuning, bend and modulation
   still apply.
+- **`osc1.reverse`, `sample.antialias`** See [Samples](#samples-1).
 - **`osc2.sync`** works when both oscillators are waves, not samples.
   Oscillator 2 is then one sample late.
 - **`osc2.ring`** At 1, oscillator 2 is replaced by oscillator 1 times
@@ -690,8 +697,26 @@ note and an optional loop. A part plays it by setting `osc1.wave` (or
 - **Between frames** the engine draws a smooth curve through the four
   nearest frames (cubic interpolation), and gets this right across the ends
   of a loop. Played at its own speed and starting on a frame, a sample comes
-  out exactly as it went in. There is no filter against aliasing when a
-  sample is played far above its base note.
+  out exactly as it went in.
+- **Played faster than it was recorded**, a sample's highest tones would
+  land above what the engine's sample rate can hold and fold back down as
+  harsh tones that were never in it. With `sample.antialias` on (it is, to
+  begin with), the engine instead takes a weighted average of the frames
+  either side of the position, as many as it is stepping over (at most 8
+  each side), the nearest counting most. That takes out most of what would
+  fold: 24 dB or more of it two octaves up. It is cheap rather than perfect:
+  the top octave of what is left is dulled by a few dB, and above three
+  octaves up (8 frames a step) the protection thins out. It comes in
+  gradually over the first octave above the sample's own speed, and at or
+  below that speed it does nothing at all. Turn it off, for a part, to hear
+  samples the raw way old trackers played them.
+- **Backwards.** With `osc1.reverse` on, a one-shot starts at its last frame
+  and plays back to its first, then ends; `osc1.start` is then measured from
+  the end. A forward loop starts at `loop_end - 1` and goes round the other
+  way, and never plays what comes before the loop. A ping-pong loop already
+  goes both ways, so there it only changes where the note starts: at the end
+  of the loop, on the way back. Changing `osc1.reverse` while a one-shot or a
+  forward loop sounds turns it round where it is.
 - **Stereo.** A stereo sample plays in stereo as oscillator 1. As oscillator
   2 its two sides are mixed to one.
 - **Bad data.** A number that is infinite or not a number is stored as 0,

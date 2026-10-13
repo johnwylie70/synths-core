@@ -75,6 +75,10 @@ fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, f: f32) -> f32 {
     ((c3 * f + c2) * f + c1) * f + p1
 }
 
+/// Above this many frames of the sample per frame of output, the smoothing
+/// against aliasing stops getting wider (it would cost too much).
+const WIDEST: f32 = 8.0;
+
 /// Where a voice is in a sample.
 #[derive(Clone, Copy, Default)]
 pub struct Player {
@@ -86,6 +90,10 @@ pub struct Player {
     pub dinc: f32,
     /// A one-shot sample has reached its end.
     pub ended: bool,
+    /// Play backwards.
+    pub reverse: bool,
+    /// Smooth the sample when it is played faster than it was recorded.
+    pub antialias: bool,
     /// The loop has been round at least once.
     looped: bool,
     /// The last value played before the end, fading out so the end does not click.
@@ -100,18 +108,47 @@ impl Player {
         self.tail = [0.0; 2];
     }
 
-    /// Bring the position back inside the sample or its loop.
+    /// Start a note that plays backwards, `offset` frames in from where it
+    /// would otherwise begin: the last frame of a one-shot, or the end of a loop.
+    pub fn start_reversed(&mut self, s: &Sample, offset: f64) {
+        let offset = if offset.is_finite() && offset > 0.0 { offset } else { 0.0 };
+        match s.looping() {
+            LOOP_OFF => self.start((s.frames as f64 - 1.0 - offset).max(0.0)),
+            LOOP_FORWARD => {
+                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                self.start(le - 1.0 - offset % (le - ls));
+                self.looped = true;
+            }
+            _ => {
+                // The way back is the second half of a ping-pong loop.
+                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                self.start(le + offset % (le - ls));
+                self.looped = true;
+            }
+        }
+    }
+
+    /// Bring the position back inside the sample or its loop. `back` is true
+    /// when the position is moving towards the start.
     #[inline]
-    fn wrap(&mut self, s: &Sample, mode: u8) {
+    fn wrap(&mut self, s: &Sample, mode: u8, back: bool) {
         match mode {
             LOOP_OFF => {
-                if self.pos >= s.frames as f64 {
+                if self.pos >= s.frames as f64 || self.pos < 0.0 {
                     self.ended = true;
                 }
             }
             LOOP_FORWARD => {
                 let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
-                if self.pos >= le {
+                if back {
+                    if self.pos < ls {
+                        self.pos = le - (ls - self.pos) % (le - ls);
+                        if self.pos >= le {
+                            self.pos = ls;
+                        }
+                        self.looped = true;
+                    }
+                } else if self.pos >= le {
                     self.pos = ls + (self.pos - ls) % (le - ls);
                     self.looped = true;
                 }
@@ -129,12 +166,115 @@ impl Player {
         }
     }
 
+    /// The sample at the position, from a smooth curve through the four
+    /// frames around it.
+    #[inline]
+    fn read(&self, s: &Sample, mode: u8, plain_end: i64) -> (f32, f32) {
+        let stereo = s.channels == 2;
+        let ip = self.pos as i64;
+        let f = (self.pos - ip as f64) as f32;
+        if ip >= 1 && ip < plain_end && (!self.looped || ip > s.loop_start as i64) {
+            // The four frames are plain neighbours.
+            let at = ip as usize - 1;
+            if stereo {
+                match s.data.get(at * 2..at * 2 + 8) {
+                    Some(w) => (cubic(w[0], w[2], w[4], w[6], f), cubic(w[1], w[3], w[5], w[7], f)),
+                    None => (0.0, 0.0),
+                }
+            } else {
+                let l = match s.data.get(at..at + 4) {
+                    Some(w) => cubic(w[0], w[1], w[2], w[3], f),
+                    None => 0.0,
+                };
+                (l, l)
+            }
+        } else {
+            let lp = self.looped;
+            let l = cubic(
+                s.fetch(ip - 1, 0, mode, lp),
+                s.fetch(ip, 0, mode, lp),
+                s.fetch(ip + 1, 0, mode, lp),
+                s.fetch(ip + 2, 0, mode, lp),
+                f,
+            );
+            let r = if stereo {
+                cubic(
+                    s.fetch(ip - 1, 1, mode, lp),
+                    s.fetch(ip, 1, mode, lp),
+                    s.fetch(ip + 1, 1, mode, lp),
+                    s.fetch(ip + 2, 1, mode, lp),
+                    f,
+                )
+            } else {
+                l
+            };
+            (l, r)
+        }
+    }
+
+    /// The sample at the position when it is being played `width` times
+    /// faster than it was recorded: a weighted average of the frames within
+    /// `width` either side, the nearest counting most. That takes out most of
+    /// what is too high to survive the speeding up, which would otherwise
+    /// fold back down as harsh tones that were never in the sample.
+    #[inline]
+    fn read_wide(&self, s: &Sample, mode: u8, width: f32) -> (f32, f32) {
+        let stereo = s.channels == 2;
+        let lo = (self.pos - width as f64).ceil() as i64;
+        let hi = (self.pos + width as f64).floor() as i64;
+        let inv = 1.0 / width;
+        let limit = if mode == LOOP_OFF { s.frames as i64 } else { s.loop_end as i64 };
+        let floor = if self.looped { s.loop_start as i64 } else { 0 };
+        let (mut l, mut r, mut total) = (0.0f32, 0.0f32, 0.0f32);
+        if lo >= floor && hi < limit {
+            let mut d = (lo as f64 - self.pos) as f32 * inv;
+            let (lo, hi) = (lo as usize, hi as usize);
+            if stereo {
+                if let Some(frames) = s.data.get(lo * 2..hi * 2 + 2) {
+                    for w in frames.chunks_exact(2) {
+                        let weight = 1.0 - d.abs();
+                        l += w[0] * weight;
+                        r += w[1] * weight;
+                        total += weight;
+                        d += inv;
+                    }
+                }
+            } else if let Some(frames) = s.data.get(lo..hi + 1) {
+                for &x in frames {
+                    let weight = 1.0 - d.abs();
+                    l += x * weight;
+                    total += weight;
+                    d += inv;
+                }
+            }
+        } else {
+            let lp = self.looped;
+            for j in lo..=hi {
+                let weight = 1.0 - ((j as f64 - self.pos) as f32 * inv).abs();
+                l += s.fetch(j, 0, mode, lp) * weight;
+                if stereo {
+                    r += s.fetch(j, 1, mode, lp) * weight;
+                }
+                total += weight;
+            }
+        }
+        let norm = if total > 0.0 { 1.0 / total } else { 0.0 };
+        if stereo {
+            (l * norm, r * norm)
+        } else {
+            (l * norm, l * norm)
+        }
+    }
+
     /// Write the next samples into `left` (and `right`, if given; without it
     /// a stereo sample is mixed to one channel).
     pub fn render(&mut self, s: &Sample, left: &mut [f32], mut right: Option<&mut [f32]>) {
         let mode = s.looping();
         let stereo = s.channels == 2;
-        self.wrap(s, mode);
+        // A ping-pong loop already goes both ways: there, playing backwards
+        // only changes where the note starts.
+        let back = self.reverse && mode != LOOP_PINGPONG;
+        self.wrap(s, mode, back);
         // Below this, the four frames around the position are plain neighbours.
         let plain_end = if mode == LOOP_OFF { s.frames as i64 } else { s.loop_end as i64 } - 2;
         for i in 0..left.len() {
@@ -149,50 +289,19 @@ impl Player {
                 }
                 continue;
             }
-            let ip = self.pos as i64;
-            let f = (self.pos - ip as f64) as f32;
-            let (l, r);
-            if ip >= 1 && ip < plain_end && (!self.looped || ip > s.loop_start as i64) {
-                let at = ip as usize - 1;
-                if stereo {
-                    match s.data.get(at * 2..at * 2 + 8) {
-                        Some(w) => {
-                            l = cubic(w[0], w[2], w[4], w[6], f);
-                            r = cubic(w[1], w[3], w[5], w[7], f);
-                        }
-                        None => {
-                            l = 0.0;
-                            r = 0.0;
-                        }
-                    }
+            let (l, r) = if self.antialias && self.inc > 1.0 {
+                let wide = self.read_wide(s, mode, self.inc.min(WIDEST));
+                if self.inc < 2.0 {
+                    // Up to an octave above its own speed, cross over gradually.
+                    let mix = self.inc - 1.0;
+                    let fine = self.read(s, mode, plain_end);
+                    (fine.0 + (wide.0 - fine.0) * mix, fine.1 + (wide.1 - fine.1) * mix)
                 } else {
-                    l = match s.data.get(at..at + 4) {
-                        Some(w) => cubic(w[0], w[1], w[2], w[3], f),
-                        None => 0.0,
-                    };
-                    r = l;
+                    wide
                 }
             } else {
-                let lp = self.looped;
-                l = cubic(
-                    s.fetch(ip - 1, 0, mode, lp),
-                    s.fetch(ip, 0, mode, lp),
-                    s.fetch(ip + 1, 0, mode, lp),
-                    s.fetch(ip + 2, 0, mode, lp),
-                    f,
-                );
-                r = if stereo {
-                    cubic(
-                        s.fetch(ip - 1, 1, mode, lp),
-                        s.fetch(ip, 1, mode, lp),
-                        s.fetch(ip + 1, 1, mode, lp),
-                        s.fetch(ip + 2, 1, mode, lp),
-                        f,
-                    )
-                } else {
-                    l
-                };
-            }
+                self.read(s, mode, plain_end)
+            };
             match right.as_deref_mut() {
                 Some(rb) => {
                     left[i] = l;
@@ -201,8 +310,9 @@ impl Player {
                 None => left[i] = if stereo { 0.5 * (l + r) } else { l },
             }
             self.inc += self.dinc;
-            self.pos += self.inc.max(0.0) as f64;
-            self.wrap(s, mode);
+            let step = self.inc.max(0.0) as f64;
+            self.pos += if back { -step } else { step };
+            self.wrap(s, mode, back);
             if self.ended {
                 self.tail = [l, r];
             }

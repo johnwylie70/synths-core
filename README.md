@@ -15,7 +15,7 @@ The libraries never work out samples. They send the engine commands with a time 
 
 - 64 voices shared between 64 parts. A part is one instrument, with its own patch, volume, pan, pitch bend and effect sends.
 - Each voice has two oscillators (sine, triangle, saw, pulse, or a sample), a sub oscillator and noise (white, pink, and two kinds of 8-bit chip noise), with hard sync, ring modulation and unison. The waves are band-limited, so high notes do not alias.
-- Samples play at any pitch, with forward and ping-pong loops, smoothed between frames.
+- Samples play at any pitch, forwards or backwards, with forward and ping-pong loops, smoothed between frames and when pitched up.
 - A filter per voice (low-pass, high-pass, band-pass, or any of them added together; 12 or 24 dB), three envelopes and two LFOs.
 - Step macros: short looping tables, 50 steps a second or on a tracker's tick, that change the wave, pitch, pulse width, filter and volume. They are what makes an 8-bit sound chip sound the way it does: one-voice arpeggio chords, drums from a burst of noise and a falling tone.
 - Distortion and a bit crusher per part; an echo, a reverb and a chorus to send to; a limiter on the way out, so nothing clips.
