@@ -30,6 +30,7 @@ fn envelope(points: &[u8], count: u8, sustain: u8, loop_start: u8, loop_end: u8,
     }
 }
 
+#[cold]
 pub fn load(data: &[u8]) -> Result<Song, LoadError> {
     if !is_xm(data) {
         return Err(LoadError::NotRecognised);
@@ -43,7 +44,7 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
     r.skip(1 + 20);
     let version = r.u16_le();
     if version < 0x0104 {
-        return Err(LoadError::Invalid(format!("XM version {version:#x} is older than this player reads")));
+        return Err(LoadError::Invalid("the XM file's version is older than this player reads".to_string()));
     }
     let header_start = r.pos();
     let header_size = r.u32_le() as usize;
@@ -56,7 +57,7 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
     let speed = r.u16_le();
     let tempo = r.u16_le();
     if channels == 0 || channels > MAX_CHANNELS {
-        return Err(LoadError::Invalid(format!("{channels} channels")));
+        return Err(LoadError::Invalid(text::join(&[&text::int(channels as i64), " channels"])));
     }
     if pattern_count > MAX_PATTERNS || instrument_count > MAX_INSTRUMENTS {
         return Err(LoadError::Invalid("too many patterns or instruments".to_string()));

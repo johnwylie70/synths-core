@@ -298,3 +298,54 @@ fn chord_names() {
     assert_eq!(Chord::named("Hm"), None);
     assert_eq!(Chord::from_effect(0x47), Chord { order: ChordOrder::Written, ..Chord::new(&[0, 4, 7]) });
 }
+
+#[test]
+fn a_packed_song_unpacks_as_the_same_song() {
+    for rules in [Rules::ProTracker, Rules::FastTracker2] {
+        let mut song = busy_song(rules);
+        song.restart = 1;
+        song.instruments.push(Instrument { name: "lead".to_string(), patch: Some("my-lead".to_string()), ..Default::default() });
+        song.patterns[0].set_chord(0, 0, Some(Chord { rate: ChordRate::PerSecond(60.0), order: ChordOrder::UpDown, ..Chord::new(&[0, -5, 7, 12]) }));
+        song.patterns[0].set_chord(9, 3, Some(Chord::OFF));
+        song.instruments[0].keymap[40] = 1;
+        song.samples[0].pan = None;
+        let packed = binary::save(&song);
+        assert!(binary::is_binary(&packed));
+        assert_eq!(binary::load(&packed).unwrap(), song);
+        assert_eq!(load_module(&packed).unwrap(), song);
+        assert_eq!(binary::save(&binary::load(&packed).unwrap()), packed);
+        // The packed form holds what the JSON and its sample files hold.
+        assert_eq!(binary::load(&binary::save(&load_saved(&native::save(&song)).unwrap())).unwrap(), song);
+    }
+    // The first bytes are fixed: the magic, version 1, and the flags.
+    let packed = binary::save(&busy_song(Rules::ProTracker));
+    assert_eq!(&packed[..8], b"SYSG\x01\x00\x03\x00");
+    assert_eq!(binary::load(b"SYSG\x02\x00\x00\x00\x06\x7d\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00").map(|_| ()), Err(LoadError::Invalid("this packed song is newer than this player reads".to_string())));
+    assert_eq!(binary::load(b"SYSG\x01"), Err(LoadError::TooShort));
+    assert_eq!(binary::load(b"nope"), Err(LoadError::NotRecognised));
+}
+
+#[test]
+fn damaged_packed_songs_never_panic() {
+    let packed = binary::save(&busy_song(Rules::FastTracker2));
+    let mut random = Random(99);
+    let mut loaded = 0;
+    for len in (0..packed.len()).step_by(11) {
+        loaded += binary::load(&packed[..len]).is_ok() as usize;
+    }
+    for _ in 0..3000 {
+        let mut bad = packed.clone();
+        for _ in 0..1 + random.below(6) {
+            let span = if random.below(3) == 0 { bad.len() } else { 400 };
+            let at = random.below(span);
+            bad[at] = [0, 0xFF, 0x7F, random.below(256) as u8][random.below(4)];
+        }
+        if let Ok(song) = binary::load(&bad) {
+            loaded += 1;
+            let mut player = synths_core::replayer::Player::new(&song, RATE);
+            let mut mixer = Mixer::new(&song, RATE);
+            play(&song, &mut player, &mut mixer, 3000);
+        }
+    }
+    assert!(loaded > 1000, "{loaded}");
+}

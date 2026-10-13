@@ -109,6 +109,8 @@ int32_t        synths_song_file(const uint8_t *name, uint32_t name_len, const ui
 int32_t        synths_song_load(SynthsEngine *engine, const uint8_t *data, uint32_t len,
                                 uint32_t first_slot);
 const uint8_t *synths_song_error(void);
+int32_t        synths_song_pack(const uint8_t *data, uint32_t len);
+const uint8_t *synths_song_packed(void);
 void           synths_song_unload(SynthsEngine *engine);
 uint32_t       synths_song_info(const SynthsEngine *engine, uint32_t *out);
 uint32_t       synths_song_position(const SynthsEngine *engine, uint32_t *out);
@@ -290,8 +292,9 @@ These load a tracker song and read where it is; playing it is done with the
 `song` event. See [Songs](#songs) for the whole of it.
 
 **`synths_song_load(engine, data: *const u8, len, first_slot) -> i32`**
-Load a song from the bytes of a file: a MOD, an XM, or one of our own JSON
-songs (`docs/song-format.md`). The engine works out which. The song's
+Load a song from the bytes of a file: a MOD, an XM, or one of our own songs
+(`docs/song-format.md`), packed or, where the build reads it, as JSON. The
+engine works out which. The song's
 channels take parts 32 to 63, one each, and its samples the sample slots
 from `first_slot` on; a song already loaded is unloaded first.
 The song is then ready and stopped. Returns one of:
@@ -319,6 +322,17 @@ JSON gives for it (`name_len` bytes of UTF-8, no zero byte) and `data` the
 WAV file. Call it once for each file, then `synths_song_load`, which uses the
 files and forgets them. Returns 0, or -1 for a null pointer or a name that is
 not UTF-8. MOD and XM files carry their samples and need none.
+
+**`synths_song_pack(data: *const u8, len) -> i32`** Turn a song file of any
+kind this build reads into the packed form of our own format, which every
+build reads: a MOD or an XM for an editor to open, say. Returns the packed
+song's length in bytes, or a negative number as `synths_song_load` does
+(with `synths_song_error` saying why). It takes no engine and changes none.
+Sample files given with `synths_song_file` are used and forgotten.
+
+**`synths_song_packed() -> *const u8`** The bytes of the song
+`synths_song_pack` last packed. The pointer is good until the next
+`synths_song_pack`.
 
 **`synths_song_unload(engine)`** Take the song out: its voices are cut and
 its sample slots emptied. The parts keep the settings the song gave them.
@@ -989,6 +1003,29 @@ nothing to schedule.
 MOD files are played by ProTracker's rules and XM files by FastTracker 2's,
 quirks included. Our own songs say which they want.
 
+### Which kinds of song a build reads
+
+| kind | read by |
+|---|---|
+| MOD, XM | every build |
+| our own format, packed | every build |
+| our own format, as JSON | builds with the `json` feature: every build but the WebAssembly module |
+
+The JSON reader is about 35 KB of a WebAssembly module, and a web page reads
+JSON for nothing, so `scripts/build-wasm.sh` leaves it out
+(`--no-default-features`). A page turns the song's JSON into the packed
+form itself (`docs/song-format.md` gives both, field for field) and loads
+that. Going the other way, `synths_song_pack` turns a MOD or an XM into the
+packed form for the page to unpack into its own JSON, which is how an editor
+opens a tracker module. A native build has the `json` feature unless it is
+turned off, and reads all three.
+
+A MOD or an XM loaded as it is has `sample.antialias` turned off on its
+parts, for the sound those trackers had. One of our own songs, packed or
+JSON, has it on, whatever it was made from; a host that wants the raw sound
+for a song it packed from a module sets parameter 39 on parts 32 up to 0
+after loading.
+
 ### What a song takes over
 
 - **Parts.** Each channel of the song has a part to itself: channel 0 is
@@ -998,10 +1035,8 @@ quirks included. Our own songs say which they want.
   effects over a song. Loading sets those parts up to
   play samples as they are: `volume` 0.5, `pan` 0, the amp envelope full on
   at once and gone at once (`amp.attack`, `amp.decay` and `amp.release` 0,
-  `amp.sustain` 1), `velocity` 0, `filter.type` off, and `pan.law` to suit
-  the song's rules. For a MOD or an XM,
-  `sample.antialias` is turned off too, for the sound those trackers had; for
-  one of our own songs it is turned on. Everything else about the parts is
+  `amp.sustain` 1), `velocity` 0, `filter.type` off, `pan.law` to suit the
+  song's rules, and `sample.antialias` as said above. Everything else about the parts is
   left alone, so their effect sends, drive and so on are the host's to set,
   before or after loading. The channel's one voice has the handle
   `channel + 1`.
@@ -1258,8 +1293,9 @@ bound.
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro and times it. The
-module is about 340 KB (144 KB gzipped); the song loaders and player are
-about half of that.
+module is about 273 KB (110 KB gzipped), of which the song loaders and
+player are about 100 KB. It is built without the `json` feature: see
+[Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
 `_initialize`; the module is ready as soon as it is instantiated.

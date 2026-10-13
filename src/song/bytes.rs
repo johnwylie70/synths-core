@@ -3,6 +3,9 @@
 //! Song files come from anywhere and are often damaged, so every read here
 //! is checked: past the end, a number reads as 0 and a slice comes back
 //! short.
+//!
+//! The readers are kept out of line. A loader calls them hundreds of
+//! times, and loading a song is not where speed matters; size is.
 
 /// A place in a file.
 #[derive(Clone, Copy)]
@@ -21,6 +24,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Moves to a place in the file; past the end is the end.
+    #[inline(never)]
     pub fn seek(&mut self, pos: usize) {
         self.pos = pos.min(self.data.len());
     }
@@ -35,6 +39,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The next `n` bytes, or as many as there are.
+    #[inline(never)]
     pub fn take(&mut self, n: usize) -> &'a [u8] {
         let n = n.min(self.left());
         let s = &self.data[self.pos..self.pos + n];
@@ -42,6 +47,7 @@ impl<'a> Reader<'a> {
         s
     }
 
+    #[inline(never)]
     pub fn u8(&mut self) -> u8 {
         let v = self.data.get(self.pos).copied().unwrap_or(0);
         self.skip(1);
@@ -55,20 +61,24 @@ impl<'a> Reader<'a> {
         a
     }
 
+    #[inline(never)]
     pub fn u16_le(&mut self) -> u16 {
         u16::from_le_bytes(self.array())
     }
 
+    #[inline(never)]
     pub fn u16_be(&mut self) -> u16 {
         u16::from_be_bytes(self.array())
     }
 
+    #[inline(never)]
     pub fn u32_le(&mut self) -> u32 {
         u32::from_le_bytes(self.array())
     }
 
     /// Text of a fixed width: stops at the first zero byte, drops spaces at
     /// the end, and turns anything that is not plain ASCII into a space.
+    #[inline(never)]
     pub fn text(&mut self, n: usize) -> String {
         let s = self.take(n);
         let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());

@@ -67,7 +67,11 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Bytes as lower-case hexadecimal.
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        super::text::push_hex(&mut out, b as u32, 2, false);
+    }
+    out
 }
 
 #[cfg(test)]

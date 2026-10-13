@@ -30,7 +30,9 @@ fi
 
 # Leave out the names of functions: they are a third of the file and the
 # browser does not need them.
-CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --lib --target $TARGET
+# Leave out the JSON song reader too (the "json" feature): a web page reads
+# JSON for nothing, and hands the engine a song in its packed form.
+CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --lib --target $TARGET --no-default-features
 
 mkdir -p target/wasm
 cp target/$TARGET/release/synths_core.wasm target/wasm/synths_core.wasm

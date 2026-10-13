@@ -62,6 +62,7 @@ struct Parser<'a> {
 }
 
 /// Reads a JSON text. The error says what is wrong and at which byte.
+#[cold]
 pub fn parse(text: &str) -> Result<Value, String> {
     let mut p = Parser { text: text.as_bytes(), pos: 0 };
     let value = p.value(0)?;
@@ -73,8 +74,14 @@ pub fn parse(text: &str) -> Result<Value, String> {
 }
 
 impl Parser<'_> {
+    #[inline(never)]
     fn error(&self, what: &str) -> String {
-        format!("{what} (at byte {})", self.pos)
+        super::text::join(&[what, " (at byte ", &super::text::int(self.pos as i64), ")"])
+    }
+
+    /// What has not been read yet.
+    fn rest(&self) -> &[u8] {
+        self.text.get(self.pos..).unwrap_or(&[])
     }
 
     fn peek(&self) -> Option<u8> {
@@ -88,7 +95,7 @@ impl Parser<'_> {
     }
 
     fn word(&mut self, word: &str, value: Value) -> Result<Value, String> {
-        if self.text[self.pos..].starts_with(word.as_bytes()) {
+        if self.rest().starts_with(word.as_bytes()) {
             self.pos += word.len();
             Ok(value)
         } else {
@@ -164,11 +171,9 @@ impl Parser<'_> {
                 while matches!(self.peek(), Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')) {
                     self.pos += 1;
                 }
-                // The bytes are all ASCII, so this cannot fail.
-                let text = core::str::from_utf8(&self.text[start..self.pos]).unwrap_or("");
-                match text.parse::<f64>() {
-                    Ok(n) if n.is_finite() => Ok(Value::Number(n)),
-                    _ => {
+                match super::text::parse_number(self.text.get(start..self.pos).unwrap_or(&[])) {
+                    Some(n) => Ok(Value::Number(n)),
+                    None => {
                         self.pos = start;
                         Err(self.error("not a number"))
                     }
@@ -179,8 +184,8 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, String> {
-        let digits = self.text.get(self.pos..self.pos + 4).and_then(|d| core::str::from_utf8(d).ok());
-        let n = digits.and_then(|d| u32::from_str_radix(d, 16).ok()).ok_or_else(|| self.error("bad \\u escape"))?;
+        let digits = self.text.get(self.pos..self.pos + 4);
+        let n = digits.and_then(super::text::hex_value).ok_or_else(|| self.error("bad \\u escape"))?;
         self.pos += 4;
         Ok(n)
     }
@@ -209,7 +214,7 @@ impl Parser<'_> {
                             let mut code = self.hex4()?;
                             // Characters outside the first 65536 come as two
                             // escapes, a high half and a low half.
-                            if (0xD800..0xDC00).contains(&code) && self.text[self.pos..].starts_with(b"\\u") {
+                            if (0xD800..0xDC00).contains(&code) && self.rest().starts_with(b"\\u") {
                                 self.pos += 2;
                                 let low = self.hex4()?;
                                 if (0xDC00..0xE000).contains(&low) {
@@ -244,7 +249,10 @@ pub fn quote(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                out.push_str("\\u");
+                super::text::push_hex(&mut out, c as u32, 4, false);
+            }
             c => out.push(c),
         }
     }

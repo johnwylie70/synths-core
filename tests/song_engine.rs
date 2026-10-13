@@ -348,7 +348,7 @@ fn the_document_describes_every_song_function_and_the_song_event() {
             assert!(doc.matches(&format!("{name}(")).count() >= 2, "{name} should be in the header and described");
         }
     }
-    assert_eq!(count, 7);
+    assert_eq!(count, 9);
     for text in [
         "SONG_OK 0", "SONG_NULL -1", "SONG_BAD -2", "SONG_MISSING_FILE -3", "SONG_NO_PARTS -4", "SONG_NO_SLOTS -5",
         "| 0 | stop |", "| 1 | play |", "| 2 | pause |", "| 3 | seek |", "| 4 | repeat |", "| 5 | volume |", "| 6 | patch part |",
@@ -495,4 +495,28 @@ fn a_song_leaves_the_hosts_own_parts_alone() {
     assert!((engine.param(32, VOLUME) - 0.3 * CHANNEL_GAIN).abs() < 1e-6);
     unsafe { synths_song_unload(&mut *engine) };
     assert_eq!(engine.active_voices(), 1);
+}
+
+#[test]
+fn any_song_can_be_packed_and_the_packed_song_loaded() {
+    let mut engine = Engine::new(SR);
+    for file in [write_mod(&tune(Rules::ProTracker)), write_xm(&tune(Rules::FastTracker2)), include_bytes!("../examples/songs/first-steps.json").to_vec()] {
+        let length = unsafe { synths_song_pack(file.as_ptr(), file.len() as u32) };
+        assert!(length > 0, "{}", error());
+        let packed = unsafe { core::slice::from_raw_parts(synths_song_packed(), length as usize) }.to_vec();
+        assert!(binary::is_binary(&packed));
+        // Loaded packed, it is the same song and sounds the same.
+        let whole = render(&mut playing(&file), 20000, 512);
+        assert_eq!(load(&mut engine, &packed, 0), SONG_OK, "{}", error());
+        engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        let mut fresh = Engine::new(SR);
+        assert_eq!(load(&mut fresh, &packed, 0), SONG_OK);
+        fresh.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        // (A tracker module is played raw; packed, it is played as one of our own.)
+        let again = render(&mut fresh, 20000, 512);
+        let alike = likeness(&loudness(&whole.0, 441), &loudness(&again.0, 441));
+        assert!(alike > 0.995, "{alike}");
+    }
+    assert_eq!(unsafe { synths_song_pack(b"rubbish".as_ptr(), 7) }, SONG_BAD);
+    assert_eq!(unsafe { synths_song_pack(core::ptr::null(), 7) }, SONG_NULL);
 }

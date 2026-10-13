@@ -39,8 +39,8 @@ pub fn write(data: &SampleData, rate: u32) -> Vec<u8> {
 
 /// The sound in a WAV file, and the rate it says it plays at.
 pub fn read(file: &[u8]) -> Result<(SampleData, u32), LoadError> {
-    let bad = |what: &str| LoadError::Invalid(format!("WAV file: {what}"));
-    if file.len() < 12 || &file[..4] != b"RIFF" || &file[8..12] != b"WAVE" {
+    let bad = |what: &str| LoadError::Invalid(super::text::join(&["WAV file: ", what]));
+    if file.get(..4) != Some(b"RIFF") || file.get(8..12) != Some(b"WAVE") {
         return Err(bad("not a WAV file"));
     }
     let mut r = Reader::new(file);
@@ -70,7 +70,7 @@ pub fn read(file: &[u8]) -> Result<(SampleData, u32), LoadError> {
             if channels == 0 || !matches!((kind, bits), (1, 8 | 16 | 24 | 32) | (3, 32)) {
                 return Err(bad("a kind of sound this player does not read"));
             }
-            let frames = body.chunks_exact(width * channels).take(MAX_SAMPLE_FRAMES).map(|f| &f[..width]);
+            let frames = body.chunks_exact(width * channels).take(MAX_SAMPLE_FRAMES).map(|f| f.get(..width).unwrap_or(f));
             let data = match (kind, bits) {
                 (1, 8) => SampleData::Bits8(frames.map(|f| (f[0] ^ 0x80) as i8).collect()),
                 (1, _) => SampleData::Bits16(frames.map(|f| i16::from_le_bytes([f[width - 2], f[width - 1]])).collect()),

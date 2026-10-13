@@ -40,6 +40,59 @@ fn fail(code: i32, message: String) -> i32 {
     code
 }
 
+/// Reads a song from the bytes of a file of any kind this build knows, with
+/// the sample files a JSON song may name. Also says whether it is a tracker
+/// module, to be played with those trackers' raw sound.
+fn read(data: &[u8], files: &[(String, Vec<u8>)]) -> Result<(song::Song, bool), LoadError> {
+    #[cfg(feature = "json")]
+    if let Some(text) = core::str::from_utf8(data).ok().filter(|text| song::native::is_native(text)) {
+        let file = |name: &str| files.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone());
+        return song::native::load(text, &file).map(|song| (song, false));
+    }
+    let _ = files;
+    let raw = !song::binary::is_binary(data);
+    song::load_module(data).map(|song| (song, raw))
+}
+
+/// The packed song `synths_song_pack` last made.
+static PACKED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// Turn a song file of any kind this build reads (MOD, XM, JSON where the
+/// build has it, or packed already) into the packed form, which every build
+/// reads. Returns the packed song's length in bytes, or a negative number
+/// as `synths_song_load` does. `synths_song_packed` then gives the bytes.
+/// Sample files given with `synths_song_file` are used and forgotten.
+///
+/// # Safety
+/// `data` must point to `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn synths_song_pack(data: *const u8, len: u32) -> i32 {
+    let files = FILES.lock().map(|mut f| core::mem::take(&mut *f)).unwrap_or_default();
+    if data.is_null() {
+        return fail(SONG_NULL, "a null pointer".to_string());
+    }
+    match read(core::slice::from_raw_parts(data, len as usize), &files) {
+        Ok((song, _)) => {
+            let packed = song::binary::save(&song);
+            let length = packed.len().min(i32::MAX as usize) as i32;
+            if let Ok(mut p) = PACKED.lock() {
+                *p = packed;
+            }
+            fail(SONG_OK, String::new());
+            length
+        }
+        Err(e @ LoadError::MissingSample(_)) => fail(SONG_MISSING_FILE, e.to_string()),
+        Err(e) => fail(SONG_BAD, e.to_string()),
+    }
+}
+
+/// The bytes of the song `synths_song_pack` last packed. The pointer is
+/// good until the next `synths_song_pack`.
+#[no_mangle]
+pub extern "C" fn synths_song_packed() -> *const u8 {
+    PACKED.lock().map_or(core::ptr::null(), |p| p.as_ptr())
+}
+
 /// Give a sample file for the next song loaded: `name` is the path the
 /// song's JSON names (not ending in a zero byte), `data` the WAV file. The
 /// files given are used, and then forgotten, by the next `synths_song_load`.
@@ -64,8 +117,8 @@ pub unsafe extern "C" fn synths_song_file(name: *const u8, name_len: u32, data: 
     }
 }
 
-/// Load a song from the bytes of a file: a MOD, an XM, or one of our own
-/// JSON songs. Its channels take parts 32 to 63, one each (their volume,
+/// Load a song from the bytes of a file: a MOD, an XM, one of our own songs
+/// packed, or (where the build has it) one of our own as JSON. Its channels take parts 32 to 63, one each (their volume,
 /// pan, amp envelope and filter are set for playing samples as they are),
 /// and its samples the slots from `first_slot` on; a song already loaded is
 /// unloaded first. The song is ready and stopped: send a `song`
@@ -77,15 +130,8 @@ pub unsafe extern "C" fn synths_song_file(name: *const u8, name_len: u32, data: 
 pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, len: u32, first_slot: u32) -> i32 {
     let files = FILES.lock().map(|mut f| core::mem::take(&mut *f)).unwrap_or_default();
     let (Some(engine), false) = (engine.as_mut(), data.is_null()) else { return fail(SONG_NULL, "a null pointer".to_string()) };
-    let data = core::slice::from_raw_parts(data, len as usize);
-    // Our own songs are text that says what it is; anything else is a module.
-    let own = core::str::from_utf8(data).ok().filter(|text| song::native::is_native(text));
-    let loaded = match own {
-        Some(text) => song::native::load(text, &|name| files.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())),
-        None => song::load_module(data),
-    };
-    let song = match loaded {
-        Ok(song) => song,
+    let (song, raw) = match read(core::slice::from_raw_parts(data, len as usize), &files) {
+        Ok(read) => read,
         Err(e @ LoadError::MissingSample(_)) => return fail(SONG_MISSING_FILE, e.to_string()),
         Err(e) => return fail(SONG_BAD, e.to_string()),
     };
@@ -93,9 +139,9 @@ pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, 
         return fail(SONG_NO_SLOTS, "there is no such slot".to_string());
     }
     let channels = song.channels();
-    match song_player::install(engine, song, song_player::FIRST_PART, first_slot as u16, own.is_none()) {
+    match song_player::install(engine, song, song_player::FIRST_PART, first_slot as u16, raw) {
         Ok(_) => fail(SONG_OK, String::new()),
-        Err(InstallError::Parts) => fail(SONG_NO_PARTS, format!("the song has {channels} channels, and the engine plays at most 32")),
+        Err(InstallError::Parts) => fail(SONG_NO_PARTS, song::text::join(&["the song has ", &song::text::int(channels as i64), " channels, and the engine plays at most 32"])),
         Err(InstallError::Slots) => fail(SONG_NO_SLOTS, "the song has more samples than there are slots left".to_string()),
     }
 }

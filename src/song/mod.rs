@@ -8,11 +8,17 @@
 //!
 //! `docs/song-format.md` describes the JSON form of this model.
 
+pub mod binary;
 pub mod bytes;
+#[cfg(feature = "json")]
 pub mod json;
 pub mod modfile;
+#[cfg(feature = "json")]
 pub mod native;
+#[cfg(feature = "json")]
 pub mod sha256;
+pub mod text;
+#[cfg(feature = "json")]
 pub mod wav;
 pub mod xm;
 
@@ -171,7 +177,7 @@ impl Chord {
     /// on. A name may begin with its root note ("Cm7", "F#maj7"), which is
     /// given back as a number from 0 (C) to 11 (B).
     pub fn named(name: &str) -> Option<(Option<u8>, &'static [i8])> {
-        let name = name.trim();
+        let name = text::trim(name);
         let b = name.as_bytes();
         let letter = match b.first().map(u8::to_ascii_uppercase) {
             Some(b'C') => Some(0i8),
@@ -188,9 +194,9 @@ impl Chord {
         let (root, kind) = match letter {
             None => (None, name),
             Some(l) => match b.get(1) {
-                Some(b'#') => (Some((l + 1).rem_euclid(12) as u8), &name[2..]),
-                Some(b'b') => (Some((l - 1).rem_euclid(12) as u8), &name[2..]),
-                _ => (Some(l as u8), &name[1..]),
+                Some(b'#') => (Some((l + 1).rem_euclid(12) as u8), name.get(2..).unwrap_or("")),
+                Some(b'b') => (Some((l - 1).rem_euclid(12) as u8), name.get(2..).unwrap_or("")),
+                _ => (Some(l as u8), name.get(1..).unwrap_or("")),
             },
         };
         let offsets: &'static [i8] = match kind {
@@ -303,8 +309,43 @@ impl Pattern {
     pub fn tidy(&mut self, channels: usize) {
         let rows = self.rows;
         self.events.retain(|e| e.row < rows && (e.channel as usize) < channels && !e.is_empty());
-        self.events.sort_by_key(|e| (e.row, e.channel));
+        sort_events(&mut self.events);
         self.events.dedup_by_key(|e| (e.row, e.channel));
+    }
+}
+
+/// Puts events in order of row and then channel. A heap sort, written out
+/// here because it is a fraction of the size of the standard library's
+/// sort, and a pattern's events are nearly always in order already.
+fn sort_events(events: &mut [Event]) {
+    let key = |e: &Event| (e.row, e.channel);
+    if events.windows(2).all(|w| key(&w[0]) <= key(&w[1])) {
+        return;
+    }
+    fn sink(events: &mut [Event], mut at: usize, end: usize) {
+        let key = |e: &Event| (e.row, e.channel);
+        loop {
+            let mut child = 2 * at + 1;
+            if child >= end {
+                return;
+            }
+            if child + 1 < end && key(&events[child]) < key(&events[child + 1]) {
+                child += 1;
+            }
+            if key(&events[at]) >= key(&events[child]) {
+                return;
+            }
+            events.swap(at, child);
+            at = child;
+        }
+    }
+    let n = events.len();
+    for at in (0..n / 2).rev() {
+        sink(events, at, n);
+    }
+    for end in (1..n).rev() {
+        events.swap(0, end);
+        sink(events, 0, end);
     }
 }
 
@@ -628,10 +669,12 @@ impl core::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Loads a tracker module, working out which kind it is: XM first (it says
-/// so at the start), then MOD.
+/// Loads a tracker module or a packed song, working out which it is: a
+/// packed song and an XM say so at the start; anything else is tried as a MOD.
 pub fn load_module(data: &[u8]) -> Result<Song, LoadError> {
-    if xm::is_xm(data) {
+    if binary::is_binary(data) {
+        binary::load(data)
+    } else if xm::is_xm(data) {
         xm::load(data)
     } else {
         modfile::load(data)
@@ -645,14 +688,14 @@ pub fn note_name(note: u8) -> String {
     match note {
         NOTE_NONE => String::new(),
         NOTE_OFF => "off".to_string(),
-        n if n <= NOTE_MAX => format!("{}{}", NOTE_NAMES[(n as usize - 1) % 12], (n - 1) / 12),
+        n if n <= NOTE_MAX => text::join(&[NOTE_NAMES[(n as usize - 1) % 12], &text::int(((n - 1) / 12) as i64)]),
         _ => String::new(),
     }
 }
 
 /// The note a name means; "C4" and "c-4" work too.
 pub fn parse_note(name: &str) -> Option<u8> {
-    let s = name.trim();
+    let s = text::trim(name);
     if s.eq_ignore_ascii_case("off") || s == "===" {
         return Some(NOTE_OFF);
     }

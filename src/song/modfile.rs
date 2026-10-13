@@ -87,6 +87,7 @@ fn note_of_period(period: u16) -> u8 {
     (37 + semis).clamp(1, NOTE_MAX as i32) as u8
 }
 
+#[cold]
 pub fn load(data: &[u8]) -> Result<Song, LoadError> {
     let flavour = match data.get(1080..1084).and_then(flavour_of) {
         Some(f) => f,

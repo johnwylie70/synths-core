@@ -14,6 +14,13 @@ publish = false
 # rlib: tests, and other Rust code
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+default = ["json"]
+# Reading and writing songs as JSON (docs/song-format.md). The WebAssembly
+# build leaves it out: a host there reads JSON for nothing, and hands the
+# engine the packed form of the song instead.
+json = []
+
 [dependencies]
 
 [profile.release]

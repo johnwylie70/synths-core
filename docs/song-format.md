@@ -209,6 +209,82 @@ A reader takes any path; it does not check the name against the contents, so a s
 
 To share a song, zip the JSON with its `samples` folder.
 
+## The packed form
+
+The same song as one run of bytes, samples included: what a program hands the engine when the engine was built without its JSON reader (the WebAssembly module is), and what the engine hands back when asked to turn a MOD or an XM into one of our songs (`synths_song_pack`). It says nothing the JSON cannot and leaves nothing out, so the two convert both ways without loss. The code is `src/song/binary.rs`.
+
+All numbers are little-endian. Text is a `u16` length and then that many bytes of UTF-8, with no zero byte.
+
+**Header**
+
+| bytes | |
+|---|---|
+| 4 | The letters `SYSG`. |
+| `u16` | Version: 1. A reader refuses a higher one. |
+| `u16` | Flags: bit 0 set for ProTracker rules (clear for FastTracker 2); bit 1 set for Amiga slides (clear for linear). |
+| `u8`, `u8` | Speed (ticks in a row) and tempo (beats a minute). |
+| `u16` | Restart: the place in the order to go back to. |
+| `u16` | Channels, 1 to 64. |
+| `u16` × 4 | How many orders, patterns, instruments and samples follow. |
+| text | The title. |
+| `u8` × channels | Each channel's panning, 0 to 255. |
+| `u16` × orders | The order list. |
+
+**Then each pattern**
+
+| bytes | |
+|---|---|
+| `u16` | Rows. |
+| `u32` | How many events follow. |
+
+and each of its events, in order of row and then channel:
+
+| bytes | |
+|---|---|
+| `u16` | Row. |
+| `u8` | Channel. |
+| `u8` | 1 if a chord follows this event, else 0. |
+| `u8` × 5 | Note (0 none, 1 to 96 for C-0 to B-7, 97 off), instrument (0 none), the volume column, the effect, the effect's number. |
+
+The volume column is as FastTracker 2 stores it: 0 for nothing, `0x10` to `0x50` for a volume of 0 to 64, and from `0x60` a command in the high four bits (`6` `-`, `7` `+`, `8` `D`, `9` `U`, `A` `S`, `B` `V`, `C` `P`, `D` `L`, `E` `R`, `F` `M`, in the JSON's letters) with its number in the low four. The effect is 0 to 35: the JSON's digit or letter as a base-36 digit.
+
+A chord, when the event has one, is 16 bytes:
+
+| bytes | |
+|---|---|
+| `u8` | How many offsets are used, 0 to 8; 0 is "chord off". |
+| `u8` | Order: 0 up, 1 down, 2 updown, 3 written, 4 random. |
+| `u8` | 0 if the rate is steps a tick (`chordSpeed`), 1 if steps a second (`chordHz`). |
+| `u8` | 0. |
+| `f32` | The rate. |
+| `i8` × 8 | The offsets; those not used are 0. |
+
+**Then each instrument**
+
+| bytes | |
+|---|---|
+| text | Name. |
+| text | The synth patch's name; a length of `0xFFFF` (and no bytes) for an instrument that is not a patch. |
+| `u8` | Its samples: 0 for none; 1, followed by one `u16`, for one sample on every key; 2, followed by 96 `u16`, for a sample for each key from C-0, where `0xFFFF` is a key with none. |
+| envelope × 2 | The volume envelope, then the panning envelope. |
+| `u8` × 4 | Vibrato: wave (0 sine, 1 square, 2 ramp-up, 3 ramp-down), sweep, depth, rate. |
+| `u16` | Fadeout. |
+
+An envelope is `u8` flags (bit 0 on, bit 1 has a sustain point, bit 2 has a loop), `u8` how many points (0 to 12), `u8` the sustain point, `u8` and `u8` the loop's first and last points, and then each point as two `u16`: tick and value.
+
+**Then each sample**
+
+| bytes | |
+|---|---|
+| text | Name. |
+| `u8` | Flags: bit 0 set for 16-bit sound (clear for 8-bit); bits 1 and 2 the loop (0 none, 1 forward, 2 pingpong); bit 3 set if the sample has its own panning. |
+| `u8`, `i8`, `i8`, `u8` | Volume (0 to 64), finetune, transpose, panning. |
+| `u8` × 3 | 0. |
+| `u32` × 3 | Frames of sound, the loop's start, the loop's length. |
+| sound | One signed number for each frame: a byte each, or two for 16-bit. |
+
+A reader takes a file that ends early as far as it goes, treats counts and lengths that the bytes cannot back up as smaller, and never fails on a damaged one: what does not make sense is left out.
+
 ## What is not in version 1
 
 - Stereo samples (the first channel is taken).
