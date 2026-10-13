@@ -24,7 +24,7 @@ pub struct Sample {
 impl Sample {
     /// The loop mode, or off if the loop points make no sense.
     #[inline]
-    fn looping(&self) -> u8 {
+    pub fn looping(&self) -> u8 {
         if self.loop_end > self.loop_start && self.loop_end <= self.frames {
             self.loop_mode
         } else {
@@ -94,6 +94,9 @@ pub struct Player {
     pub reverse: bool,
     /// Smooth the sample when it is played faster than it was recorded.
     pub antialias: bool,
+    /// The position has reached the end of the loop since this was last
+    /// cleared (the voice clears it).
+    pub wrapped: bool,
     /// The loop has been round at least once.
     looped: bool,
     /// The last value played before the end, fading out so the end does not click.
@@ -147,20 +150,24 @@ impl Player {
                             self.pos = ls;
                         }
                         self.looped = true;
+                        self.wrapped = true;
                     }
                 } else if self.pos >= le {
                     self.pos = ls + (self.pos - ls) % (le - ls);
                     self.looped = true;
+                    self.wrapped = true;
                 }
             }
             _ => {
                 let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
                 let span = 2.0 * (le - ls);
                 if self.pos >= le {
+                    self.wrapped |= !self.looped;
                     self.looped = true;
                 }
                 if self.pos >= ls + span {
                     self.pos = ls + (self.pos - ls) % span;
+                    self.wrapped = true;
                 }
             }
         }

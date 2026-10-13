@@ -875,7 +875,7 @@ impl Engine {
 
     /// Play the handle's voices at `rate` frames of their sample a second.
     pub(crate) fn voice_rate(&mut self, part: u16, handle: u32, rate: f32, glide: f32) {
-        if handle == 0 || !(rate.is_finite() && rate > 0.0) {
+        if handle == 0 || !(rate.is_finite() && rate >= 0.0) {
             return;
         }
         self.wake();
@@ -885,12 +885,29 @@ impl Engine {
             if !(v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part)) {
                 continue;
             }
+            // A rate of nothing holds the sample still where it is.
+            v.set_hold(rate == 0.0);
+            if rate == 0.0 {
+                continue;
+            }
             let slot = match self.parts.get(v.part as usize) {
                 Some(p) => v.sample_slot(&p.p),
                 None => continue,
             };
             if let Some(Some(sample)) = self.samples.get(slot) {
                 v.set_pitch(Engine::note_for_rate(sample, rate), glide, sr);
+            }
+        }
+    }
+
+    /// Give the handle's voices a sample to carry on with. See `Voices::queue_sample`.
+    pub(crate) fn voice_queue(&mut self, part: u16, handle: u32, slot: Option<u16>) {
+        if handle == 0 {
+            return;
+        }
+        for v in self.voices.iter_mut() {
+            if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
+                v.queue_sample(slot);
             }
         }
     }

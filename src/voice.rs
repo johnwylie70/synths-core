@@ -16,6 +16,11 @@ use crate::sample::{Player, Sample};
 /// every this many samples and slides smoothly between them.
 pub const CONTROL: usize = 16;
 
+/// No sample is waiting to take over from the one playing.
+const QUEUE_NONE: i32 = -2;
+/// Silence is waiting to take over from the sample playing.
+const QUEUE_SILENCE: i32 = -1;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VoiceState {
     Free,
@@ -68,6 +73,11 @@ pub struct Voice {
     /// A sample slot this voice plays as oscillator 1 whatever the patch
     /// says, or -1 to follow the patch.
     own_sample: i32,
+    /// A sample slot to carry on with when the one playing reaches the end
+    /// of its loop or its end: `QUEUE_NONE`, `QUEUE_SILENCE`, or the slot.
+    queued: i32,
+    /// The sample is held still where it is.
+    hold: bool,
     /// A fade to nothing: the level it has reached, and how far it falls each sample.
     fade: f32,
     fade_step: f32,
@@ -149,6 +159,8 @@ impl Voice {
             volume: 1.0,
             pan: 0.0,
             own_sample: -1,
+            queued: QUEUE_NONE,
+            hold: false,
             fade: 1.0,
             fade_step: 0.0,
             fade_new: false,
@@ -305,6 +317,41 @@ impl Voice {
         }
     }
 
+    /// Carry on with another sample slot (from the start of its loop) when
+    /// the one oscillator 1 is playing next reaches the end of its loop or
+    /// its end; `None` for silence then.
+    pub fn queue_sample(&mut self, slot: Option<u16>) {
+        self.queued = match slot {
+            Some(s) => s as i32,
+            None => QUEUE_SILENCE,
+        };
+    }
+
+    /// Hold the sample still where it is, or let it go on.
+    pub fn set_hold(&mut self, hold: bool) {
+        self.hold = hold;
+    }
+
+    /// The moment a queued sample was waiting for has come.
+    fn swap_sample(&mut self, samples: &[Option<Sample>]) -> bool {
+        let slot = self.queued;
+        self.queued = QUEUE_NONE;
+        match samples.get(slot.max(0) as usize) {
+            Some(Some(s)) if slot >= 0 && s.looping() != 0 => {
+                self.own_sample = slot;
+                self.slots[0] = slot as u16;
+                self.players[0].start(s.loop_start as f64);
+                true
+            }
+            _ => {
+                // Nothing to carry on with: the voice ends.
+                self.players[0].ended = true;
+                self.faded = true;
+                false
+            }
+        }
+    }
+
     /// Fade to nothing over `seconds` and end there.
     pub fn fade_out(&mut self, seconds: f32, sample_rate: f32) {
         self.fade_step = 1.0 / (seconds * sample_rate).max(1.0);
@@ -424,7 +471,8 @@ impl Voice {
                 let pl = &mut self.players[i];
                 pl.reverse = p[OSC1_REVERSE + i] >= 0.5;
                 pl.antialias = p[SAMPLE_ANTIALIAS] >= 0.5;
-                aim(&mut pl.inc, &mut pl.dinc, rate.min(1024.0), pitch_jump, inv_len);
+                let rate = if self.hold { 0.0 } else { rate.min(1024.0) };
+                aim(&mut pl.inc, &mut pl.dinc, rate, pitch_jump || self.hold, inv_len);
             } else {
                 let mut hz = if keytrack { base_hz } else { note_to_hz(60.0 + bend) };
                 if semis != 0.0 {
@@ -545,6 +593,10 @@ impl Voice {
                 }
                 _ => self.players[0].ended = true,
             }
+            if self.queued != QUEUE_NONE && (self.players[0].wrapped || self.players[0].ended) {
+                sounding |= self.swap_sample(samples) && l1 > 0.0;
+            }
+            self.players[0].wrapped = false;
         } else if need1 {
             if self.sync {
                 self.osc[0].wrap_points(sync);

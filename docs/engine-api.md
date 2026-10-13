@@ -1268,17 +1268,19 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 |---|---|
 | `time()`, `sample_rate()` | The frame this call is for, and the engine's rate. |
 | `trigger(part, handle, &Trigger) -> bool` | Start a sample as the part's only voice with that handle: a voice the handle already has there is cut, without a click, on the same frame. `Trigger` gives the sample `slot`, the `position` to start at in frames, the `rate` in frames of the sample per second, and the voice's `volume` (0..4) and `pan` (-1..1). The voice uses the part's patch (envelopes, filter, macro, effects) but plays that sample as oscillator 1 whatever the patch says, so one part can play a different sample on every note. False if the slot is empty, the part does not exist or the rate is not above 0. |
-| `set_rate(part, handle, rate, glide)` | Play the handle's voices at `rate` frames of their sample per second, sliding there over `glide` seconds. A tracker turns its period into this. |
+| `set_rate(part, handle, rate, glide)` | Play the handle's voices at `rate` frames of their sample per second, sliding there over `glide` seconds. A tracker turns its period into this. A rate of 0 holds the sample still where it is, until a rate above 0 lets it go on. |
 | `set_pitch(part, handle, note, glide)`, `set_freq(part, handle, hz, glide)` | The `voice_pitch` and `voice_freq` events. |
 | `set_volume(part, handle, volume)`, `set_pan(part, handle, pan)`, `set_position(part, handle, frames)` | The `voice_volume`, `voice_pan` and `voice_position` events. |
 | `kill(part, handle)` | The `voice_kill` event: cut at once, without a click. |
 | `fade(part, handle, seconds)` | Fade the handle's voices to nothing in a straight line over `seconds`, starting on this frame, and end them there. 0 seconds is a cut. |
+| `queue_sample(part, handle, slot)` | When the sample the handle's voices are playing next reaches the end of its loop, or its end, carry on with the sample in `slot` (`Some(slot)`): from the start of that sample's loop, round and round, at the same pitch. With `None`, or a slot that is empty or has no loop, the voices end there instead. This is how a ProTracker song swaps samples in mid-note. It happens within a control period (16 frames) of the moment, and the same way whatever the block size. A voice whose one-shot has already ended is gone, and there is nothing to queue on: `sounding` says so, and `trigger` starts the new sample at its loop instead. |
+| `arp(part, handle, rate, order, offsets)` | The `arp` event (and `arp_more`, when there are more than four offsets): give the handle's voices up to 8 semitone offsets to step through, `rate` steps a second (0: 50; below 0: one step for each `macro_tick`), in an `order` (0 up, 1 down, 2 up and down, 3 as given, 4 random). No offsets stops it. With handle 0 it is for the part's next `note_on`. |
 | `sounding(part, handle) -> bool` | Whether any voice with that handle is still sounding on the part. |
 | `note_on(part, handle, note, velocity)`, `note_off(part, handle)` | The `note_on` and `note_off` events, for parts that play synth patches. |
 | `set_param(part, id, value, glide)` | The `param` event. |
 | `macro_tick(part)` | The `macro_tick` event: step the macros of parts with `macro.sync` on. A tracker calls it once on each of its ticks. |
-| `event(&Event)` | Carry out any event a host could send, now (its time is ignored). This is how a sequencer sends the events that have no method of their own here (`arp` and `arp_more`, to give a voice it has started an arpeggio), and any the engine gains later. |
+| `event(&Event)` | Carry out any event a host could send, now (its time is ignored). This is how a sequencer sends an event that has no method of its own here, such as one the engine gains later. |
 
 `part` may be `ALL_PARTS` wherever the matching event allows it, and in
-`set_rate`, `fade` and `sounding`. A handle of 0 addresses nothing, except
+`set_rate`, `queue_sample`, `fade` and `sounding`. A handle of 0 addresses nothing, except
 that `trigger` and `note_on` accept it for a voice nothing will steer.

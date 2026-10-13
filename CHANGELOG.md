@@ -27,3 +27,4 @@
 - Mono and legato mode remember the notes held down: letting go of the sounding note goes back to the latest one still held.
 - A hook for a sequencer inside the engine (`Sequencer`, `Engine::set_sequencer`): it is called from within the render on the exact frames it asks for, and plays voices directly: start a sample at a position and rate on a part and handle, set rate, pitch, volume, pan and position, cut, fade, step macros.
 - A voice that has finished is let go at the end of its control period, so a one-shot sample's last moments no longer depend on the size of the blocks rendered.
+- A sequencer can also hold a sample still (a rate of 0), queue the sample a voice carries on with at the end of its loop (ProTracker's sample swap), and give a voice an arpeggio in one call.

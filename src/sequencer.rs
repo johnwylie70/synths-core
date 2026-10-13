@@ -85,7 +85,8 @@ impl<'a> Voices<'a> {
 
     /// Play the handle's voices at `rate` frames of their sample per second,
     /// sliding there over `glide` seconds. (A tracker works this out from
-    /// its period.)
+    /// its period.) A rate of 0 holds the sample still where it is until a
+    /// rate above 0 lets it go on.
     pub fn set_rate(&mut self, part: u16, handle: u32, rate: f32, glide: f32) {
         self.engine.voice_rate(part, handle, rate, glide);
     }
@@ -118,6 +119,28 @@ impl<'a> Voices<'a> {
     /// Cut the handle's voices at once, without a click.
     pub fn kill(&mut self, part: u16, handle: u32) {
         self.engine.apply(&Event::voice_kill(0.0, part, handle));
+    }
+
+    /// When the sample the handle's voices are playing next reaches the end
+    /// of its loop, or its end, carry on with the sample in `slot`: from the
+    /// start of that sample's loop, round and round, at the same pitch. With
+    /// `None`, or a slot that is empty or has no loop, the voices end there
+    /// instead. (This is how a ProTracker song swaps samples in mid-note.)
+    /// It happens within a control period (16 frames) of the moment.
+    pub fn queue_sample(&mut self, part: u16, handle: u32, slot: Option<u16>) {
+        self.engine.voice_queue(part, handle, slot);
+    }
+
+    /// Give the handle's voices an arpeggio, as the `arp` and `arp_more`
+    /// events do: up to 8 semitone `offsets` to step through, `rate` steps a
+    /// second (0: 50; below 0: one step for each `macro_tick`), in an `order`
+    /// (0 up, 1 down, 2 up and down, 3 as given, 4 random). No offsets stops
+    /// it. With handle 0 it is for the part's next `note_on`.
+    pub fn arp(&mut self, part: u16, handle: u32, rate: f32, order: u8, offsets: &[i8]) {
+        self.engine.apply(&Event::arp(0.0, part, handle, rate, order, offsets));
+        if offsets.len() > 4 {
+            self.engine.apply(&Event::arp_more(0.0, part, handle, &offsets[4..]));
+        }
     }
 
     /// Fade the handle's voices to nothing in a straight line over `seconds`

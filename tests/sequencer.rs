@@ -248,6 +248,113 @@ fn a_sequencer_can_send_any_event_such_as_an_arpeggio() {
 }
 
 #[test]
+fn a_long_arpeggio_goes_in_one_call() {
+    let mut e = engine();
+    e.set_sequencer(script(|v, n| {
+        match n {
+            0 => assert!(v.trigger(0, 9, &Trigger { rate: 48000.0, ..hit(3) })),
+            // Six offsets as given, 2400 frames each: the sixth is two octaves up.
+            1 => v.arp(0, 9, 20.0, 3, &[0, 12, 0, 12, 0, 24]),
+            _ => {}
+        }
+        1000
+    }));
+    let x = render(&mut e, 16000, 128).0;
+    let hz = |from: usize| frequency(&x[from + 100..from + 2400], SR);
+    for (step, want) in [480.0, 960.0, 480.0, 960.0, 480.0, 1920.0].into_iter().enumerate() {
+        let got = hz(1000 + step * 2400);
+        assert!((got / want - 1.0).abs() < 0.01, "step {step}: {got} Hz, wanted {want}");
+    }
+}
+
+#[test]
+fn a_rate_of_nothing_holds_the_sample_still() {
+    let mut e = engine();
+    e.set_sequencer(script(|v, n| {
+        match n {
+            0 => assert!(v.trigger(0, 1, &Trigger { rate: SR * 0.125, ..hit(2) })),
+            1 => v.set_rate(0, 1, 0.0, 0.0),
+            2 => v.set_rate(0, 1, SR * 0.125, 0.0),
+            _ => {}
+        }
+        1000
+    }));
+    let x = render(&mut e, 3000, 128).0;
+    assert!((x[999] - 0.124875).abs() < 1e-5, "{}", x[999]);
+    // Held at frame 125 of the ramp, and then on from there.
+    assert!(x[1000..2000].iter().all(|&v| (v - 0.125).abs() < 1e-5));
+    assert!(x[2000..2016].windows(2).all(|w| w[1] >= w[0]));
+    assert!((x[2999] - x[2016] - 983.0 * 0.000125).abs() < 1e-4);
+    assert_eq!(e.active_voices(), 1);
+}
+
+#[test]
+fn a_queued_sample_takes_over_at_the_end_of_the_loop() {
+    // Slot 0 is a steady 1.0 in a loop of 64 frames. Slot 5 starts with a
+    // burst that must never be heard, then loops a steady 0.5.
+    let burst_then_half = |e: &mut Engine| {
+        let mut data = vec![-0.9f32; 10];
+        data.extend([0.5; 32]);
+        e.load_sample(5, &data, 1, SR).unwrap();
+        e.configure_sample(5, 60.0, 1, 10, 42).unwrap();
+    };
+    let mut e = engine();
+    burst_then_half(&mut e);
+    e.set_sequencer(script(|v, n| {
+        match n {
+            0 => assert!(v.trigger(0, 1, &hit(0))),
+            1 => v.queue_sample(0, 1, Some(5)),
+            // Nothing is queued any more: this one means silence.
+            3 => v.queue_sample(0, 1, None),
+            _ => {}
+        }
+        1000
+    }));
+    let x = render(&mut e, 5000, 128).0;
+    // The loop of slot 0 next ends at frame 1024.
+    assert!(x[..1024].iter().all(|&v| (v - 1.0).abs() < 1e-4));
+    assert!(x[1024..1040].iter().all(|&v| v > 0.49));
+    assert!(x[1040..3008].iter().all(|&v| (v - 0.5).abs() < 1e-4), "the queued sample's loop");
+    assert!(x.iter().all(|&v| v >= 0.0), "the start of the queued sample is never played");
+    assert!(x[3050] < 0.5 && x[3600] < 0.01 && x[4500..].iter().all(|&v| v == 0.0), "silence took over: {}", x[3600]);
+    assert_eq!(e.active_voices(), 0);
+    // The same whatever the block size.
+    let mut e2 = engine();
+    burst_then_half(&mut e2);
+    e2.set_sequencer(script(|v, n| {
+        match n {
+            0 => assert!(v.trigger(0, 1, &hit(0))),
+            1 => v.queue_sample(0, 1, Some(5)),
+            3 => v.queue_sample(0, 1, None),
+            _ => {}
+        }
+        1000
+    }));
+    assert_eq!(render(&mut e2, 5000, 7).0, x);
+    // A one-shot carries on into the queued sample when it ends; a slot
+    // with no loop to carry on with ends the voice.
+    let mut e = engine();
+    burst_then_half(&mut e);
+    e.set_sequencer(script(|v, n| {
+        match n {
+            0 => {
+                assert!(v.trigger(0, 1, &hit(2)));
+                v.queue_sample(0, 1, Some(5));
+                assert!(v.trigger(1, 1, &hit(0)));
+                v.queue_sample(1, 1, Some(2));
+            }
+            _ => {}
+        }
+        100_000
+    }));
+    e.set_param(1, VOLUME, 0.0);
+    let x = render(&mut e, 2000, 128).0;
+    assert!((x[499] - 0.499).abs() < 1e-4);
+    assert!(x[520..].iter().all(|&v| (v - 0.5).abs() < 1e-4), "{}", x[600]);
+    assert_eq!(e.active_voices(), 1);
+}
+
+#[test]
 fn a_sequencer_wakes_a_sleeping_engine_and_a_host_has_the_last_word() {
     let mut e = engine();
     e.set_sequencer(script(|v, n| {
@@ -306,7 +413,7 @@ fn a_wild_sequencer_cannot_break_the_output() {
             let handle = rng.next_u32() % 6;
             let wild = [f32::NAN, f32::INFINITY, -1.0, 0.0, 1.0e9, 440.0, 20000.0][(rng.next_u32() % 7) as usize];
             let x = if rng.next_u32() % 3 == 0 { wild } else { rng.unipolar() * 60000.0 };
-            match rng.next_u32() % 12 {
+            match rng.next_u32() % 14 {
                 0..=3 => {
                     let t = Trigger { slot: (rng.next_u32() % 5) as u16, position: x as f64 * 0.01, rate: x, volume: rng.unipolar() * 5.0, pan: rng.bipolar() * 2.0 };
                     v.trigger(part, handle, &t);
@@ -318,6 +425,8 @@ fn a_wild_sequencer_cannot_break_the_output() {
                 8 => v.kill(ALL_PARTS, handle),
                 9 => v.note_on(part, handle, 30.0 + rng.unipolar() * 60.0, 1.0),
                 10 => v.note_off(part, handle),
+                11 => v.queue_sample(part, handle, if x > 100.0 { Some((rng.next_u32() % 7) as u16) } else { None }),
+                12 => v.arp(part, handle, x * 0.01, (rng.next_u32() % 6) as u8, &[0, 3, -7, 12, 127, -128, 5][..(rng.next_u32() % 8) as usize]),
                 _ => v.set_freq(part, handle, x, 0.0),
             }
             // Sometimes 0, which counts as 1.
