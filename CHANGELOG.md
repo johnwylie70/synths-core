@@ -35,3 +35,4 @@
 - A test that counts calls to the allocator while everything renders (there are none), and the benchmark times the live input and each voice effect.
 - A change of a part's volume, or the master's, slides while the live input is sounding, as it does while a voice is.
 - A song with repeat off no longer leaves notes droning when it ends: a sample that loops is faded out over a quarter of a second and a synth patch's note is let go, to finish as its release says. Unloading a song cuts the notes of its synth patches as well as its own parts'.
+- A song's volume (the `song` event's volume command) reaches instruments that are synth patches too, through the volume of their notes, and still changes nothing on parts 0 to 31.

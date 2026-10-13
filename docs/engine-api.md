@@ -1187,7 +1187,7 @@ frame. `a` says what; `x` and `y` are its numbers.
 | 2 | pause | | | Hold every sample where it is, in silence, until `play`. |
 | 3 | seek | order | row | Go to a row of a place in the order. The song's voices are cut. If the song is playing it carries on from there on this frame; if not, that is where `play` will start. Numbers past the end are brought back to the last order and row. |
 | 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and lets the last notes die away: a sample with an end plays to it, a sample that loops is faded out over a quarter of a second, and a synth patch's note is let go, to finish as its patch's release says. |
-| 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's parts, and no others, to half of this, sliding there over 20 milliseconds. |
+| 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's own parts (32 and up), and no others, to half of this, sliding there over 20 milliseconds. A synth patch plays on a part of the host's, which the song does not touch: there the song's notes carry its volume themselves (the voice volume of each is multiplied by it), so the whole song is scaled, samples and patches alike. |
 | 6 | patch part | instrument, from 1 | part | Say which part plays an instrument that is a synth patch. |
 
 In JavaScript, with the `event` function of [A host loop](#a-host-loop):

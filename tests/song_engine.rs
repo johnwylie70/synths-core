@@ -618,3 +618,32 @@ fn stopping_and_unloading_cut_a_synth_patchs_note_too() {
         assert!(l[0].abs() > 0.0 && l[2205..].iter().all(|&x| x.abs() < 1.0e-4), "unload {unload}");
     }
 }
+
+#[test]
+fn the_songs_volume_reaches_synth_patches_and_leaves_the_hosts_parts_alone() {
+    use synths_core::params::*;
+    // Only the patch is heard: the sample's note is taken out of the song.
+    let song = held_notes("").replace(r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1},"#, "");
+    let level = |volume: f32, at: f64| {
+        let mut engine = Engine::new(SR);
+        assert_eq!(load(&mut engine, song.as_bytes(), 0), SONG_OK, "{}", error());
+        engine.set_param(10, OSC1_WAVE, 0.0);
+        let before: Vec<f32> = (0..32).flat_map(|part| PARAMS.iter().map(move |p| (part, p.id as usize))).map(|(part, id)| engine.param(part, id)).collect();
+        engine.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 10.0));
+        engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        engine.push(Event::song(at, SONG_VOLUME, volume, 0.0));
+        let (l, _) = render(&mut engine, 882 * 24, 256);
+        // Nothing of the host's has been touched: not the patch's part, nor any other below 32.
+        let after: Vec<f32> = (0..32).flat_map(|part| PARAMS.iter().map(move |p| (part, p.id as usize))).map(|(part, id)| engine.param(part, id)).collect();
+        assert!(before == after, "the song's volume changed a part of the host's");
+        loudness(&l[882 * 12..], 882 * 12)[0]
+    };
+    let full = level(1.0, 0.0);
+    assert!(full > 0.01);
+    // Set before the note starts, and changed while it sounds.
+    for at in [0.0, 5000.0] {
+        let (half, double) = (level(0.5, at), level(2.0, at));
+        assert!((half / full - 0.5).abs() < 0.02 && (double / full - 2.0).abs() < 0.08, "at {at}: {half} and {double} against {full}");
+    }
+    assert_eq!(level(0.0, 5000.0), 0.0);
+}

@@ -115,6 +115,10 @@ struct Adapter<'a, 'b> {
     first_slot: u16,
     channels: &'a mut [Channel],
     patch_parts: &'a [u16],
+    /// How loud the song is (the `volume` command), for the voices of
+    /// synth patches: their parts are the host's, so it is their own
+    /// volume that carries it.
+    volume: f32,
 }
 
 impl Adapter<'_, '_> {
@@ -172,7 +176,7 @@ impl Channels for Adapter<'_, '_> {
                 if (part as usize) < NUM_PARTS {
                     self.voices.kill(part, handle);
                     self.voices.note_on(part, handle, note_of_rate(start.rate) as f32, 1.0);
-                    self.voices.set_volume(part, handle, start.volume);
+                    self.voices.set_volume(part, handle, start.volume * self.volume);
                     self.voices.set_pan(part, handle, start.pan);
                     now.part = part;
                     now.patch = true;
@@ -195,6 +199,7 @@ impl Channels for Adapter<'_, '_> {
     fn set_volume(&mut self, _frame: u32, channel: usize, volume: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.volume = volume;
+        let volume = if ch.patch { volume * self.volume } else { volume };
         self.voices.ramp_volume(ch.part, channel as u32 + 1, volume, ramp);
     }
 
@@ -286,6 +291,8 @@ pub struct SongPlayer {
     patch_parts: Vec<u16>,
     state: u32,
     repeat: bool,
+    /// How loud the song is, 0..2 (the `volume` command).
+    volume: f32,
     /// The part of a frame the last tick's length left over.
     carry: f64,
 }
@@ -321,6 +328,7 @@ impl SongPlayer {
             channels,
             state: STATE_STOPPED,
             repeat: true,
+            volume: 1.0,
             carry: 0.0,
         };
         s.publish();
@@ -362,6 +370,7 @@ impl SongPlayer {
             first_slot: self.first_slot,
             channels: &mut self.channels,
             patch_parts: &self.patch_parts,
+            volume: self.volume,
         };
         self.player.seek(&self.song, order, row, &mut adapter);
         self.player.set_repeat(self.repeat);
@@ -382,6 +391,7 @@ impl Sequencer for SongPlayer {
             first_slot: self.first_slot,
             channels: &mut self.channels,
             patch_parts: &self.patch_parts,
+            volume: self.volume,
         };
         let length = self.player.tick(&self.song, 0, &mut adapter);
         // Step macros that keep time with the song go by once a tick.
@@ -425,8 +435,9 @@ impl Sequencer for SongPlayer {
             SONG_PLAY => {
                 if self.state == STATE_PAUSED {
                     // Let the held voices go on from where they were.
+                    let song_volume = self.volume;
                     self.each_voice(|part, handle, ch| {
-                        voices.set_volume(part, handle, ch.volume);
+                        voices.set_volume(part, handle, if ch.patch { ch.volume * song_volume } else { ch.volume });
                         if !ch.patch {
                             voices.set_rate(part, handle, ch.rate as f32, 0.0);
                         }
@@ -466,8 +477,20 @@ impl Sequencer for SongPlayer {
             }
             SONG_VOLUME => {
                 let volume = if event.x.is_finite() { event.x.clamp(0.0, 2.0) } else { 1.0 };
+                self.volume = volume;
                 for c in 0..self.channels.len() {
                     voices.set_param(self.first_part + c as u16, VOLUME, volume * CHANNEL_GAIN, 0.02);
+                }
+                // A synth patch plays on a part of the host's, whose volume
+                // is the host's: the song's notes there carry the song's
+                // volume themselves. (While paused they are held at nothing.)
+                if self.state != STATE_PAUSED {
+                    let frames = (0.02 * voices.sample_rate()) as u32;
+                    self.each_voice(|part, handle, ch| {
+                        if ch.patch {
+                            voices.ramp_volume(part, handle, ch.volume * volume, frames);
+                        }
+                    });
                 }
             }
             SONG_PATCH_PART => {
