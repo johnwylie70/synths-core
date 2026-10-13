@@ -94,3 +94,30 @@ pub fn db(ratio: f32) -> f32 {
 pub fn hz(note: f32) -> f32 {
     440.0 * 2.0f32.powf((note - 69.0) / 12.0)
 }
+
+pub mod speech;
+
+/// Render with a live input, in blocks of `block`: `right` is `None` for a mono input.
+pub fn render_io(e: &mut Engine, left: &[f32], right: Option<&[f32]>, block: usize) -> (Vec<f32>, Vec<f32>) {
+    let frames = left.len();
+    let mut l = vec![0.0; frames];
+    let mut r = vec![0.0; frames];
+    let mut at = 0;
+    while at < frames {
+        let n = block.min(frames - at);
+        e.render_io(&left[at..at + n], right.map(|x| &x[at..at + n]), &mut l[at..at + n], &mut r[at..at + n]);
+        at += n;
+    }
+    (l, r)
+}
+
+/// A sine wave: `frames` of it at `hz`, peaking at `level`.
+pub fn sine(hz: f32, level: f32, frames: usize) -> Vec<f32> {
+    (0..frames).map(|i| level * (std::f64::consts::TAU * hz as f64 * i as f64 / SR as f64).sin() as f32).collect()
+}
+
+/// Hiss: the same every time for the same seed, between -`level` and `level`.
+pub fn hiss(seed: u32, level: f32, frames: usize) -> Vec<f32> {
+    let mut rng = synths_core::math::Rng::new(seed);
+    (0..frames).map(|_| level * rng.bipolar()).collect()
+}
