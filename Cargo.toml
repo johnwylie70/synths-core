@@ -1,0 +1,23 @@
+[package]
+name = "synths-core"
+version = "0.0.0"
+edition = "2021"
+description = "The sound engine behind synths.js and synths: synth voices, samples, effects and a tracker song player, as one core that builds for the web (WebAssembly) and for native apps."
+license = "MIT"
+authors = ["John Wylie"]
+repository = "https://github.com/johnwylie70/synths-core"
+publish = false
+
+[lib]
+# cdylib: the WebAssembly module the audio worklet loads
+# staticlib: linked into a native app (iOS)
+# rlib: tests, and other Rust code
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
