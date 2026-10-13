@@ -101,7 +101,7 @@ fn main() {
         (AMP_ATTACK, 0.8), (AMP_DECAY, 1.0), (AMP_SUSTAIN, 0.8), (AMP_RELEASE, 1.8),
         (SEND_CHORUS, 0.5), (SEND_REVERB, 0.6),
     ]);
-    set(&mut e, 0, &[(REVERB_SIZE, 0.85), (MASTER_VOLUME, 0.2)]);
+    set(&mut e, 0, &[(REVERB_SIZE, 0.85), (MASTER_VOLUME, 0.12)]);
     for (i, chord) in [[48.0, 55.0, 60.0, 64.0], [45.0, 52.0, 60.0, 64.0], [41.0, 53.0, 57.0, 60.0], [43.0, 55.0, 59.0, 62.0]].iter().enumerate() {
         for &note in chord {
             let t = i as f32 * 3.0 * SR;
