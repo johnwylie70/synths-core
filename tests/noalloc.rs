@@ -148,3 +148,59 @@ fn rendering_with_everything_on_never_touches_the_allocator() {
         synths_destroy(engine);
     }
 }
+
+#[test]
+fn sample_maps_are_set_and_played_without_touching_the_allocator() {
+    use synths_core::zones::*;
+    use synths_core::zones_abi::*;
+    let mut e = Engine::new(SR);
+    for slot in 0..4 {
+        e.load_sample(slot, &sine(220.0 * (slot + 1) as f32, 0.3, 8000), 1, SR).unwrap();
+    }
+    // Layers, crossfades, round robins, one-shots and loops of their own.
+    let zones: Vec<Zone> = (0..40u16)
+        .map(|i| Zone {
+            group: (i % 3) as u8,
+            flags: if i % 5 == 0 { ZONE_ONE_SHOT | ZONE_FIXED_PITCH } else { 0 },
+            key_fade_lo: 4,
+            key_fade_hi: 4,
+            vel_lo: if i % 2 == 0 { 0 } else { 50 },
+            vel_fade_lo: 10,
+            release: 0.01 * i as f32,
+            loop_mode: (i % 4) as u8,
+            loop_start: 100,
+            loop_end: 7000,
+            ..Zone::new(i % 4, 20 + 2 * i as u8, 40 + 2 * i as u8, 30.0 + 2.0 * i as f32)
+        })
+        .collect();
+    let (mut l, mut r) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+    let mut out = vec![Zone::new(0, 0, 0, 0.0); 64];
+
+    let before = calls();
+    for round in 0..6u16 {
+        // Setting, replacing and clearing maps, as a host does between renders.
+        for part in 0..8usize {
+            e.set_zones(part, &zones[..zones.len() - part - round as usize], (round % 2) as u32).unwrap();
+        }
+        e.set_zones(3, &[], 0).unwrap();
+        unsafe {
+            assert_eq!(synths_zones_set(&mut *e, 9, zones.as_ptr(), 40, 0), 0);
+            assert_eq!(synths_zones_read(&*e, 9, out.as_mut_ptr(), 64), 40);
+            assert_eq!(synths_zones_clear(&mut *e, 9), 0);
+        }
+        let at = e.time() as f64;
+        for i in 0..40u16 {
+            let part = i % 8;
+            assert!(e.push(Event::param(at, part, OSC1_WAVE, 4.0, 0.0)));
+            assert!(e.push(Event::param(at, part, MODE, (i % 3) as f32, 0.0)));
+            assert!(e.push(Event::note_on(at + 97.0 * i as f64, part, 1 + i as u32, 20.0 + 2.5 * i as f32, 0.03 * i as f32)));
+            assert!(e.push(Event::note_off(at + 97.0 * i as f64 + 2000.0, part, 1 + i as u32, 0.0)));
+        }
+        for block in [128usize, 1, 4096, 77, 2048] {
+            e.render(&mut l[..block], &mut r[..block]);
+        }
+        assert!(peak(&l) > 0.0);
+    }
+    let after = calls();
+    assert_eq!(after - before, 0, "the allocator was called {} times", after - before);
+}
