@@ -70,6 +70,12 @@ pub struct Voice {
     /// Set directly on a live voice (the tracker does this).
     pub volume: f32,
     pub pan: f32,
+    /// Where the volume and pan are sliding to, and how far they move each
+    /// sample; a step of 0 means they are there.
+    volume_to: f32,
+    volume_step: f32,
+    pan_to: f32,
+    pan_step: f32,
     /// A sample slot this voice plays as oscillator 1 whatever the patch
     /// says, or -1 to follow the patch.
     own_sample: i32,
@@ -158,6 +164,10 @@ impl Voice {
             unison_gain: 1.0,
             volume: 1.0,
             pan: 0.0,
+            volume_to: 1.0,
+            volume_step: 0.0,
+            pan_to: 0.0,
+            pan_step: 0.0,
             own_sample: -1,
             queued: QUEUE_NONE,
             hold: false,
@@ -365,6 +375,30 @@ impl Voice {
         }
     }
 
+    /// Take the voice's volume to `volume` over `frames` samples, in a
+    /// straight line. With 0 frames, or on a voice that has not sounded yet,
+    /// it is there at once.
+    pub fn slide_volume(&mut self, volume: f32, frames: f32) {
+        self.volume_to = volume;
+        if self.fresh || !(frames >= 1.0) {
+            self.volume = volume;
+            self.volume_step = 0.0;
+        } else {
+            self.volume_step = ((volume - self.volume).abs() / frames).max(f32::MIN_POSITIVE);
+        }
+    }
+
+    /// The same for the voice's pan.
+    pub fn slide_pan(&mut self, pan: f32, frames: f32) {
+        self.pan_to = pan;
+        if self.fresh || !(frames >= 1.0) {
+            self.pan = pan;
+            self.pan_step = 0.0;
+        } else {
+            self.pan_step = ((pan - self.pan).abs() / frames).max(f32::MIN_POSITIVE);
+        }
+    }
+
     /// Work out the slow-moving values for the next `len` samples.
     pub fn control(
         &mut self,
@@ -533,9 +567,26 @@ impl Voice {
             }
         }
 
-        // Loudness and pan.
+        // Loudness and pan. A volume or pan that is sliding has moved on by
+        // the samples since the last control period; the level aimed at is
+        // where it will be at the end of this one.
+        let towards = |now: f32, to: f32, by: f32| if (to - now).abs() <= by { to } else { now + by.copysign(to - now) };
+        if self.volume_step > 0.0 {
+            self.volume = towards(self.volume, self.volume_to, self.volume_step * elapsed as f32);
+            if self.volume == self.volume_to {
+                self.volume_step = 0.0;
+            }
+        }
+        if self.pan_step > 0.0 {
+            self.pan = towards(self.pan, self.pan_to, self.pan_step * elapsed as f32);
+            if self.pan == self.pan_to {
+                self.pan_step = 0.0;
+            }
+        }
+        let volume = towards(self.volume, self.volume_to, self.volume_step * len as f32);
+        let own_pan = towards(self.pan, self.pan_to, self.pan_step * len as f32);
         let sens = p[VELOCITY_SENS];
-        let mut gain = (1.0 - sens + sens * self.velocity) * self.volume * self.unison_gain * step.volume;
+        let mut gain = (1.0 - sens + sens * self.velocity) * volume * self.unison_gain * step.volume;
         if self.fade_step > 0.0 {
             if self.fade_new {
                 self.fade_new = false;
@@ -548,10 +599,14 @@ impl Voice {
         }
         gain *= 1.0 - p[LFO1_AMP] * (0.5 - 0.5 * lfo[0]);
         gain *= 1.0 - p[LFO2_AMP] * (0.5 - 0.5 * lfo[1]);
-        let pan = (p[PAN] + self.pan + self.unison_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
+        let pan = (p[PAN] + own_pan + self.unison_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
         let (gl, gr) = if self.stereo {
             // A stereo sample keeps both sides at full until it is panned.
             ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
+        } else if p[PAN_LAW] >= 0.5 {
+            // FastTracker 2's law: the square root of how far across it is.
+            let right = (pan + 1.0) * 0.5;
+            ((1.0 - right).sqrt(), right.sqrt())
         } else {
             // Equal power: the same loudness wherever the sound sits.
             let a = (pan + 1.0) * 0.125;

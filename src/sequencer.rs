@@ -118,6 +118,20 @@ impl<'a> Voices<'a> {
         self.engine.apply(&Event::voice_pan(0.0, part, handle, pan));
     }
 
+    /// Take the volume of the handle's voices to `volume` (0..4) in a
+    /// straight line over `frames` frames, starting on this frame. With 0
+    /// frames, or for a voice started on this same frame, it is there at
+    /// once. (FastTracker 2 slides a volume over a whole tick.) A later
+    /// `set_volume` or `ramp_volume` takes over from wherever it has got to.
+    pub fn ramp_volume(&mut self, part: u16, handle: u32, volume: f32, frames: u32) {
+        self.engine.voice_ramp(part, handle, false, volume, frames);
+    }
+
+    /// The same for the pan of the handle's voices, -1..1.
+    pub fn ramp_pan(&mut self, part: u16, handle: u32, pan: f32, frames: u32) {
+        self.engine.voice_ramp(part, handle, true, pan, frames);
+    }
+
     /// Jump to a position in the sample, in frames.
     pub fn set_position(&mut self, part: u16, handle: u32, frames: f32) {
         self.engine.apply(&Event::voice_position(0.0, part, handle, frames));

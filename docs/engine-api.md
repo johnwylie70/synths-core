@@ -529,6 +529,7 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 9 | `unison.detune` | float | 0 | 100 | 20 | cents | How far apart the unison voices are tuned. |
 | 10 | `unison.spread` | float | 0 | 1 | 0.5 |  | How far apart the unison voices are panned. |
 | 11 | `velocity` | float | 0 | 1 | 1 |  | How much a note's velocity changes its loudness (0: not at all). |
+| 12 | `pan.law` | choice: 0 equal_power, 1 square_root | 0 | 1 | 0 |  | How pan shares a sound between left and right. square_root is FastTracker 2's, for songs written with it. |
 | 16 | `osc1.wave` | choice: 0 sine, 1 triangle, 2 saw, 3 pulse, 4 sample | 0 | 4 | 1 |  | The shape of the wave, or a loaded sample. |
 | 17 | `osc1.level` | float | 0 | 1 | 1 | gain | How loud oscillator 1 is. |
 | 18 | `osc1.coarse` | float | -48 | 48 | 0 | semitones | Tuning in semitones. |
@@ -641,7 +642,10 @@ number: it is set with `synths_macro_set`.
   with equal power: in the middle it is 0.7071 of its level on each side, and
   at one edge all of it is on that side. A voice whose oscillator 1 is a
   stereo sample keeps both sides at full level in the middle, and pan turns
-  the far side down.
+  the far side down. With `pan.law` 1 a mono voice is placed as FastTracker 2
+  placed it: with `r = (pan + 1) / 2`, the left is the square root of `1 - r`
+  and the right the square root of `r`. The two laws agree in the middle and
+  at the edges and differ a little between.
 - **`velocity`** With `s` this parameter and `v` the note's velocity, the
   note's level is `1 - s + s * v`: a straight line, not a curve.
 - **`mode`, `glide`, `unison.*`** See [How notes get voices](#how-notes-get-voices).
@@ -991,7 +995,8 @@ quirks included. Our own songs say which they want.
   `first_part`, channel 1 the next, and so on. Loading sets those parts up to
   play samples as they are: `volume` 0.5, `pan` 0, the amp envelope full on
   at once and gone at once (`amp.attack`, `amp.decay` and `amp.release` 0,
-  `amp.sustain` 1), `velocity` 0 and `filter.type` off. For a MOD or an XM,
+  `amp.sustain` 1), `velocity` 0, `filter.type` off, and `pan.law` to suit
+  the song's rules. For a MOD or an XM,
   `sample.antialias` is turned off too, for the sound those trackers had; for
   one of our own songs it is turned on. Everything else about the parts is
   left alone, so their effect sends, drive and so on are the host's to set,
@@ -1080,11 +1085,12 @@ runs. An instrument whose patch has not been given a part is silent.
 The notes, timing and effects are the trackers' own, tested against the
 OpenMPT player tests. The sound of the voices is this engine's:
 
-- Volume and pan changes slide over at most 16 frames. FastTracker 2 slid
-  them over a whole tick, so its envelopes and volume slides are a little
-  smoother than they are here.
-- Panning is equal power. FastTracker 2's law differs slightly between the
-  middle and the edges.
+- Volume and pan changes are slid as FastTracker 2 slid them: over a whole
+  tick, or over 5 milliseconds for a sudden one (a new volume, a cut). A
+  ProTracker song's are at once, as on the Amiga, which here means within a
+  control period.
+- A FastTracker 2 song's parts are given that tracker's pan law (`pan.law`
+  1); a ProTracker song's channels are hard left and right.
 - The Amiga's "LED" filter (effect `E0x`) is stood in for by each channel
   part's own filter, as a low-pass at 3300 Hz.
 - ProTracker's invert loop (`EFx`) is not played.
@@ -1466,6 +1472,7 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 | `set_rate(part, handle, rate, glide)` | Play the handle's voices at `rate` frames of their sample per second, sliding there over `glide` seconds. A tracker turns its period into this. A rate of 0 holds the sample still where it is, until a rate above 0 lets it go on. |
 | `set_pitch(part, handle, note, glide)`, `set_freq(part, handle, hz, glide)` | The `voice_pitch` and `voice_freq` events. |
 | `set_volume(part, handle, volume)`, `set_pan(part, handle, pan)`, `set_position(part, handle, frames)` | The `voice_volume`, `voice_pan` and `voice_position` events. |
+| `ramp_volume(part, handle, volume, frames)`, `ramp_pan(part, handle, pan, frames)` | Take the volume (0..4) or pan (-1..1) of the handle's voices there in a straight line over `frames` frames, starting on this frame. With 0 frames it is there at once (within the control period), as `set_volume` and `set_pan` are; and for a voice started on this same frame it is that voice's starting value, with no slide at all. A later set or ramp takes over from wherever it has got to. FastTracker 2 slid every volume and pan over a whole tick, and its song player here does the same. |
 | `kill(part, handle)` | The `voice_kill` event: cut at once, without a click. |
 | `fade(part, handle, seconds)` | Fade the handle's voices to nothing in a straight line over `seconds`, starting on this frame, and end them there. 0 seconds is a cut. |
 | `queue_sample(part, handle, slot)` | When the sample the handle's voices are playing next reaches the end of its loop, or its end, carry on with the sample in `slot` (`Some(slot)`): from the start of that sample's loop, round and round, at the same pitch. With `None`, or a slot that is empty or has no loop, the voices end there instead. This is how a ProTracker song swaps samples in mid-note. It happens within a control period (16 frames) of the moment, and the same way whatever the block size. A voice whose one-shot has already ended is gone, and there is nothing to queue on: `sounding` says so, and `trigger` starts the new sample at its loop instead. |

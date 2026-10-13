@@ -179,16 +179,16 @@ impl Channels for Adapter<'_, '_> {
         }
     }
 
-    fn set_volume(&mut self, _frame: u32, channel: usize, volume: f32, _ramp: u32) {
+    fn set_volume(&mut self, _frame: u32, channel: usize, volume: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.volume = volume;
-        self.voices.set_volume(ch.part, channel as u32 + 1, volume);
+        self.voices.ramp_volume(ch.part, channel as u32 + 1, volume, ramp);
     }
 
-    fn set_pan(&mut self, _frame: u32, channel: usize, pan: f32, _ramp: u32) {
+    fn set_pan(&mut self, _frame: u32, channel: usize, pan: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.pan = pan;
-        self.voices.set_pan(ch.part, channel as u32 + 1, pan);
+        self.voices.ramp_pan(ch.part, channel as u32 + 1, pan, ramp);
     }
 
     fn stop(&mut self, _frame: u32, channel: usize) {
@@ -504,6 +504,8 @@ pub fn install(engine: &mut Engine, song: Song, first_part: u16, first_slot: u16
             (AMP_SUSTAIN, 1.0),
             (AMP_RELEASE, 0.0),
             (VELOCITY_SENS, 0.0),
+            // FastTracker 2's songs were balanced by its own pan law.
+            (PAN_LAW, if song.rules == Rules::FastTracker2 { 1.0 } else { 0.0 }),
             (FILTER_TYPE, 0.0),
             (SAMPLE_ANTIALIAS, if raw { 0.0 } else { 1.0 }),
         ] {

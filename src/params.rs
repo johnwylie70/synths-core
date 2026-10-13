@@ -106,6 +106,7 @@ param_table! {
     9,  UNISON_DETUNE, "unison.detune", Float, 0, 100, 20, "cents", "", "How far apart the unison voices are tuned.";
     10, UNISON_SPREAD, "unison.spread", Float, 0, 1, 0.5, "", "", "How far apart the unison voices are panned.";
     11, VELOCITY_SENS, "velocity", Float, 0, 1, 1, "", "", "How much a note's velocity changes its loudness (0: not at all).";
+    12, PAN_LAW, "pan.law", Choice, 0, 1, 0, "", "equal_power|square_root", "How pan shares a sound between left and right. square_root is FastTracker 2's, for songs written with it.";
 
     // ---- oscillator 1 ----
     16, OSC1_WAVE, "osc1.wave", Choice, 0, 4, 1, "", "sine|triangle|saw|pulse|sample", "The shape of the wave, or a loaded sample.";

@@ -16,9 +16,45 @@ fn test_dir(kind: &str) -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+thread_local! {
+    /// Which player the test running on this thread renders with: the plain
+    /// mixer, or the real engine.
+    static THROUGH_ENGINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The same through the real engine: the song installed as its sequencer on
+/// parts 32 up, with the master set so that the level matches the mixer's.
+fn render_engine(song: &Song, seconds: f64, heard: impl Fn(usize) -> bool) -> (Vec<f32>, Vec<f32>) {
+    use synths_core::event::{SONG_PLAY, SONG_REPEAT};
+    use synths_core::params::{LIMITER, MASTER_VOLUME, VOLUME};
+    use synths_core::song_player::{install, STATE_PLAYING};
+    let mut engine = synths_core::Engine::new(RATE as f32);
+    let shared = install(&mut engine, song.clone(), 32, 0, true).unwrap();
+    engine.set_param(0, MASTER_VOLUME, 0.5);
+    engine.set_param(0, LIMITER, 0.0);
+    for c in (0..song.channels()).filter(|&c| !heard(c)) {
+        engine.set_param(32 + c as u16, VOLUME, 0.0);
+    }
+    engine.push(synths_core::Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
+    engine.push(synths_core::Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut block = ([0.0f32; 1024], [0.0f32; 1024]);
+    loop {
+        engine.render(&mut block.0, &mut block.1);
+        left.extend_from_slice(&block.0);
+        right.extend_from_slice(&block.1);
+        if shared.position()[0] != STATE_PLAYING || left.len() as f64 >= seconds * RATE {
+            return (left, right);
+        }
+    }
+}
+
 /// Renders a song until it ends, or for at most `seconds`, hearing only
 /// the channels `heard` picks.
 fn render_some(song: &Song, seconds: f64, heard: impl Fn(usize) -> bool) -> (Vec<f32>, Vec<f32>) {
+    if THROUGH_ENGINE.get() {
+        return render_engine(song, seconds, heard);
+    }
     let mut player = Player::new(song, RATE);
     player.set_repeat(false);
     let mut mixer = Mixer::new(song, RATE);
@@ -455,8 +491,10 @@ fn judge(case: &Case, song: &Song) -> Result<String, String> {
 
 /// Plays every case of one kind and checks it. Returns (passed, failing as
 /// expected, not machine-checkable).
-fn run(kind: &str, cases: &[Case]) -> Option<(usize, usize, usize)> {
+fn run(kind: &str, cases: &[Case], engine: bool) -> Option<(usize, usize, usize)> {
     let dir = test_dir(kind)?;
+    THROUGH_ENGINE.set(engine);
+    let through = if engine { " through the engine" } else { "" };
     let (mut passed, mut failing, mut by_ear) = (0, 0, 0);
     let mut surprises = Vec::new();
     for case in cases {
@@ -478,30 +516,67 @@ fn run(kind: &str, cases: &[Case]) -> Option<(usize, usize, usize)> {
                     surprises.push(format!("{} is listed as failing but now passes", case.name));
                 }
             }
+            // What is checked by the replayer's instructions has no sound to
+            // judge, so it says nothing about the engine.
+            Starts(_) | FirstStarts(_) | Says(..) | Offsets(_) | InTune(..) if engine => {
+                by_ear += 1;
+                println!("{:28} not about sound", case.name);
+            }
             _ => match judge(case, &song) {
                 Ok(note) => {
                     passed += 1;
                     println!("{:28} pass   {note}", case.name);
                 }
+                Err(why) if engine => {
+                    failing += 1;
+                    println!("{:28} DIFFERS{through}: {why}", case.name);
+                    if !ENGINE_DIFFERS.contains(&case.name) && !matches!(case.expect, Fails(_)) {
+                        surprises.push(format!("{}: {why}", case.name));
+                    }
+                }
                 Err(why) => surprises.push(format!("{}: {why}", case.name)),
             },
         }
     }
-    println!("{kind}: {passed} pass, {failing} fail, {by_ear} not machine-checkable, of {}", cases.len());
-    assert!(surprises.is_empty(), "{kind} tests:\n{}", surprises.join("\n"));
+    println!("{kind}{through}: {passed} pass, {failing} fail, {by_ear} not machine-checkable, of {}", cases.len());
+    assert!(surprises.is_empty(), "{kind} tests{through}:\n{}", surprises.join("\n"));
     Some((passed, failing, by_ear))
+}
+
+/// The cases whose sound through the engine is known to differ from the
+/// recording by more than the comparison allows.
+const ENGINE_DIFFERS: &[&str] = &[
+    // Periods wrapped round to rates far above what the output can carry:
+    // what is heard is all aliasing, and the engine's interpolation aliases
+    // differently from FT2's.
+    "FreqWraparound.xm",
+    // 4 to 5% against the 3% allowed, at the moments a sample is swapped at
+    // the end of its loop: the engine makes the swap within 16 frames of the
+    // moment and takes the click off it.
+    "PTSwapEmpty.mod",
+    "PortaSmpChange.mod",
+];
+
+#[test]
+fn mod_cases_through_the_engine() {
+    run("mod", MOD_CASES, true);
+}
+
+#[test]
+fn xm_cases_through_the_engine() {
+    run("xm", XM_CASES, true);
 }
 
 #[test]
 fn mod_cases() {
-    if run("mod", MOD_CASES).is_none() {
+    if run("mod", MOD_CASES, false).is_none() {
         println!("the OpenMPT MOD tests are not here; run scripts/fetch-openmpt-tests.sh");
     }
 }
 
 #[test]
 fn xm_cases() {
-    if run("xm", XM_CASES).is_none() {
+    if run("xm", XM_CASES, false).is_none() {
         println!("the OpenMPT XM tests are not here; run scripts/fetch-openmpt-tests.sh");
     }
 }

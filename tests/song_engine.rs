@@ -356,3 +356,113 @@ fn the_document_describes_every_song_function_and_the_song_event() {
     assert_eq!((STATE_NONE, STATE_STOPPED, STATE_PLAYING, STATE_PAUSED, POSITION_SIZE, INFO_SIZE), (0, 1, 2, 3, 10, 8));
     assert_eq!(CHANNEL_GAIN, 0.5);
 }
+
+/// A sequencer for trying one thing: it runs a closure on each call.
+struct Script<F: FnMut(u32, &mut synths_core::sequencer::Voices<'_>) -> u32 + Send>(u32, F);
+
+impl<F: FnMut(u32, &mut synths_core::sequencer::Voices<'_>) -> u32 + Send> synths_core::sequencer::Sequencer for Script<F> {
+    fn advance(&mut self, voices: &mut synths_core::sequencer::Voices<'_>) -> u32 {
+        self.0 += 1;
+        (self.1)(self.0 - 1, voices)
+    }
+}
+
+/// An engine whose part 0 plays a steady level of 1 from slot 0, with
+/// nothing shaping it, and a master volume of 1.
+fn steady_engine() -> Box<Engine> {
+    use synths_core::params::*;
+    let mut engine = Engine::new(SR);
+    engine.load_sample(0, &[1.0; 64], 1, SR).unwrap();
+    engine.configure_sample(0, 60.0, 1, 0, 64).unwrap();
+    for (id, value) in [(AMP_ATTACK, 0.0), (AMP_DECAY, 0.0), (AMP_SUSTAIN, 1.0), (AMP_RELEASE, 0.0), (SAMPLE_ANTIALIAS, 0.0), (FILTER_TYPE, 0.0)] {
+        engine.set_param(0, id, value);
+    }
+    engine.set_param(0, MASTER_VOLUME, 1.0);
+    engine.set_param(0, LIMITER, 0.0);
+    engine
+}
+
+fn hit(volume: f32, pan: f32) -> synths_core::sequencer::Trigger {
+    synths_core::sequencer::Trigger { slot: 0, position: 0.0, rate: SR, volume, pan }
+}
+
+#[test]
+fn a_voices_volume_and_pan_can_be_slid_over_a_set_time() {
+    // Start hard left at full volume; at frame 1000 slide the volume to
+    // nothing over 4000 frames; at 6000 jump it back; at 7000 slide the pan
+    // to hard right over 2000.
+    let mut engine = steady_engine();
+    engine.set_sequencer(Some(Box::new(Script(0, |call, v: &mut synths_core::sequencer::Voices<'_>| {
+        match call {
+            0 => {
+                v.trigger(0, 1, &hit(1.0, -1.0));
+                1000
+            }
+            1 => {
+                v.ramp_volume(0, 1, 0.0, 4000);
+                5000
+            }
+            2 => {
+                v.ramp_volume(0, 1, 1.0, 0);
+                1000
+            }
+            3 => {
+                v.ramp_pan(0, 1, 1.0, 2000);
+                100_000
+            }
+            _ => 100_000,
+        }
+    }))));
+    let (l, r) = render(&mut engine, 10000, 256);
+    let near = |x: f32, want: f32| (x - want).abs() < 0.02;
+    assert!(near(l[500], 1.0) && near(r[500], 0.0));
+    // A straight line down: a quarter, a half and three quarters of the way.
+    assert!(near(l[2000], 0.75) && near(l[3000], 0.5) && near(l[4000], 0.25), "{} {} {}", l[2000], l[3000], l[4000]);
+    assert!(near(l[5100], 0.0));
+    assert!(near(l[6020], 1.0), "0 frames is at once: {}", l[6020]);
+    // The pan crosses the middle half way, where each side is 0.7071.
+    assert!(near(l[8000], 0.7071) && near(r[8000], 0.7071), "{} {}", l[8000], r[8000]);
+    assert!(near(l[9100], 0.0) && near(r[9100], 1.0));
+    assert!(l.windows(2).all(|w| (w[1] - w[0]).abs() < 0.08), "no steps but the jump back");
+}
+
+#[test]
+fn a_ramp_on_the_frame_a_voice_starts_is_its_starting_value() {
+    let mut engine = steady_engine();
+    engine.set_sequencer(Some(Box::new(Script(0, |call, v: &mut synths_core::sequencer::Voices<'_>| {
+        if call == 0 {
+            v.trigger(0, 1, &hit(1.0, -1.0));
+            v.ramp_volume(0, 1, 0.25, 4000);
+            v.ramp_pan(0, 1, 1.0, 4000);
+        }
+        100_000
+    }))));
+    let (l, r) = render(&mut engine, 200, 64);
+    assert!(l[..200].iter().all(|x| x.abs() < 1e-6));
+    assert!(r[..200].iter().all(|x| (x - 0.25).abs() < 1e-3), "{}", r[0]);
+}
+
+#[test]
+fn a_part_can_pan_as_fasttracker_did() {
+    use synths_core::params::PAN_LAW;
+    let sides = |law: f32, pan: f32| {
+        let mut engine = steady_engine();
+        engine.set_param(0, PAN_LAW, law);
+        engine.set_sequencer(Some(Box::new(Script(0, move |call, v: &mut synths_core::sequencer::Voices<'_>| {
+            if call == 0 {
+                v.trigger(0, 1, &hit(1.0, pan));
+            }
+            100_000
+        }))));
+        let (l, r) = render(&mut engine, 100, 100);
+        (l[50], r[50])
+    };
+    let near = |got: (f32, f32), want: (f32, f32)| (got.0 - want.0).abs() < 0.002 && (got.1 - want.1).abs() < 0.002;
+    // Square root: three quarters of the way right is root 0.25 and root 0.75.
+    assert!(near(sides(1.0, 0.5), (0.5, 0.8660)), "{:?}", sides(1.0, 0.5));
+    assert!(near(sides(1.0, 0.0), (0.7071, 0.7071)));
+    assert!(near(sides(1.0, -1.0), (1.0, 0.0)));
+    // Equal power, as it always was: the cosine and sine of 67.5 degrees.
+    assert!(near(sides(0.0, 0.5), (0.3827, 0.9239)), "{:?}", sides(0.0, 0.5));
+    assert!(near(sides(0.0, 0.0), (0.7071, 0.7071)));
+}

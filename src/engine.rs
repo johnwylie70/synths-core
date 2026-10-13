@@ -777,8 +777,8 @@ impl Engine {
                                 v.set_pitch(hz_to_note(e.x).clamp(-24.0, 160.0), e.y, sr);
                             }
                         }
-                        EV_VOICE_VOLUME => v.volume = e.x.clamp(0.0, 4.0),
-                        EV_VOICE_PAN => v.pan = e.x.clamp(-1.0, 1.0),
+                        EV_VOICE_VOLUME => v.slide_volume(e.x.clamp(0.0, 4.0), 0.0),
+                        EV_VOICE_PAN => v.slide_pan(e.x.clamp(-1.0, 1.0), 0.0),
                         EV_VOICE_POSITION => {
                             if let Some(p) = self.parts.get_mut(v.part as usize) {
                                 p.declick[0] += v.last[0];
@@ -883,8 +883,8 @@ impl Engine {
         let v = &mut self.voices[slot];
         v.start(&start, &self.parts[pi].p, &self.samples, self.sample_rate);
         v.use_sample(t.slot, t.position);
-        v.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 4.0) } else { 1.0 };
-        v.pan = if t.pan.is_finite() { t.pan.clamp(-1.0, 1.0) } else { 0.0 };
+        v.slide_volume(if t.volume.is_finite() { t.volume.clamp(0.0, 4.0) } else { 1.0 }, 0.0);
+        v.slide_pan(if t.pan.is_finite() { t.pan.clamp(-1.0, 1.0) } else { 0.0 }, 0.0);
         true
     }
 
@@ -923,6 +923,24 @@ impl Engine {
         for v in self.voices.iter_mut() {
             if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
                 v.queue_sample(slot);
+            }
+        }
+    }
+
+    /// Slide the volume (or, with `pan`, the pan) of the handle's voices to
+    /// `value` over `frames` samples. See `Voices::ramp_volume`.
+    pub(crate) fn voice_ramp(&mut self, part: u16, handle: u32, pan: bool, value: f32, frames: u32) {
+        if handle == 0 || !value.is_finite() {
+            return;
+        }
+        self.wake();
+        for v in self.voices.iter_mut() {
+            if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
+                if pan {
+                    v.slide_pan(value.clamp(-1.0, 1.0), frames as f32);
+                } else {
+                    v.slide_volume(value.clamp(0.0, 4.0), frames as f32);
+                }
             }
         }
     }
