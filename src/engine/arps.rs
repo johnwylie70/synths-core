@@ -214,6 +214,7 @@ impl Engine {
             }
             v.arp.owner = a.id;
             v.arp.shift = shift;
+            v.arp.shift_key = v.key;
         }
     }
 

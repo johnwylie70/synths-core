@@ -244,13 +244,16 @@ pub struct Arp {
     pub offset: f32,
     /// The arpeggiator that started this voice, or 0 for none.
     pub owner: u16,
-    /// How far above its arpeggiator's note the voice was struck, in semitones.
+    /// How far above its arpeggiator's note the voice was struck, in
+    /// semitones, and the note it was struck at: a voice that has since
+    /// been given another note (mono mode does that) has left it behind.
     pub shift: f32,
+    pub shift_key: f32,
 }
 
 impl Default for Arp {
     fn default() -> Arp {
-        Arp { spec: ArpSpec::NONE, seq: [0; 2 * MAX_OFFSETS], len: 0, pos: 0, period: 0.0, due: 0.0, offset: 0.0, owner: 0, shift: 0.0 }
+        Arp { spec: ArpSpec::NONE, seq: [0; 2 * MAX_OFFSETS], len: 0, pos: 0, period: 0.0, due: 0.0, offset: 0.0, owner: 0, shift: 0.0, shift_key: 0.0 }
     }
 }
 
@@ -319,6 +322,16 @@ impl Arp {
     #[inline]
     pub fn active(&self) -> bool {
         self.len > 0
+    }
+
+    /// How far from its arpeggiator's note a voice started with `key` is to stay.
+    #[inline]
+    pub fn shift_from(&self, key: f32) -> f32 {
+        if key == self.shift_key {
+            self.shift
+        } else {
+            0.0
+        }
     }
 
     /// Hand the arpeggio over to an arpeggiator: this one stops where it

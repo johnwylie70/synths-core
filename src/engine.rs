@@ -891,10 +891,10 @@ impl Engine {
                         continue;
                     }
                     match e.kind {
-                        EV_VOICE_PITCH => v.set_pitch((e.x + v.arp.shift).clamp(-24.0, 160.0), e.y, sr),
+                        EV_VOICE_PITCH => v.set_pitch((e.x + v.arp.shift_from(v.key)).clamp(-24.0, 160.0), e.y, sr),
                         EV_VOICE_FREQ => {
                             if e.x > 0.0 {
-                                v.set_pitch((hz_to_note(e.x) + v.arp.shift).clamp(-24.0, 160.0), e.y, sr);
+                                v.set_pitch((hz_to_note(e.x) + v.arp.shift_from(v.key)).clamp(-24.0, 160.0), e.y, sr);
                             }
                         }
                         EV_VOICE_VOLUME => v.slide_volume(e.x.clamp(0.0, 4.0), 0.0),
@@ -1044,7 +1044,7 @@ impl Engine {
                 None => continue,
             };
             if let Some(Some(sample)) = self.samples.get(slot) {
-                v.set_pitch((Engine::note_for_rate(sample, rate) + v.arp.shift).clamp(-24.0, 160.0), glide, sr);
+                v.set_pitch((Engine::note_for_rate(sample, rate) + v.arp.shift_from(v.key)).clamp(-24.0, 160.0), glide, sr);
             }
         }
     }
