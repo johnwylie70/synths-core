@@ -95,6 +95,8 @@ pub fn hz(note: f32) -> f32 {
     440.0 * 2.0f32.powf((note - 69.0) / 12.0)
 }
 
+pub mod measure;
+pub mod old_reverb;
 pub mod speech;
 
 /// Render with a live input, in blocks of `block`: `right` is `None` for a mono input.

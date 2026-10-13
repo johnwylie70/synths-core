@@ -27,6 +27,7 @@ pub mod params;
 pub mod presets;
 #[cfg(feature = "songs")]
 pub mod replayer;
+pub mod reverb;
 pub mod sample;
 pub mod sequencer;
 #[cfg(feature = "songs")]

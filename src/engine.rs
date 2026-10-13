@@ -5,11 +5,12 @@
 
 use crate::arp::ArpSpec;
 use crate::event::*;
-use crate::fx::{Chorus, Crusher, Delay, Limiter, Reverb};
+use crate::fx::{Chorus, Crusher, Delay, Limiter};
 use crate::lfo::FreeLfo;
 use crate::macros::{Macro, Step, MACRO_SMOOTH, MAX_STEPS, STEP_SIZE};
 use crate::math::{hz_to_note, Rng};
 use crate::params::{self, *};
+use crate::reverb::{self, Reverb};
 use crate::sample::{Sample, LOOP_PINGPONG};
 use crate::sequencer::{Sequencer, Trigger, Voices};
 use crate::taps::{Taps, NOTES_SIZE};
@@ -1302,7 +1303,15 @@ impl Engine {
                 self.delay_tone.1.clamp(0.0, 1.0),
                 gp(DELAY_PINGPONG) >= 0.5,
             );
-            self.reverb.process(&sends[2][..n], &sends[3][..n], ml, mr, gp(REVERB_SIZE), gp(REVERB_DAMP));
+            let room = reverb::Settings {
+                kind: gp(REVERB_TYPE) as usize,
+                size: gp(REVERB_SIZE),
+                damping: gp(REVERB_DAMP),
+                decay: gp(REVERB_DECAY),
+                predelay: gp(REVERB_PREDELAY),
+                low_cut: gp(REVERB_LOW_CUT),
+            };
+            self.reverb.process(&sends[2][..n], &sends[3][..n], ml, mr, &room);
             self.chorus.process(&sends[4][..n], &sends[5][..n], ml, mr, gp(CHORUS_RATE), gp(CHORUS_DEPTH));
         }
 

@@ -231,8 +231,10 @@ param_table! {
     203, DELAY_FEEDBACK, "delay.feedback", Float, 0, 0.95, 0.4, "", "", "How much of each echo is fed back to make the next.";
     204, DELAY_TONE, "delay.tone", Float, 200, 20000, 6000, "hz", "", "Each echo is duller than the last; this is how much treble survives.";
     205, DELAY_PINGPONG, "delay.pingpong", Bool, 0, 1, 0, "", "", "On: the echoes bounce between left and right.";
-    208, REVERB_SIZE, "reverb.size", Float, 0, 1, 0.6, "", "", "How big the room is (how long the reverb lasts).";
-    209, REVERB_DAMP, "reverb.damping", Float, 0, 1, 0.4, "", "", "How quickly the treble of the reverb dies away.";
+    208, REVERB_SIZE, "reverb.size", Float, 0, 1, 0.5, "", "", "How big the room is: a bigger one has its echoes further apart and, unless reverb.decay says otherwise, a longer tail (three times shorter at 0, three times longer at 1).";
+    209, REVERB_DAMP, "reverb.damping", Float, 0, 1, 0.4, "", "", "How quickly the treble of the reverb dies away (0: as slowly as the rest, a bright tail; 1: at once, a dull one).";
+    210, REVERB_TYPE, "reverb.type", Choice, 0, 4, 0, "", "room|hall|plate|cathedral|spring", "What kind of space it is. room: a small room, a short soft tail. hall: a concert hall, big and smooth. plate: a sheet of metal, bright and thick at once. cathedral: enormous, and it goes on and on. spring: the twangy spring of a guitar amp, which boings.";
+    211, REVERB_DECAY, "reverb.decay", Float, 0, 30, 0, "seconds", "", "How long the tail takes to die away (to fall by 60 dB). 0 leaves it to the type and reverb.size.";
     212, CHORUS_RATE, "chorus.rate", Float, 0.05, 10, 0.8, "hz", "", "How fast the chorus wobbles.";
     213, CHORUS_DEPTH, "chorus.depth", Float, 0, 1, 0.5, "", "", "How far the chorus wobbles.";
     216, VOICES, "voices", Int, 1, 64, 64, "voices", "", "The most voices that sound at once; a new note past this takes over the oldest.";
@@ -243,6 +245,10 @@ param_table! {
     219, INPUT_MONITOR, "input.monitor", Bool, 0, 1, 1, "", "", "On: the live input is heard. Off: it can still be recorded, in silence.";
     220, INPUT_GATE, "input.gate", Float, -100, 0, -100, "db", "", "Noise gate: the input is let through only while it is louder than this, which keeps a microphone's hiss out (-100 is off; try -45).";
     221, INPUT_GATE_RELEASE, "input.gate_release", Float, 0.005, 2, 0.15, "seconds", "", "Noise gate: how long it takes to close once the input has gone quiet.";
+
+    // ---- more of the reverb ----
+    222, REVERB_PREDELAY, "reverb.predelay", Float, 0, 0.2, 0, "seconds", "", "A gap before the reverb starts, on top of the type's own: it keeps a sound clear of its own reverb.";
+    223, REVERB_LOW_CUT, "reverb.low_cut", Float, 20, 1000, 120, "hz", "", "Bass below this is kept out of the reverb, so that it does not turn to mud.";
 }
 
 // Offsets inside a group of parameters that repeats.

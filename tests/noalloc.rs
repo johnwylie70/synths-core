@@ -53,12 +53,12 @@ fn the_counter_counts() {
 
 #[test]
 fn an_engine_is_about_as_big_as_the_document_says() {
-    // "About 2 MB at 48 kHz": the echo's two seconds are half of it.
+    // "About 2.6 MB at 48 kHz": the echo's two seconds and the reverb are more than half of it.
     let before = BYTES.with(|c| c.get());
     let e = Engine::new(SR);
     let bytes = BYTES.with(|c| c.get()) - before;
     println!("an engine at 48 kHz asks for {bytes} bytes");
-    assert!(bytes > 1_500_000 && bytes < 2_500_000, "{bytes}");
+    assert!(bytes > 2_400_000 && bytes < 2_800_000, "{bytes}");
     drop(e);
 }
 
@@ -88,6 +88,12 @@ fn rendering_with_everything_on_never_touches_the_allocator() {
             push(Event::record_stop(at + 14000.0 + 15000.0 * i as f64));
         }
         push(Event::param(at, ALL_PARTS, SEND_REVERB, 0.3, 0.0));
+        // The reverb changes type, size and pre-delay while it rings, and comes back from idle.
+        for (i, kind) in [1.0, 4.0, 3.0, 2.0, 0.0].into_iter().enumerate() {
+            push(Event::param(at + 3000.0 + 9000.0 * i as f64, 0, REVERB_TYPE, kind, 0.0));
+            push(Event::param(at + 5000.0 + 9000.0 * i as f64, 0, REVERB_SIZE, 0.2 * i as f32, 0.0));
+            push(Event::param(at + 7000.0 + 9000.0 * i as f64, 0, REVERB_PREDELAY, 0.04 * i as f32, 0.0));
+        }
         push(Event::param(at, ALL_PARTS, SEND_DELAY, 0.3, 0.0));
         push(Event::param(at, 31, DRIVE, 0.4, 0.0));
         push(Event::param(at, 31, FILTER_TYPE, 3.0, 0.0));

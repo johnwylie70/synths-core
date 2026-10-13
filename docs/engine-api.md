@@ -171,8 +171,9 @@ while sound is playing. It needs no engine.
 **`synths_create(sample_rate: f32) -> *mut Engine`** Make an engine. The
 sample rate is brought into 8000..192000. Returns null if the rate is not a
 number or not above 0. This allocates everything the engine will ever need,
-apart from samples: about 2.3 MB at 48 kHz, and more at higher rates (half
-of it is the echo's two seconds of memory). A new engine holds every
+apart from samples: about 2.6 MB at 48 kHz, and more at higher rates (1 MB
+of it is the echo's two seconds of memory and 0.4 MB the reverb's). A new
+engine holds every
 parameter's default, no samples and no events, and its time is 0.
 
 **`synths_destroy(engine)`** Free an engine and its samples. Do not use the
@@ -755,8 +756,10 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 203 | `delay.feedback` | float | 0 | 0.95 | 0.4 |  | How much of each echo is fed back to make the next. |
 | 204 | `delay.tone` | float | 200 | 20000 | 6000 | hz | Each echo is duller than the last; this is how much treble survives. |
 | 205 | `delay.pingpong` | bool | 0 | 1 | 0 |  | On: the echoes bounce between left and right. |
-| 208 | `reverb.size` | float | 0 | 1 | 0.6 |  | How big the room is (how long the reverb lasts). |
-| 209 | `reverb.damping` | float | 0 | 1 | 0.4 |  | How quickly the treble of the reverb dies away. |
+| 208 | `reverb.size` | float | 0 | 1 | 0.5 |  | How big the room is: a bigger one has its echoes further apart and, unless reverb.decay says otherwise, a longer tail (three times shorter at 0, three times longer at 1). |
+| 209 | `reverb.damping` | float | 0 | 1 | 0.4 |  | How quickly the treble of the reverb dies away (0: as slowly as the rest, a bright tail; 1: at once, a dull one). |
+| 210 | `reverb.type` | choice: 0 room, 1 hall, 2 plate, 3 cathedral, 4 spring | 0 | 4 | 0 |  | What kind of space it is. room: a small room, a short soft tail. hall: a concert hall, big and smooth. plate: a sheet of metal, bright and thick at once. cathedral: enormous, and it goes on and on. spring: the twangy spring of a guitar amp, which boings. |
+| 211 | `reverb.decay` | float | 0 | 30 | 0 | seconds | How long the tail takes to die away (to fall by 60 dB). 0 leaves it to the type and reverb.size. |
 | 212 | `chorus.rate` | float | 0.05 | 10 | 0.8 | hz | How fast the chorus wobbles. |
 | 213 | `chorus.depth` | float | 0 | 1 | 0.5 |  | How far the chorus wobbles. |
 | 216 | `voices` | int | 1 | 64 | 64 | voices | The most voices that sound at once; a new note past this takes over the oldest. |
@@ -765,6 +768,8 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 219 | `input.monitor` | bool | 0 | 1 | 1 |  | On: the live input is heard. Off: it can still be recorded, in silence. |
 | 220 | `input.gate` | float | -100 | 0 | -100 | db | Noise gate: the input is let through only while it is louder than this, which keeps a microphone's hiss out (-100 is off; try -45). |
 | 221 | `input.gate_release` | float | 0.005 | 2 | 0.15 | seconds | Noise gate: how long it takes to close once the input has gone quiet. |
+| 222 | `reverb.predelay` | float | 0 | 0.2 | 0 | seconds | A gap before the reverb starts, on top of the type's own: it keeps a sound clear of its own reverb. |
+| 223 | `reverb.low_cut` | float | 20 | 1000 | 120 | hz | Bass below this is kept out of the reverb, so that it does not turn to mud. |
 
 Kinds: a `float` takes any value in its range; an `int` is rounded to a whole
 number; a `bool` is 0 or 1; a `choice` is a whole number that picks from the
