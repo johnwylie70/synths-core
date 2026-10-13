@@ -29,6 +29,9 @@ const PAN: u8 = 2;
 const PERIOD: u8 = 4;
 const TRIGGER: u8 = 8;
 const RELEASE: u8 = 16;
+/// The volume change is a sudden one (a new note, a set volume, a cut) and
+/// not a step of a slide or an envelope.
+const QUICK: u8 = 32;
 
 /// The highest instrument number FT2 takes notice of.
 const MAX_INSTRUMENT: u8 = 128;
@@ -178,6 +181,9 @@ struct Channel {
     final_pan: u8,
 
     status: u8,
+    /// The global volume changed after this channel had its turn; its
+    /// volume is sent on the next tick.
+    volume_due: bool,
     start_at: u32,
     key_off: bool,
     volume_envelope: EnvelopePos,
@@ -319,7 +325,12 @@ impl Replayer {
         self.visited.clear();
     }
 
-    pub fn tick(&mut self, song: &Song, frame: u32, voices: &mut dyn Voices) {
+    pub fn tick(&mut self, song: &Song, frame: u32, sample_rate: f64, voices: &mut dyn Voices) {
+        for ch in &mut self.channels {
+            if core::mem::take(&mut ch.volume_due) {
+                ch.status |= VOLUME;
+            }
+        }
         self.counter = self.counter.wrapping_sub(1);
         let first = self.counter == 0;
         if first {
@@ -344,7 +355,7 @@ impl Replayer {
             }
         }
         self.advance(song);
-        self.send(song, frame, voices);
+        self.send(song, frame, sample_rate, voices);
     }
 
     /// On a row's last tick, works out which row comes next.
@@ -389,7 +400,10 @@ impl Replayer {
     }
 
     /// Tells the voices what changed on each channel this tick.
-    fn send(&mut self, song: &Song, frame: u32, voices: &mut dyn Voices) {
+    fn send(&mut self, song: &Song, frame: u32, sample_rate: f64, voices: &mut dyn Voices) {
+        // A sudden change takes 5 milliseconds; any other glides for the tick.
+        let quick = (sample_rate / 200.0) as u32;
+        let slow = (sample_rate * 2.5 / self.tempo.max(1) as f64) as u32;
         for (c, ch) in self.channels.iter_mut().enumerate() {
             let status = core::mem::take(&mut ch.status);
             if status == 0 {
@@ -414,10 +428,10 @@ impl Replayer {
                 }
             } else {
                 if status & VOLUME != 0 {
-                    voices.set_volume(frame, c, ch.final_volume);
+                    voices.set_volume(frame, c, ch.final_volume, if status & QUICK != 0 { quick } else { slow });
                 }
                 if status & PAN != 0 {
-                    voices.set_pan(frame, c, pan);
+                    voices.set_pan(frame, c, pan, if status & QUICK != 0 { quick } else { slow });
                 }
                 if status & PERIOD != 0 {
                     voices.set_rate(frame, c, rate);
@@ -595,7 +609,7 @@ impl Replayer {
         ch.volume = ch.default_volume;
         ch.out_volume = ch.default_volume;
         ch.out_pan = ch.default_pan;
-        ch.status |= VOLUME | PAN;
+        ch.status |= VOLUME | PAN | QUICK;
     }
 
     /// Starts the instrument's part of a note again: envelopes, fade and
@@ -655,7 +669,7 @@ impl Replayer {
             // With no envelope, letting go is silence at once.
             ch.volume = 0;
             ch.out_volume = 0;
-            ch.status |= VOLUME;
+            ch.status |= VOLUME | QUICK;
         }
         // FT2 does this when the panning envelope is off, which is the wrong
         // way round; the test modules need it kept.
@@ -702,7 +716,7 @@ impl Replayer {
                 column = (column - 16).min(64);
                 ch.volume = column;
                 ch.out_volume = column;
-                ch.status |= VOLUME;
+                ch.status |= VOLUME | QUICK;
             }
             0x8 => {
                 column = ch.volume.saturating_sub(low);
@@ -742,7 +756,7 @@ impl Replayer {
             fx::SET_VOLUME => {
                 ch.volume = param.min(64);
                 ch.out_volume = ch.volume;
-                ch.status |= VOLUME;
+                ch.status |= VOLUME | QUICK;
             }
             fx::MULTI_RETRIG => {
                 if param & 0x0F != 0 {
@@ -797,9 +811,7 @@ impl Replayer {
             }
             fx::GLOBAL_VOLUME => {
                 self.global_volume = param.min(64);
-                for ch in &mut self.channels {
-                    ch.status |= VOLUME;
-                }
+                self.global_volume_changed(c);
             }
             fx::ENVELOPE_POS => {
                 let Some(ins) = ch.instrument.map(|i| &song.instruments[i]) else { return };
@@ -862,7 +874,7 @@ impl Replayer {
             0xC if x == 0 => {
                 ch.volume = 0;
                 ch.out_volume = 0;
-                ch.status |= VOLUME;
+                ch.status |= VOLUME | QUICK;
             }
             0xE if self.delay_left == 0 => self.delay_asked = x + 1,
             _ => {}
@@ -972,7 +984,7 @@ impl Replayer {
                     0xC if tick == x => {
                         ch.volume = 0;
                         ch.out_volume = 0;
-                        ch.status |= VOLUME;
+                        ch.status |= VOLUME | QUICK;
                     }
                     0xD if tick == x => self.delayed_note(song, c),
                     _ => {}
@@ -985,9 +997,7 @@ impl Replayer {
                 } else {
                     (self.global_volume + (by >> 4)).min(64)
                 };
-                for ch in &mut self.channels {
-                    ch.status |= VOLUME;
-                }
+                self.global_volume_changed(c);
             }
             fx::KEY_OFF if tick == param & 31 => self.key_off(song, c),
             fx::PAN_SLIDE => {
@@ -1008,9 +1018,24 @@ impl Replayer {
                 }
                 ch.tremor_pos = left | if sounding { 0x80 } else { 0 };
                 ch.out_volume = if sounding { ch.volume } else { 0 };
-                ch.status |= VOLUME;
+                ch.status |= VOLUME | QUICK;
             }
             _ => {}
+        }
+    }
+
+    /// The global volume was changed by channel `c`. That channel and those
+    /// after it have yet to work out their volume this tick, and will use
+    /// the new one. Those before it already have: they stay as they are
+    /// until the next tick. So every note on a row can be at a different
+    /// global volume, and songs lean on it.
+    fn global_volume_changed(&mut self, c: usize) {
+        for (i, ch) in self.channels.iter_mut().enumerate() {
+            if i < c {
+                ch.volume_due = true;
+            } else {
+                ch.status |= VOLUME;
+            }
         }
     }
 

@@ -75,6 +75,9 @@ struct Channel {
     sent_volume: i16,
     /// A sample was started on this tick.
     started: bool,
+    /// A sample has been started at some time. Until then the chip's channel
+    /// is switched off, and giving it a sample to move to does nothing.
+    switched_on: bool,
 }
 
 pub struct Replayer {
@@ -225,7 +228,7 @@ impl Replayer {
             // An instrument number that did not start a note still changes
             // which sample the channel is on: the chip moves to it when the
             // one playing comes round.
-            if cell.instrument != 0 && !ch.started {
+            if cell.instrument != 0 && !ch.started && ch.switched_on {
                 voices.queue(frame, c, ch.sample);
             }
         }
@@ -466,13 +469,14 @@ fn send_period(ch: &mut Channel, period: u16, c: usize, frame: u32, voices: &mut
 fn send_volume(ch: &mut Channel, volume: i16, c: usize, frame: u32, voices: &mut dyn Voices) {
     if ch.sent_volume != volume {
         ch.sent_volume = volume;
-        voices.set_volume(frame, c, volume as f32 / 64.0);
+        voices.set_volume(frame, c, volume as f32 / 64.0, 0);
     }
 }
 
 /// Starts the channel's sample from where 9xx has left its start.
 fn restart_sample(ch: &mut Channel, c: usize, frame: u32, voices: &mut dyn Voices) {
     ch.started = true;
+    ch.switched_on = true;
     ch.sent_period = ch.period;
     let Some(sample) = ch.sample else {
         voices.stop(frame, c);

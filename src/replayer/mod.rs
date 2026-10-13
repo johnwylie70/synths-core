@@ -48,8 +48,8 @@ pub struct Start {
 /// the replayer was asked to process. Calls arrive in order of frame.
 ///
 /// A channel plays one thing at a time: `play` replaces whatever the
-/// channel was playing. Volume changes should be smoothed over a few
-/// milliseconds, or they click; the replayer does not smooth them.
+/// channel was playing. Settings that arrive on the same frame as a `play`
+/// belong to the new note and take effect at once, without smoothing.
 pub trait Voices {
     /// Starts a sample (or a patch) on a channel.
     fn play(&mut self, frame: u32, channel: usize, start: &Start);
@@ -60,11 +60,18 @@ pub trait Voices {
     fn set_rate(&mut self, frame: u32, channel: usize, rate: f64);
 
     /// Sets the channel's volume, 0 to 1. Envelopes, fades, tremolo and the
-    /// song's global volume are already worked in.
-    fn set_volume(&mut self, frame: u32, channel: usize, volume: f32);
+    /// song's global volume are already worked in. `ramp` is how many frames
+    /// the change should be spread over: FastTracker 2 glides a volume to its
+    /// new value over a whole tick, which is what makes its envelopes smooth,
+    /// and takes about 5 milliseconds over a sudden change. 0 means at once,
+    /// as on the Amiga; the voices may still take the edge off to avoid a click.
+    fn set_volume(&mut self, frame: u32, channel: usize, volume: f32, ramp: u32);
 
-    /// Sets the channel's panning, -1 (left) to 1 (right).
-    fn set_pan(&mut self, frame: u32, channel: usize, pan: f32);
+    /// Sets the channel's panning, -1 (left) to 1 (right), spread over `ramp`
+    /// frames as for `set_volume`. FastTracker 2 pans by the square root:
+    /// with `p = (pan + 1) / 2`, the left is `sqrt(1 - p)` and the right
+    /// `sqrt(p)`. The Amiga's channels are simply hard left or hard right.
+    fn set_pan(&mut self, frame: u32, channel: usize, pan: f32, ramp: u32);
 
     /// Silences the channel and forgets what it was playing.
     fn stop(&mut self, frame: u32, channel: usize);
@@ -198,7 +205,7 @@ impl Player {
                 r.tempo()
             }
             Core::Ft2(r) => {
-                r.tick(song, frame, voices);
+                r.tick(song, frame, self.sample_rate, voices);
                 r.tempo()
             }
         };

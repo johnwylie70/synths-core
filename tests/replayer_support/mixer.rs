@@ -14,8 +14,9 @@ use synths_core::song::{LoopKind, Song};
 pub enum Command {
     Play(Start),
     Rate(f64),
-    Volume(f32),
-    Pan(f32),
+    /// The volume, and how many frames to take getting there.
+    Volume(f32, u32),
+    Pan(f32, u32),
     Stop,
     Release,
     Queue(Option<usize>),
@@ -39,8 +40,11 @@ struct Voice {
     rate: f64,
     volume: f32,
     volume_now: f32,
+    /// How much the volume moves each frame on its way to `volume`.
+    volume_step: f32,
     pan: f32,
     pan_now: f32,
+    pan_step: f32,
     /// A sample waiting to take over at the end of this one's pass.
     queued: Option<Option<usize>>,
     /// The frame a note started on: settings that arrive on the same frame
@@ -59,7 +63,8 @@ pub struct Mixer<'a> {
     pub log: Vec<Logged>,
     pub left: Vec<f32>,
     pub right: Vec<f32>,
-    /// Smooth volume and panning changes over this many frames; 0 for none.
+    /// Smooth volume and panning changes over at least this many frames; 0
+    /// to do exactly as the replayer asks.
     pub ramp: u32,
     /// Take the nearest frame of a sample and not a line between two.
     pub nearest: bool,
@@ -67,6 +72,8 @@ pub struct Mixer<'a> {
     pub square_root_pan: bool,
     /// The loudness of one channel at full volume.
     pub gain: f32,
+    /// Channels that are played but not heard.
+    pub muted: Vec<bool>,
 }
 
 impl<'a> Mixer<'a> {
@@ -84,6 +91,7 @@ impl<'a> Mixer<'a> {
             nearest: false,
             square_root_pan: song.rules == synths_core::song::Rules::FastTracker2,
             gain: 0.25,
+            muted: vec![false; song.channels()],
         }
     }
 
@@ -113,16 +121,22 @@ impl<'a> Mixer<'a> {
                 }
             }
             Command::Rate(r) => v.rate = r,
-            Command::Volume(x) => {
+            Command::Volume(x, ramp) => {
                 v.volume = x;
-                if fresh || self.ramp == 0 {
+                let ramp = ramp.max(self.ramp);
+                if fresh || ramp == 0 {
                     v.volume_now = x;
+                } else {
+                    v.volume_step = (x - v.volume_now).abs() / ramp as f32;
                 }
             }
-            Command::Pan(x) => {
+            Command::Pan(x, ramp) => {
                 v.pan = x;
-                if fresh || self.ramp == 0 {
+                let ramp = ramp.max(self.ramp);
+                if fresh || ramp == 0 {
                     v.pan_now = x;
+                } else {
+                    v.pan_step = (x - v.pan_now).abs() / ramp as f32;
                 }
             }
             Command::Stop => v.sample = None,
@@ -143,16 +157,15 @@ impl<'a> Mixer<'a> {
         let mut pending = core::mem::take(&mut self.pending);
         pending.sort_by_key(|l| l.frame);
         let mut next = 0;
-        let slew = if self.ramp > 0 { 1.0 / self.ramp as f32 } else { f32::INFINITY };
         for _ in 0..frames {
             while next < pending.len() && pending[next].frame <= self.time {
                 self.apply(pending[next]);
                 next += 1;
             }
             let (mut l, mut r) = (0.0f32, 0.0f32);
-            for v in &mut self.voices {
-                v.volume_now += (v.volume - v.volume_now).clamp(-slew, slew);
-                v.pan_now += (v.pan - v.pan_now).clamp(-slew * 2.0, slew * 2.0);
+            for (c, v) in self.voices.iter_mut().enumerate() {
+                v.volume_now += (v.volume - v.volume_now).clamp(-v.volume_step, v.volume_step);
+                v.pan_now += (v.pan - v.pan_now).clamp(-v.pan_step, v.pan_step);
                 let Some(s) = v.sample.and_then(|i| self.song.samples.get(i)) else { continue };
                 let i = v.pos.floor();
                 let frac = (v.pos - i) as f32;
@@ -174,7 +187,7 @@ impl<'a> Mixer<'a> {
                 };
                 let p = (v.pan_now.clamp(-1.0, 1.0) + 1.0) * 0.5;
                 let (gl, gr) = if self.square_root_pan { ((1.0 - p).sqrt(), p.sqrt()) } else { (1.0 - p, p) };
-                let x = x * v.volume_now * self.gain;
+                let x = if self.muted[c] { 0.0 } else { x * v.volume_now * self.gain };
                 l += x * gl;
                 r += x * gr;
 
@@ -255,11 +268,11 @@ impl Voices for Mixer<'_> {
     fn set_rate(&mut self, frame: u32, channel: usize, rate: f64) {
         self.push(frame, channel, Command::Rate(rate));
     }
-    fn set_volume(&mut self, frame: u32, channel: usize, volume: f32) {
-        self.push(frame, channel, Command::Volume(volume));
+    fn set_volume(&mut self, frame: u32, channel: usize, volume: f32, ramp: u32) {
+        self.push(frame, channel, Command::Volume(volume, ramp));
     }
-    fn set_pan(&mut self, frame: u32, channel: usize, pan: f32) {
-        self.push(frame, channel, Command::Pan(pan));
+    fn set_pan(&mut self, frame: u32, channel: usize, pan: f32, ramp: u32) {
+        self.push(frame, channel, Command::Pan(pan, ramp));
     }
     fn stop(&mut self, frame: u32, channel: usize) {
         self.push(frame, channel, Command::Stop);
