@@ -17,6 +17,7 @@ sound, the levels and the notes that are playing.
 - [Events](#events)
 - [Parameters](#parameters)
 - [Samples](#samples)
+- [Sample maps](#sample-maps)
 - [Step macros](#step-macros)
 - [The arpeggio of a note](#the-arpeggio-of-a-note)
 - [Songs](#songs)
@@ -62,6 +63,8 @@ wants the synth. `json` (which needs `songs`) is the reader of songs as JSON;
 - **Handle**: a number, not 0, that a host gives a note when it starts it, to
   steer that note later. See [handles](#handles).
 - **Slot**: one of 1024 places a sample can be loaded into, numbered from 0.
+- **Zone**: one sample slot with the keys and velocities it is for. A part's
+  list of zones is its [sample map](#sample-maps).
 - **Control period**: 16 frames. Slow-moving values (pitch, filter cutoff,
   loudness, pan) are worked out once per control period and slide in a
   straight line in between.
@@ -76,6 +79,7 @@ As a C header:
 #include <stdint.h>
 
 typedef struct SynthsEngine SynthsEngine;
+typedef struct SynthsZone SynthsZone;   /* 48 bytes: see "Sample maps" */
 
 uint32_t       synths_abi_version(void);
 const uint8_t *synths_version(void);
@@ -111,6 +115,14 @@ int32_t        synths_sample_free(SynthsEngine *engine, uint32_t slot);
 
 int32_t        synths_macro_set(SynthsEngine *engine, uint32_t part, const float *steps, uint32_t count,
                                 uint32_t loop_start, uint32_t loop_end, uint32_t release, uint32_t flags);
+
+int32_t        synths_zones_set(SynthsEngine *engine, uint32_t part, const SynthsZone *zones,
+                                uint32_t count, uint32_t flags);
+int32_t        synths_zones_clear(SynthsEngine *engine, uint32_t part);
+uint32_t       synths_zones_count(const SynthsEngine *engine, uint32_t part);
+uint32_t       synths_zones_flags(const SynthsEngine *engine, uint32_t part);
+uint32_t       synths_zones_read(const SynthsEngine *engine, uint32_t part, SynthsZone *out,
+                                 uint32_t capacity);
 
 uint32_t       synths_scope_read(const SynthsEngine *engine, uint32_t source, float *out, uint32_t frames);
 uint32_t       synths_levels_read(const SynthsEngine *engine, uint32_t source, uint32_t count, float *out);
@@ -172,16 +184,19 @@ while sound is playing. It needs no engine.
 sample rate is brought into 8000..192000. Returns null if the rate is not a
 number or not above 0. This allocates everything the engine will ever need,
 apart from samples: about 2.6 MB at 48 kHz, and more at higher rates (1 MB
-of it is the echo's two seconds of memory and 0.4 MB the reverb's). A new
+of it is the echo's two seconds of memory, 0.4 MB the reverb's and 112 KB
+the sample maps'). A new
 engine holds every
-parameter's default, no samples and no events, and its time is 0.
+parameter's default, no samples, no sample maps and no events, and its time
+is 0.
 
 **`synths_destroy(engine)`** Free an engine and its samples. Do not use the
 pointer afterwards.
 
 **`synths_reset(engine)`** The panic button: stop every voice at once, forget
 every queued event and every running glide, empty the echo, reverb, chorus
-and voice effects, and stop a recording (what it has recorded stays). Parameters, samples and the time stay as they are.
+and voice effects, and stop a recording (what it has recorded stays). Parameters, samples, sample maps and the time stay as they are; every
+round robin of a sample map starts again from its first take.
 
 ### Reading the engine
 
@@ -289,6 +304,43 @@ to every part. The engine copies the numbers. Voices already sounding on the
 part carry on from the same step number in the new macro. Returns 0, or -1
 (the part does not exist), -2 (more than 64 steps) or -4 (the engine, or
 `steps` with a count above 0, is null). It allocates nothing.
+
+### Sample maps
+
+A part's list of zones: see [Sample maps](#sample-maps) for the record and
+for which zones a note plays.
+
+**`synths_zones_set(engine, part, zones: *const Zone, count, flags) -> i32`**
+Give a part its sample map, replacing any it had: `count` zone records of
+48 bytes each, one after another at `zones`. `count` is 0 to 512; 0 takes
+the map away (and `zones` may then be null). `flags` 1 makes a note that no
+zone holds silent; 0 has it play the nearest zone. The engine copies the
+records, cleaning each as it goes, so the host frees `zones` afterwards;
+they need not be lined up in memory in any way. Either the whole list is
+taken or nothing changes. Notes already sounding keep the zones they
+started with; the part's round robins start again. Returns 0, or:
+
+| value | meaning |
+|---|---|
+| -1 | the part does not exist (there is no "every part" here) |
+| -2 | more than 512 zones, or more than there is room left for among the 2048 all the parts share, or a record whose slot is 1024 or more |
+| -4 | the engine, or `zones` with a count above 0, is null |
+
+It allocates nothing.
+
+**`synths_zones_clear(engine, part) -> i32`** Take a part's sample map away;
+`part` 65535 takes every part's. Returns 0, or -1 or -4 as above.
+
+**`synths_zones_count(engine, part) -> u32`** How many zones the part's map
+has: 0 for none, and for a part that does not exist.
+
+**`synths_zones_flags(engine, part) -> u32`** The flags the part's map was
+set with (0 or 1).
+
+**`synths_zones_read(engine, part, out: *mut Zone, capacity) -> u32`** Copy
+the part's zones into `out`, in the order they were given and as the
+engine holds them (after cleaning), at most `capacity` records. Returns
+how many were copied. This is for an editor to show what is there.
 
 ### Reading the sound back
 
@@ -545,7 +597,9 @@ is not a number counts as 1, and a glide that is not a number as 0.
 
 **1 `note_on`** Start a note on a part with the part's patch as it is at that
 moment. The note is brought into -24..160 and the velocity into 0..1. How
-velocity affects loudness is the part's `velocity` parameter. What happens
+velocity affects loudness is the part's `velocity` parameter. If the part
+has a [sample map](#sample-maps) and its oscillator 1 plays a sample, the
+note and velocity also choose which samples play. What happens
 when the part is in mono or legato mode, or has unison voices, or there is no
 free voice, is under [How notes get voices](#how-notes-get-voices).
 
@@ -799,8 +853,9 @@ number: it is set with `synths_macro_set`.
   note's level is `1 - s + s * v`: a straight line, not a curve.
 - **`mode`, `glide`, `unison.*`** See [How notes get voices](#how-notes-get-voices).
 - **`reverb.*`** See [The reverb](#the-reverb).
-- **`osc1.wave`** 4 plays the sample in slot `osc1.sample`. An empty slot is
-  silent.
+- **`osc1.wave`** 4 plays the sample in slot `osc1.sample`, or, if the part
+  has a [sample map](#sample-maps), the zones the map gives each note. An
+  empty slot is silent.
 - **`osc1.pulse_width`** The width used is this (or the macro step's), plus
   what the LFOs and the modulation envelope add, kept within 0..1. The pulse
   wave is made without its steady offset, so it has none at any width, and
@@ -873,7 +928,8 @@ editor can be made from it rather than typed in again:
   "abi": 1,
   "limits": {"voices": 64, "parts": 64, "samples": 1024, "event_size": 32,
              "event_buffer": 256, "event_queue": 4096, "output_frames": 4096,
-             "macro_steps": 64, "scope_master": 4096, "scope_part": 1024},
+             "macro_steps": 64, "scope_master": 4096, "scope_part": 1024,
+             "zone_size": 48, "zones_part": 512, "zones_total": 2048, "zone_layers": 4},
   "events": [
     {"type": 1, "name": "note_on", "help": "part; a: handle (0 for none); x: note; y: velocity 0..1"}
   ],
@@ -962,6 +1018,266 @@ note and an optional loop. A part plays it by setting `osc1.wave` (or
   same position, or stop.
 - **Positions** (`osc1.start`, `voice_position`) are in frames of the sample.
   In a ping-pong loop a position past `loop_end` is on the way back.
+- **More than one sample for a part.** A sample stretched far from the note
+  it was recorded at sounds wrong: a piano an octave up is a toy. A part can
+  have a [sample map](#sample-maps), which gives each note the recording
+  nearest it.
+
+## Sample maps
+
+A sample map makes one instrument out of several recordings. It is a list
+of **zones** that belongs to a part; each zone is a sample slot and the
+keys and velocities it is for, with the key the recording was played at.
+A piano recorded every octave is five zones; a drum kit is a zone for each
+drum.
+
+The host loads the samples as ever, gives the part its zones with
+`synths_zones_set`, and sets the part's `osc1.wave` to 4 (sample). From
+then on every `note_on` of that part looks its note and velocity up in the
+map, on the event's exact frame, and each zone it finds plays as one voice
+whose oscillator 1 is that zone's sample. `osc1.sample` is not used while
+the part has a map. A part with a map whose `osc1.wave` is not 4 plays its
+wave and takes no notice of the map.
+
+Only oscillator 1 has a map; oscillator 2 keeps its one slot, `osc2.sample`.
+Oscillator 1 is the one that plays stereo samples in stereo and the one a
+voice can be given its own sample for, so a map there costs a voice
+nothing, and what a second map would be for (two recordings sounding
+together) a map already does: zones that overlap are layers.
+
+### The zone record
+
+A zone is 48 bytes:
+
+| bytes | type | name | meaning |
+|---|---|---|---|
+| 0..1 | `u16` | `slot` | the sample slot the zone plays, 0..1023 |
+| 2 | `u8` | `key_lo` | the lowest key of the zone, 0..127 |
+| 3 | `u8` | `key_hi` | the highest key, 0..127 (both ends are in the zone) |
+| 4 | `u8` | `vel_lo` | the lowest velocity, 0..127 |
+| 5 | `u8` | `vel_hi` | the highest velocity, 0..127 (`vel_lo` 0 and `vel_hi` 127 for every velocity) |
+| 6 | `u8` | `group` | round robin: of the zones with the same number here that hold a note, one plays, and they take turns. 0: not in a group |
+| 7 | `u8` | `flags` | 1: play as recorded, 2: one-shot, 4: straight-line fades; added together |
+| 8..11 | `f32` | `root` | the key the recording was played at; fractions tune it. Not a number (NaN): the base note of the sample's slot |
+| 12..15 | `f32` | `tune` | tuning in cents, added to everything else |
+| 16..19 | `f32` | `volume` | how loud, as a multiplier: 1 is unchanged |
+| 20..23 | `f32` | `pan` | -1..1, added to the part's pan |
+| 24..27 | `f32` | `release` | how long the note takes to die away once let go, in seconds, in the place of the part's `amp.release`; below 0 (write -1): the part's |
+| 28 | `u8` | `key_fade_lo` | how many keys at the bottom of the range the zone fades in over; 0: none |
+| 29 | `u8` | `key_fade_hi` | the same at the top of the range |
+| 30 | `u8` | `vel_fade_lo` | how many velocities at the bottom of the range it fades in over |
+| 31 | `u8` | `vel_fade_hi` | the same at the top |
+| 32..35 | `u32` | `loop_start` | the first frame of the zone's own loop |
+| 36..39 | `u32` | `loop_end` | one past its last frame |
+| 40 | `u8` | `loop_mode` | 0: the loop of the sample's slot; 1: no loop; 2: forward, 3: ping-pong, from `loop_start` to `loop_end` |
+| 41..43 | `u8[3]` | `reserved` | not used yet: write 0 |
+| 44..47 | `u32` | `start` | where in the sample a note starts, in frames |
+
+As a C struct, which has this layout with no packing asked for:
+
+```c
+struct SynthsZone {
+    uint16_t slot;
+    uint8_t  key_lo;
+    uint8_t  key_hi;
+    uint8_t  vel_lo;
+    uint8_t  vel_hi;
+    uint8_t  group;
+    uint8_t  flags;
+    float    root;
+    float    tune;
+    float    volume;
+    float    pan;
+    float    release;
+    uint8_t  key_fade_lo;
+    uint8_t  key_fade_hi;
+    uint8_t  vel_fade_lo;
+    uint8_t  vel_fade_hi;
+    uint32_t loop_start;
+    uint32_t loop_end;
+    uint8_t  loop_mode;
+    uint8_t  reserved[3];
+    uint32_t start;
+};
+```
+
+In Python: `struct.pack('<H6B5f4BIIB3xI', slot, key_lo, key_hi, vel_lo, vel_hi, group, flags, root, tune, volume, pan, release, key_fade_lo, key_fade_hi, vel_fade_lo, vel_fade_hi, loop_start, loop_end, loop_mode, start)`.
+
+A record of all zeros is not a useful zone (its volume is 0 and it holds
+key 0 at velocity 0 only): fill in the ranges, `root`, `volume` 1 and
+`release` -1 at least.
+
+Velocities here are whole numbers from 0 to 127, as MIDI and every sample
+format count them; a note's velocity (0..1) is multiplied by 127 and
+rounded to compare.
+
+### Which zones a note plays
+
+1. **The key and the velocity.** The note is rounded to the nearest whole
+   key (a half goes up) and kept within 0..127; the velocity is multiplied
+   by 127 and rounded. These two whole numbers choose the zones. The pitch
+   is still the note's own, fractions and all.
+2. **A zone holds the note** if the key is from `key_lo` to `key_hi` and
+   the velocity from `vel_lo` to `vel_hi`.
+3. **If no zone holds it**, and the map's flags are 1, the note is silent:
+   it takes no voice. (A drum kit: the keys between the drums do nothing.)
+   Otherwise the nearest zone is found: the one whose keys are the fewest
+   keys away, of those the one whose velocities are the fewest away, and of
+   those the one given first. The note is then chosen for as if it were the
+   nearest key and velocity inside that zone, so that a map with gaps, or
+   one that stops short of the ends of the keyboard, still plays every key.
+4. **Every zone that holds it plays**, in the order the zones were given:
+   that is how layers are made. Only the first 32 zones that hold the note
+   are looked at, and when round robin has had its say at most 4 of them
+   play: the first given.
+5. **Round robin.** Of the zones among those with the same `group` (not 0),
+   only one plays: with `n` of them, the one whose turn it is, counting
+   from the first given. Each key keeps its own count of hits, which goes
+   up by one for each note on that key that has any zone in a group, so
+   repeated hits of one key go through the takes in order whatever the
+   other keys are doing. Every group of a key shares that count. It starts
+   at the first take when the map is set and after `synths_reset`, so the
+   same events always give the same takes; it starts again every 5040 hits,
+   which every number of takes up to 10 divides.
+
+Each zone that plays is one voice (times `unison.voices`), started on the
+frame of the `note_on`. With no fades and no overlaps a note is one voice,
+exactly as with a single sample, and costs the same to render.
+
+### What a zone changes for its voice
+
+- **Pitch.** With `note` everything that makes up the pitch of the voice,
+  the sample plays at
+  `sample_rate_of_the_sample * 2^((note - root + tune / 100) / 12)` frames
+  a second: at its own speed on the key it was recorded at. The slot's base
+  note is not used unless `root` is not a number.
+- **Play as recorded** (`flags` 1). The key does not move the pitch: every
+  key of the zone plays the sample at its own speed (and `tune`). A drum
+  kit, where each key is a different sound. Transpose, tuning, bend and
+  modulation still apply, as with `osc1.keytrack` off, which does the same
+  for every zone of the part at once.
+- **One-shot** (`flags` 2). The sample plays to its end whatever the key
+  does: letting go (a `note_off`, or `all_notes_off` with `a` 0) does not
+  start the release, the zone has no loop whatever `loop_mode` and the
+  slot say, and the voice ends when the sample does, even if the patch has
+  something else sounding. It can still be cut. A hi-hat, a cymbal.
+- **`volume`** multiplies the voice's loudness and **`pan`** is added to
+  its pan, on top of everything the part does.
+- **`release`** replaces the part's `amp.release` for this voice, so that
+  the low notes of a piano can ring on longer than the high ones. The rest
+  of the amp envelope is the part's.
+- **The loop** is the slot's own unless `loop_mode` says otherwise. An end
+  past the sample's is brought back to it, and a loop with no frames in it
+  is no loop.
+- **`start`** is added to where `osc1.start` puts the start of the note.
+
+Everything else is the part's patch, exactly as for a single sample: the
+filter, the three envelopes, the LFOs, the step macro, oscillator 2, the
+sub oscillator and the noise, `osc1.level`, `osc1.coarse` and `osc1.fine`,
+`osc1.reverse`, `sample.antialias`, the voice effects and the sends.
+
+**A voice keeps its zone for as long as it lasts.** Pitch bend, a glide,
+the arpeggio of a note, a macro's pitch steps and a `voice_pitch` event
+all move the pitch of the sample the voice started with, however far they
+take it across the zones: nothing swaps a sample in the middle of a note.
+Setting a new map, or taking the map away, changes nothing for the notes
+that are sounding. (Freeing or replacing a sample slot does, as always.)
+
+**Mono and legato.** In `mode` mono, a new note on a part with a map does
+not move the sounding voice: that voice is cut, without a click, and the
+new note starts voices of its own in its own zones, sliding from the last
+note if `glide` says so. Going back to a held note when the sounding one
+is let go does the same. In `mode` legato the sounding voice moves to the
+new note and keeps its sample, as legato means; a note that finds nothing
+sounding starts in its own zone.
+
+### Velocity layers and crossfades
+
+Zones over the same keys with different velocity ranges are velocity
+layers. With ranges that meet (0 to 63 and 64 to 127) the switch is hard:
+one voice a note, and the recording changes between velocity 63 and 64.
+
+A crossfade is two zones whose ranges **overlap**, each with a fade over
+the overlap. A fade of `w` at an edge of a zone gives a note `d` steps
+inside that edge (0 on the edge itself) the share `t = (d + 1) / (w + 1)`
+of the zone, up to 1. Give the lower zone `key_fade_hi` (or `vel_fade_hi`)
+`w` and the upper zone `key_fade_lo` (or `vel_fade_lo`) `w`, and make them
+overlap by exactly `w` keys (or velocities): then the two shares add up to
+1 on every step of the overlap, and each zone has all of the note one step
+outside it.
+
+- A zone's voice plays at the square root of its share, so the two voices'
+  **powers** add up to 1: the right law for two different recordings,
+  which do not line up wave for wave. With `flags` 4 on both zones the
+  voice plays at the share itself and the two **levels** add up to 1: for
+  recordings that do line up.
+- The shares come from the whole key and the whole velocity, and are fixed
+  when the note starts.
+- A zone's shares at its four edges multiply, so a note can be in a
+  crossfade of keys and of velocities at once: that is four voices.
+- A fade wider than its range is brought back to the range's width.
+
+**What it costs.** A crossfade is two voices where one would do, but only
+for the notes inside an overlap: a piano whose zones each overlap the next
+by 3 keys plays 2 voices for those 3 keys and 1 for the others. Two
+velocity layers that overlap from 50 to 69 play 2 voices for velocities 50
+to 69. A layer is a voice for every zone, on every note. Every one of them
+is a whole voice out of the engine's 64, with its own filter and envelopes,
+and costs what a voice costs.
+
+### Limits and cleaning
+
+- A part has at most 512 zones, and all the parts have 2048 between them,
+  in memory made with the engine (112 KB): setting a map never allocates.
+- `synths_zones_set` refuses the whole list (changing nothing) for a slot
+  number of 1024 or more, for too many zones, or for a part that does not
+  exist. A slot with no sample in it is not an error: its zone is silent
+  until one is loaded.
+- Everything else is cleaned, not refused, and `synths_zones_read` gives
+  back the cleaned records: a key or velocity above 127 becomes 127; a
+  range given the wrong way round is turned round; unknown flag bits are
+  dropped; `root` is kept within -60..200 (and NaN is kept, with its
+  meaning); `tune` within -4800..4800, `volume` within 0..4 and `pan`
+  within -1..1 (NaN: 0, 1 and 0); `release` below 0 or NaN becomes -1, and
+  it is at most 20; a `loop_mode` above 3 becomes 0; `reserved` becomes 0.
+
+### A piano of five recordings
+
+In JavaScript, with the samples of C2, C3, C4, C5 and C6 loaded into slots
+0 to 4 (as in [A host loop](#a-host-loop)), each zone covering the keys
+nearest its own:
+
+```js
+const roots = [36, 48, 60, 72, 84];
+const ptr = x.synths_alloc(roots.length * 48);
+const bytes = new Uint8Array(x.memory.buffer, ptr, roots.length * 48).fill(0);
+const view = new DataView(bytes.buffer, ptr, bytes.length);
+roots.forEach((root, i) => {
+  const at = i * 48;
+  const lowest = i === 0 ? 0 : Math.ceil((roots[i - 1] + root) / 2);
+  const highest = i === roots.length - 1 ? 127 : Math.ceil((root + roots[i + 1]) / 2) - 1;
+  view.setUint16(at, i, true);            // slot
+  view.setUint8(at + 2, lowest);          // key_lo
+  view.setUint8(at + 3, highest);         // key_hi
+  view.setUint8(at + 4, 0);               // vel_lo
+  view.setUint8(at + 5, 127);             // vel_hi
+  view.setFloat32(at + 8, root, true);    // root
+  view.setFloat32(at + 16, 1, true);      // volume
+  view.setFloat32(at + 24, -1, true);     // release: the part's
+});
+x.synths_zones_set(engine, 0, ptr, roots.length, 0);
+x.synths_free(ptr);
+event(0, 4 /* param */, 0, 16 /* osc1.wave */, 4 /* sample */, 0);
+```
+
+`cargo run --release --example zones` renders such a piano both ways, as
+one recording stretched and as a map of five (`target/demo/zones-single.wav`,
+`zones-multi.wav`), and a drum kit on keys that play as recorded
+(`zones-kit.wav`).
+
+The song player does not use sample maps: a tracker song's instruments
+have key zones of their own, which the player works out for itself before
+it starts each voice.
 
 ## Step macros
 
@@ -1794,7 +2110,9 @@ change that.
 - **`mode` mono.** If the part has a voice sounding, a new note does not
   take another: the sounding voice moves to the new note (sliding over
   `glide` seconds) and its envelopes start again from where they are. It
-  takes the new note's handle and velocity.
+  takes the new note's handle and velocity. (On a part playing a
+  [sample map](#sample-maps) the sounding voice is cut instead and the new
+  note starts in its own zones.)
 - **`mode` legato.** The same, but while the old note is still held the
   envelopes do not start again and the velocity does not change.
 - In both, the part remembers the notes that are held down (the last 16).
@@ -1886,9 +2204,12 @@ as another on the same engine. In practice:
 - A native host's microphone often arrives on a different callback from the
   one that asks for output. Carry the input across in a lock-free ring of
   your own, and give `synths_render_io_into` the frames that match.
-- `synths_macro_set` allocates nothing and is quick, but it changes the
-  engine, so it must not overlap a render: in a native app call it from the
-  audio callback, between renders, like `synths_push_events`.
+- `synths_macro_set`, `synths_zones_set` and `synths_zones_clear` allocate
+  nothing and are quick, but they change the engine, so they must not
+  overlap a render: in a native app call them from the audio callback,
+  between renders, like `synths_push_events`. `synths_zones_count`,
+  `synths_zones_flags` and `synths_zones_read` only read, but must not
+  overlap a call that sets a map.
 - `synths_abi_version`, `synths_version`, `synths_param_table`,
   `synths_param_table_len`, `synths_output_capacity` and
   `synths_event_capacity` need no engine and are safe from any thread.
@@ -1904,13 +2225,13 @@ and there are none.)
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro, feeds it a live
-input and times it. The
-module is about 354 KB (140 KB gzipped), of which the song loaders and
-player are about 150 KB, the JSON song reader 42 KB of that, and the live
-input, voice effects and recorder 29 KB. Two smaller
+input, plays a sample map and times it. The
+module is about 382 KB (154 KB gzipped), of which the song loaders and
+player are about 150 KB, the JSON song reader 42 KB of that, the live
+input, voice effects and recorder 29 KB, and the sample maps 12 KB. Two smaller
 modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
-reader (312 KB, 125 KB gzipped), and `--no-songs` the whole song player
-(204 KB, 80 KB gzipped). See
+reader (341 KB, 139 KB gzipped), and `--no-songs` the whole song player
+(235 KB, 94 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
@@ -2122,6 +2443,10 @@ engine.render(&mut left, &mut right);
   `param`, `set_param`, `time`, `active_voices`, `reset` are the functions
   above without the pointers, and `Engine::taps()` gives `read_scope`,
   `read_levels` and `read_notes`.
+- `Engine::set_zones(part, &[Zone], flags)`, `zones(part)` and
+  `zone_flags(part)` are the sample map functions; `synths_core::zones`
+  has the record (`Zone`, and `Zone::new(slot, key_lo, key_hi, root)` for
+  one with nothing else changed) and the flags.
 - `Engine::render_io(in_left, in_right, left, right)` is `render` with a
   live input (`in_right` is `None` for a mono one). `record_buffer`,
   `recording`, `sample_frames`, `sample_channels` and `read_sample` are the

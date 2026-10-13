@@ -173,7 +173,7 @@ fn the_parameter_table_is_json_a_host_can_read() {
         assert_eq!(text.len() as u32, synths_param_table_len());
         assert!(text.starts_with("{\"version\":\"") && text.ends_with("]}"));
         assert!(text.contains("\"abi\":1"));
-        assert!(text.contains("\"limits\":{\"voices\":64,\"parts\":64,\"samples\":1024,\"event_size\":32,\"event_buffer\":256,\"event_queue\":4096,\"output_frames\":4096,\"macro_steps\":64,\"scope_master\":4096,\"scope_part\":1024}"));
+        assert!(text.contains("\"limits\":{\"voices\":64,\"parts\":64,\"samples\":1024,\"event_size\":32,\"event_buffer\":256,\"event_queue\":4096,\"output_frames\":4096,\"macro_steps\":64,\"scope_master\":4096,\"scope_part\":1024,\"zone_size\":48,\"zones_part\":512,\"zones_total\":2048,\"zone_layers\":4}"));
         assert!(text.contains("{\"type\":1,\"name\":\"note_on\""));
         assert!(text.contains("{\"id\":50,\"name\":\"filter.cutoff\",\"scope\":\"part\",\"kind\":\"float\",\"min\":20,\"max\":20000,\"default\":2000,\"unit\":\"hz\","));
         assert!(text.contains("{\"id\":16,\"name\":\"osc1.wave\",\"scope\":\"part\",\"kind\":\"choice\",\"min\":0,\"max\":4,\"default\":1,\"unit\":\"\",\"choices\":[\"sine\",\"triangle\",\"saw\",\"pulse\",\"sample\"],"));

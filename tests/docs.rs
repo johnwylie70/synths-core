@@ -195,3 +195,74 @@ fn the_document_lists_everything_a_sequencer_can_do() {
         assert!(DOC.contains(field), "Trigger's {field} is not in the document");
     }
 }
+
+#[test]
+fn the_document_lists_every_function_of_the_sample_maps() {
+    let mut count = 0;
+    for line in include_str!("../src/zones_abi.rs").lines() {
+        if let Some(rest) = line.strip_prefix("pub unsafe extern \"C\" fn ") {
+            let name = rest.split('(').next().unwrap();
+            count += 1;
+            assert!(DOC.matches(&format!("{name}(")).count() >= 2, "{name} should be in the header and described");
+        }
+    }
+    assert_eq!(count, 5);
+}
+
+#[test]
+fn the_document_gives_the_zone_record_and_the_numbers_of_the_sample_maps() {
+    use core::mem::offset_of;
+    use synths_core::zones::*;
+    assert_eq!((ZONE_SIZE, ZONES_PER_PART, ZONES_TOTAL, MAX_LAYERS, MAX_MATCHES, ROUND_ROBIN_WRAP), (48, 512, 2048, 4, 32, 5040));
+    assert_eq!((ZONE_FIXED_PITCH, ZONE_ONE_SHOT, ZONE_LINEAR_FADE, MAP_SILENT_OUTSIDE), (1, 2, 4, 1));
+    assert_eq!((ZONE_LOOP_OWN, ZONE_LOOP_NONE, ZONE_LOOP_FORWARD, ZONE_LOOP_PINGPONG), (0, 1, 2, 3));
+    // The record's table: where each field is, how big, and its name.
+    let fields: &[(usize, usize, &str, &str)] = &[
+        (offset_of!(Zone, slot), 2, "u16", "slot"),
+        (offset_of!(Zone, key_lo), 1, "u8", "key_lo"),
+        (offset_of!(Zone, key_hi), 1, "u8", "key_hi"),
+        (offset_of!(Zone, vel_lo), 1, "u8", "vel_lo"),
+        (offset_of!(Zone, vel_hi), 1, "u8", "vel_hi"),
+        (offset_of!(Zone, group), 1, "u8", "group"),
+        (offset_of!(Zone, flags), 1, "u8", "flags"),
+        (offset_of!(Zone, root), 4, "f32", "root"),
+        (offset_of!(Zone, tune), 4, "f32", "tune"),
+        (offset_of!(Zone, volume), 4, "f32", "volume"),
+        (offset_of!(Zone, pan), 4, "f32", "pan"),
+        (offset_of!(Zone, release), 4, "f32", "release"),
+        (offset_of!(Zone, key_fade_lo), 1, "u8", "key_fade_lo"),
+        (offset_of!(Zone, key_fade_hi), 1, "u8", "key_fade_hi"),
+        (offset_of!(Zone, vel_fade_lo), 1, "u8", "vel_fade_lo"),
+        (offset_of!(Zone, vel_fade_hi), 1, "u8", "vel_fade_hi"),
+        (offset_of!(Zone, loop_start), 4, "u32", "loop_start"),
+        (offset_of!(Zone, loop_end), 4, "u32", "loop_end"),
+        (offset_of!(Zone, loop_mode), 1, "u8", "loop_mode"),
+        (offset_of!(Zone, reserved), 3, "u8[3]", "reserved"),
+        (offset_of!(Zone, start), 4, "u32", "start"),
+    ];
+    let mut next = 0;
+    for &(at, size, kind, name) in fields {
+        assert_eq!(at, next, "{name}");
+        next = at + size;
+        let bytes = if size == 1 { format!("{at}") } else { format!("{at}..{}", at + size - 1) };
+        let row = format!("| {bytes} | `{kind}` | `{name}` |");
+        assert!(DOC.contains(&row), "docs/engine-api.md has no row: {row}");
+        // The C struct in the document has the fields in the same order.
+        assert!(DOC.contains(&format!(" {};", if name == "reserved" { "reserved[3]" } else { name })), "{name} is not in the C struct");
+    }
+    assert_eq!(next, ZONE_SIZE);
+    // The memory the maps take: the zones, and each key's round-robin turn.
+    assert_eq!((ZONES_TOTAL * ZONE_SIZE + NUM_PARTS * 128 * 2) / 1024, 112);
+    let flat = DOC.split_whitespace().collect::<Vec<_>>().join(" ");
+    for text in [
+        "A zone is 48 bytes",
+        "at most 512 zones",
+        "2048 between them",
+        "at most 4 of them",
+        "the first 32 zones that hold the note",
+        "every 5040 hits",
+        "112 KB",
+    ] {
+        assert!(flat.contains(text), "the document no longer says: {text}");
+    }
+}
