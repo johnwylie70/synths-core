@@ -82,7 +82,9 @@ impl Lfo {
     pub fn tick(&mut self, n: u32, s: &LfoShape, free: &FreeLfo, inv_sr: f32, rng: &mut Rng) -> f32 {
         self.age = self.age.saturating_add(n);
         let value = if s.sync {
-            self.phase += n as f32 * s.rate * inv_sr;
+            // The wave starts when the delay is over, not when the note does.
+            let since = (self.age as f32 - s.delay / inv_sr).max(0.0);
+            self.phase += since.min(n as f32) * s.rate * inv_sr;
             if self.phase >= 1.0 {
                 self.phase -= self.phase.floor();
                 self.held = rng.bipolar();

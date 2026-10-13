@@ -22,8 +22,8 @@ impl Svf {
 
     /// Filter `buf` in place. `g` is tan(pi * cutoff / sample rate) at the
     /// first sample and moves by `dg` each sample; `k` is 1 / Q.
-    /// Returns false if the filter had to be reset (it never should).
-    pub fn process(&mut self, buf: &mut [f32], g: f32, dg: f32, k: f32, kind: u8) -> bool {
+    /// Returns `g` as it stands after the last sample.
+    pub fn process(&mut self, buf: &mut [f32], g: f32, dg: f32, k: f32, kind: u8) -> f32 {
         let mut ic1 = self.ic1;
         let mut ic2 = self.ic2;
         let mut g = g;
@@ -50,21 +50,24 @@ impl Svf {
             FILTER_BANDPASS => run!(|_v0, v1, v2| v1),
             _ => run!(|v0, v1, v2| v0 - k * v1),
         }
-        // Denormals to zero; anything wild (it should never happen) to silence.
-        if ic1.abs() < 1.0e-15 {
-            ic1 = 0.0;
-        }
-        if ic2.abs() < 1.0e-15 {
-            ic2 = 0.0;
-        }
-        let ok = ic1.abs() < 1.0e6 && ic2.abs() < 1.0e6;
-        if ok {
+        // Anything wild (it should never happen) becomes silence.
+        if ic1.abs() < 1.0e6 && ic2.abs() < 1.0e6 {
             self.ic1 = ic1;
             self.ic2 = ic2;
         } else {
             self.reset();
             buf.fill(0.0);
         }
-        ok
+        g
+    }
+
+    /// Turn numbers too small to matter into zero (they are slow to work with).
+    pub fn tidy(&mut self) {
+        if self.ic1.abs() < 1.0e-15 {
+            self.ic1 = 0.0;
+        }
+        if self.ic2.abs() < 1.0e-15 {
+            self.ic2 = 0.0;
+        }
     }
 }

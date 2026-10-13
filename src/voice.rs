@@ -393,6 +393,9 @@ impl Voice {
             if was_off {
                 self.filters = [[Svf::default(); 2]; 2];
             }
+            for f in self.filters.iter_mut().flatten() {
+                f.tidy();
+            }
         }
 
         // Loudness and pan.
@@ -528,12 +531,11 @@ impl Voice {
             let sides = if stereo { 2 } else { 1 };
             for side in 0..sides {
                 let buf: &mut [f32] = if side == 0 { &mut *a } else { &mut *b };
-                self.filters[side][0].process(buf, g, dg, k, kind);
+                self.g = self.filters[side][0].process(buf, g, dg, k, kind);
                 if self.filter_24 {
                     self.filters[side][1].process(buf, g, dg, core::f32::consts::SQRT_2, kind);
                 }
             }
-            self.g = g + dg * n as f32;
         }
 
         let [mut gl, mut gr] = self.gain;

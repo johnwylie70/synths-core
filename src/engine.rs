@@ -49,6 +49,8 @@ struct Part {
     has_note: bool,
     /// What is left of a voice that was cut, fading out fast so it does not click.
     declick: [f32; 2],
+    /// The same for a voice that ended during this chunk: it starts with the next.
+    ended: [f32; 2],
     volume: f32,
     crusher: Crusher,
     bus_l: [f32; CONTROL],
@@ -65,6 +67,7 @@ impl Part {
             last_note: 0.0,
             has_note: false,
             declick: [0.0; 2],
+            ended: [0.0; 2],
             volume: p[VOLUME],
             crusher: Crusher::default(),
             bus_l: [0.0; CONTROL],
@@ -115,6 +118,9 @@ pub struct Engine {
     /// Frames of silence in a row, with no voice sounding.
     quiet: u64,
     sleep_after: u64,
+    asleep: bool,
+    /// Something has sounded in this control period.
+    tick_loud: bool,
     /// Buffers for hosts that use the C interface.
     pub(crate) out_l: Box<[f32]>,
     pub(crate) out_r: Box<[f32]>,
@@ -151,6 +157,8 @@ impl Engine {
             delay_tone: (-1.0, 0.0),
             quiet: u64::MAX / 2,
             sleep_after: ((MAX_DELAY + 0.5) * sr) as u64,
+            asleep: true,
+            tick_loud: false,
             out_l: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             out_r: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             event_buf: vec![Event::default(); EVENT_BUFFER].into_boxed_slice(),
@@ -184,6 +192,7 @@ impl Engine {
         }
         for part in self.parts.iter_mut() {
             part.declick = [0.0; 2];
+            part.ended = [0.0; 2];
             part.has_note = false;
             part.volume = part.p[VOLUME];
         }
@@ -198,6 +207,7 @@ impl Engine {
         self.limiter.clear();
         self.master = self.globals[MASTER_VOLUME - GLOBAL_BASE];
         self.quiet = u64::MAX / 2;
+        self.asleep = true;
     }
 
     // ---- samples ----
@@ -484,6 +494,7 @@ impl Engine {
     pub fn apply(&mut self, e: &Event) {
         self.dirty = true;
         self.quiet = 0;
+        self.asleep = false;
         let sr = self.sample_rate;
         let part = e.part;
         let all = part == ALL_PARTS;
@@ -581,16 +592,19 @@ impl Engine {
         let sr = self.sample_rate;
         let inv_sr = 1.0 / sr;
 
-        // The parts' free-running LFOs keep time even when nothing sounds.
-        for part in self.parts.iter_mut() {
-            for i in 0..2 {
-                let rate = part.p[LFO1_RATE + i * LFO_STRIDE];
-                part.lfo[i].advance(n as f32 * rate * inv_sr, &mut self.rng);
+        if self.tick_pos == 0 {
+            // The parts' free-running LFOs keep time even when nothing sounds.
+            for part in self.parts.iter_mut() {
+                for i in 0..2 {
+                    let rate = part.p[LFO1_RATE + i * LFO_STRIDE];
+                    part.lfo[i].advance(CONTROL as f32 * rate * inv_sr, &mut self.rng);
+                }
             }
+            // Asleep: no voice has sounded and no echo has rung for a while.
+            self.asleep = self.quiet >= self.sleep_after;
+            self.tick_loud = false;
         }
-
-        // Asleep: no voice has sounded and no echo has rung for a while.
-        if self.quiet >= self.sleep_after {
+        if self.asleep {
             out_l.fill(0.0);
             out_r.fill(0.0);
             self.dirty = false;
@@ -623,8 +637,8 @@ impl Engine {
             if v.render(&mut part.bus_l[..n], &mut part.bus_r[..n], &self.samples) {
                 sounding += 1;
             } else {
-                part.declick[0] += v.last[0];
-                part.declick[1] += v.last[1];
+                part.ended[0] += v.last[0];
+                part.ended[1] += v.last[1];
                 v.state = VoiceState::Free;
             }
         }
@@ -652,9 +666,16 @@ impl Engine {
                     br[i] += dr;
                     dl *= self.declick_decay;
                     dr *= self.declick_decay;
+                    if dl.abs() + dr.abs() < 1.0e-5 {
+                        dl = 0.0;
+                        dr = 0.0;
+                    }
                 }
-                part.declick = if dl.abs() + dr.abs() < 1.0e-5 { [0.0; 2] } else { [dl, dr] };
+                part.declick = [dl, dr];
             }
+            part.declick[0] += part.ended[0];
+            part.declick[1] += part.ended[1];
+            part.ended = [0.0; 2];
             // Nothing wild gets past here into the effects.
             for x in bl.iter_mut().chain(br.iter_mut()) {
                 if !(x.abs() < 64.0) {
@@ -667,18 +688,18 @@ impl Engine {
             }
             let target = p[VOLUME];
             let mut vol = part.volume;
-            if (vol - target).abs() < 1.0e-5 {
-                vol = target;
-                if vol != 1.0 {
-                    for x in bl.iter_mut().chain(br.iter_mut()) {
-                        *x *= vol;
-                    }
-                }
-            } else {
+            if vol != target {
                 for i in 0..n {
                     vol += (target - vol) * self.smooth;
+                    if (vol - target).abs() < 1.0e-5 {
+                        vol = target;
+                    }
                     bl[i] *= vol;
                     br[i] *= vol;
+                }
+            } else if vol != 1.0 {
+                for x in bl.iter_mut().chain(br.iter_mut()) {
+                    *x *= vol;
                 }
             }
             part.volume = vol;
@@ -743,10 +764,17 @@ impl Engine {
             out_r[i] = r;
         }
         self.master = master;
-        if sounding == 0 && peak < 1.0e-6 {
-            self.quiet += n as u64;
-        } else {
-            self.quiet = 0;
+        // Silence is counted a whole control period at a time, so that when
+        // the engine falls asleep does not depend on how a host slices time.
+        if sounding > 0 || peak >= 1.0e-6 {
+            self.tick_loud = true;
+        }
+        if self.tick_pos + n == CONTROL {
+            if self.tick_loud {
+                self.quiet = 0;
+            } else {
+                self.quiet += CONTROL as u64;
+            }
         }
     }
 }

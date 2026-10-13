@@ -88,6 +88,8 @@ pub struct Player {
     pub ended: bool,
     /// The loop has been round at least once.
     looped: bool,
+    /// The last value played before the end, fading out so the end does not click.
+    tail: [f32; 2],
 }
 
 impl Player {
@@ -95,6 +97,7 @@ impl Player {
         self.pos = if pos.is_finite() && pos > 0.0 { pos } else { 0.0 };
         self.ended = false;
         self.looped = false;
+        self.tail = [0.0; 2];
     }
 
     /// Bring the position back inside the sample or its loop.
@@ -136,9 +139,13 @@ impl Player {
         let plain_end = if mode == LOOP_OFF { s.frames as i64 } else { s.loop_end as i64 } - 2;
         for i in 0..left.len() {
             if self.ended {
-                left[i] = 0.0;
-                if let Some(r) = right.as_deref_mut() {
-                    r[i] = 0.0;
+                self.tail = [self.tail[0] * 0.97, self.tail[1] * 0.97];
+                match right.as_deref_mut() {
+                    Some(r) => {
+                        left[i] = self.tail[0];
+                        r[i] = self.tail[1];
+                    }
+                    None => left[i] = if stereo { 0.5 * (self.tail[0] + self.tail[1]) } else { self.tail[0] },
                 }
                 continue;
             }
@@ -196,6 +203,9 @@ impl Player {
             self.inc += self.dinc;
             self.pos += self.inc.max(0.0) as f64;
             self.wrap(s, mode);
+            if self.ended {
+                self.tail = [l, r];
+            }
         }
     }
 }
