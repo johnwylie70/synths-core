@@ -798,6 +798,7 @@ number: it is set with `synths_macro_set`.
 - **`velocity`** With `s` this parameter and `v` the note's velocity, the
   note's level is `1 - s + s * v`: a straight line, not a curve.
 - **`mode`, `glide`, `unison.*`** See [How notes get voices](#how-notes-get-voices).
+- **`reverb.*`** See [The reverb](#the-reverb).
 - **`osc1.wave`** 4 plays the sample in slot `osc1.sample`. An empty slot is
   silent.
 - **`osc1.pulse_width`** The width used is this (or the macro step's), plus
@@ -1519,8 +1520,8 @@ host need not copy it from here.
 |---|---|---|
 | `robot` | `fx.ring` 1, `fx.ring_freq` 50, `fx.comb` 0.45, `fx.comb_freq` 110, `fx.comb_feedback` 0.8, `fx.bits` 10 | A machine: the voice multiplied by a 50 Hz wave, ringing in a metal pipe. |
 | `chipmunk` | `fx.pitch` 7 | Small and squeaky: everything seven semitones higher. |
-| `monster` | `fx.pitch` -7, `fx.drive` 0.25, `send.reverb` 0.25, `reverb.size` 0.7, `reverb.damping` 0.6 | Huge and deep: seven semitones lower, with a growl and a little room. |
-| `cave` | `send.delay` 0.5, `send.reverb` 0.7, `delay.time` 0.38, `delay.feedback` 0.55, `delay.tone` 2500, `reverb.size` 0.92, `reverb.damping` 0.3 | Far inside a cave: long echoes and a very big room. |
+| `monster` | `fx.pitch` -7, `fx.drive` 0.25, `send.reverb` 0.3, `reverb.size` 0.7, `reverb.damping` 0.6 | Huge and deep: seven semitones lower, with a growl and a little room. |
+| `cave` | `send.delay` 0.5, `send.reverb` 0.6, `delay.time` 0.38, `delay.feedback` 0.55, `delay.tone` 2500, `reverb.type` 3, `reverb.size` 0.4, `reverb.damping` 0.55 | Far inside a cave: long echoes and an enormous, dark space. |
 | `telephone` | `filter.type` 3, `filter.slope` 1, `filter.cutoff` 1200, `filter.resonance` 0.2, `fx.drive` 0.2, `fx.bits` 8, `fx.downsample` 6 | Down an old phone line: only the middle of the voice, coarse and a little crushed. |
 | `alien` | `fx.pitch` 4, `fx.ring` 0.8, `fx.ring_freq` 180, `fx.comb` 0.4, `fx.comb_freq` 600, `fx.comb_feedback` 0.75, `fx.comb_rate` 0.4, `fx.comb_depth` 0.5, `send.chorus` 0.4 | Not from here: higher, multiplied by a 180 Hz wave, with a slow metallic sweep. |
 | `whisper` | `filter.type` 2, `filter.cutoff` 500, `filter.resonance` 0, `fx.ring` 1, `fx.ring_wave` 1, `fx.ring_freq` 350 | Hoarse and breathy: the voice's pitch blurred into noise, with its low end taken off. |
@@ -1543,6 +1544,115 @@ to `target/demo/voice-dry.wav`, `voice-robot.wav` and so on.
   and a measure of loudness between them: roughly the cost of ten voices
   for the one part, and one part's sound would have to be made before
   another's, which the engine does not arrange yet.
+
+## The reverb
+
+There is one reverb, and every part sends to it with `send.reverb`. What it
+adds goes straight to the mix: there is no dry/wet control, the send is it.
+`reverb.type` chooses what kind of space it is:
+
+| value | name | what it is | its tail at size 0.5 | at size 0 to 1 | its own pre-delay |
+|---|---|---|---|---|---|
+| 0 | `room` | A small room: a short soft tail. The one to begin with. | 1 s | 0.33 to 3 s | 4 ms |
+| 1 | `hall` | A concert hall: big, smooth and warm. | 2.6 s | 0.87 to 7.8 s | 18 ms |
+| 2 | `plate` | A big sheet of metal, as studios used: bright, and thick from the first moment. Good on drums and voices. | 1.8 s | 0.6 to 5.4 s | none |
+| 3 | `cathedral` | Enormous: it swells slowly and goes on and on. | 6.5 s | 2.17 to 19.5 s | 30 ms |
+| 4 | `spring` | The spring in a guitar amp: it twangs, and boings on anything sudden. | 2 s | 0.67 to 6 s | none |
+
+The room is the one to begin with because the reverb is shared. A beginner
+turns one dial, the send, and a whole tune may be going through it: a room
+gets louder as the dial is turned and never longer, so quick notes and drums
+stay clear, where a hall's 2.6 seconds pile up under them.
+
+### How it is made
+
+```
+send.reverb ─ low cut ─ pre-delay ─┬─ 6 early reflections a side ──────────────────────────────┐
+                                    └─ 4 all-pass filters a side ─┬─ a little, straight out ─────┤
+                                                                  └─ 8 delay lines in a loop ───┴─ mix
+```
+
+The first four types are one structure with different numbers: a feedback
+delay network. Eight delay lines, of lengths that share no simple ratio,
+feed each other through a Hadamard matrix, which loses nothing and sends
+every line into every other, so that the echoes multiply into a smooth
+wash. On its way round, each line has a filter that makes the treble (and,
+by its own amount, the bass) die away at its own rate, and an all-pass
+filter that thickens the echoes. Every other line's length drifts slowly by
+a few hundredths of a millisecond, which keeps any one pitch from ringing
+on, and is too little to hear as a chorus: the reverb of a held note is a
+steady note, within 3 cents of its pitch. Left and right hear the same
+eight lines added up two different ways, so they are unlike each other,
+and their sum (on one loudspeaker) loses nothing.
+
+The spring is something else, and honest about it: two springs, each a
+delay in a loop with a chain of 30 all-pass filters that hold the high part
+of a sound back longer than the low part, up to about 4 kHz, above which a
+spring carries nothing. Every time round, a click comes out more of a
+"boing". It is not smooth, and is not meant to be.
+
+### Its parameters
+
+- **`reverb.size`** (0 to 1, 0.5 to begin with) is how big the space is.
+  Every length in it, the early reflections' and the type's own pre-delay
+  included, is 0.6 times its own at 0 and 1.4 times at 1.
+- **`reverb.decay`** is how long the tail takes to fall by 60 dB, in
+  seconds, from 0.1 to 30. At 0, where it begins, it is left to the type
+  and the size: the type's own time at size 0.5, three times shorter at
+  size 0 and three times longer at size 1. In one sentence: **size makes
+  the room bigger and its tail longer with it, unless `reverb.decay` says
+  in seconds exactly how long the tail is.** What is asked for is what is
+  got, within a tenth, from 1 to 30 seconds for every type at every size
+  (and from 0.3 seconds for the room and the plate; a hall or a cathedral
+  cannot be much shorter than half a second, since its echoes are too far
+  apart). That is measured between 500 and 1000 Hz.
+- **`reverb.damping`** (0 to 1) is how much sooner the treble dies away
+  than the rest: the treble lasts `1 / (1 + 7.5 d²)` as long, which is all
+  of the time at 0 (a bright tail), under half of it at 0.4, where it
+  begins, and an eighth at 1 (a dull one). "Treble" is above 5 kHz in the
+  room, 4 kHz in the hall, 9 kHz in the plate and 3 kHz in the cathedral
+  and the spring. The bass, below 180 Hz, lasts 1.15 times as long as the
+  middle in the hall, 1.25 times in the cathedral, 0.9 times in the plate,
+  and as long in the others.
+- **`reverb.predelay`** (0 to 0.2 seconds) is a gap before the reverb
+  starts, added to the type's own. It keeps a sound clear of its own
+  reverb.
+- **`reverb.low_cut`** (20 to 1000 Hz, 120 to begin with) keeps bass below
+  it out of the reverb (6 dB an octave), where it would turn to mud. It
+  also means nothing steady ever builds up inside.
+
+A longer tail is turned down a little and a bigger room up a little (by
+the fourth root of the decay and the square root of the size), so that the
+reverb of a held chord grows only gently with its length; and the types
+are matched, so that the same send gives about as much of each.
+
+### Changing it while it rings
+
+Nothing clicks, and nothing can make it grow.
+
+- A change of **size** slides: the echoes move apart or together, taking
+  a third to two thirds of a second from one end to the other (longest
+  for the biggest types), and what is ringing bends in pitch as they go,
+  by 15% at the very most. `reverb.predelay` slides the same way.
+- A change of **type** fades the old type out over 20 milliseconds, empties
+  it, and fades the sound into the new one over the next 20: the old tail
+  is lost.
+- `reverb.decay` and `reverb.damping` ease to their new values over about
+  a tenth of a second.
+
+### What it costs
+
+When nothing is coming in and what comes out has been under a millionth
+(0.000 001, -120 dB) for as long as its longest echo, the reverb empties
+itself and stops: from then on it puts out exactly nothing and does no
+work at all, until the first frame that is not silence wakes it. A reverb
+that no part sends to costs nothing.
+
+Working, it takes about 1.9 milliseconds for each second of sound on a
+fast laptop as native code (1.5 for the plate, 2.6 for the spring), and
+about 2.5 as WebAssembly (3.6 for the spring): as much as two or three
+voices. Its memory is made with the engine, for the biggest size of every
+type: 440 KB at 48 kHz.
 
 ## Recording
 
@@ -1734,9 +1844,13 @@ engine:  mix ─ master.volume ─ limiter ─ out
   its volume and before its sends. A recording of the input is taken after
   its gate and before `input.monitor`; a recording of the output is taken
   at `out`.
+- The echo, the [reverb](#the-reverb) and the chorus are each one effect
+  that every part shares.
 - When no voice or input has sounded and no echo or reverb has rung for 2.5
   seconds, the engine goes to sleep: it writes exact zeros and does almost
-  no work, until the next event, or the next sound coming in, wakes it.
+  no work, until the next event, or the next sound coming in, wakes it. The
+  reverb does not wait for that: it stops working by itself as soon as its
+  own tail is over.
 
 ## Threads
 

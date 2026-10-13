@@ -105,6 +105,49 @@ fn the_document_gives_the_numbers_of_the_input_and_the_voice_effects() {
 }
 
 #[test]
+fn the_document_gives_the_numbers_of_the_reverb() {
+    use synths_core::reverb::*;
+    assert_eq!((SCALE_SMALLEST, SCALE_BIGGEST, SIZE_DECAY, DECAY_MIN, DECAY_MAX, PREDELAY_MAX, QUIET, TYPE_FADE), (0.6, 1.4, 3.0, 0.1, 30.0, 0.2, 1.0e-6, 0.02));
+    assert_eq!((LINES, SPRING_STAGES), (8, 30));
+    let ms = |seconds: f32| if seconds == 0.0 { "none".to_string() } else { format!("{} ms", seconds * 1000.0) };
+    let short = |seconds: f32| format!("{}", (seconds * 100.0).round() / 100.0);
+    for (value, k) in KINDS.iter().enumerate() {
+        // Each type's row: its number, its name, its own tail and what size makes of it, its pre-delay.
+        let row = DOC.lines().find(|l| l.starts_with(&format!("| {value} | `{}` |", k.name))).unwrap_or_else(|| panic!("no row for {}", k.name));
+        let ends = format!("| {} s | {} to {} s | {} |", k.decay, short(k.decay / 3.0), short(k.decay * 3.0), ms(k.predelay));
+        assert!(row.ends_with(&ends), "{row}\nshould end: {ends}");
+    }
+    assert_eq!((treble_ratio(0.0), treble_ratio(1.0)), (1.0, 1.0 / 8.5));
+    assert!(treble_ratio(0.4) < 0.5 && treble_ratio(0.4) > 0.4);
+    let (treble, bass): (Vec<f32>, Vec<f32>) = KINDS.iter().map(|k| (k.treble_hz, k.bass)).unzip();
+    assert_eq!(treble, [5000.0, 4000.0, 9000.0, 3000.0, 3000.0]);
+    assert_eq!(bass, [1.0, 1.15, 0.9, 1.25, 1.0]);
+    assert_eq!(Reverb::new(48000.0).bytes() / 1024, 440);
+    let flat = DOC.split_whitespace().collect::<Vec<_>>().join(" ");
+    for text in [
+        "0.6 times its own at 0 and 1.4 times at 1",
+        "in seconds, from 0.1 to 30",
+        "three times shorter at size 0 and three times longer at size 1",
+        "within a tenth, from 1 to 30 seconds",
+        "`1 / (1 + 7.5 d²)`",
+        "an eighth at 1",
+        "above 5 kHz in the room, 4 kHz in the hall, 9 kHz in the plate and 3 kHz in the cathedral and the spring",
+        "below 180 Hz, lasts 1.15 times as long as the middle in the hall, 1.25 times in the cathedral, 0.9 times in the plate",
+        "(0 to 0.2 seconds)",
+        "(20 to 1000 Hz, 120 to begin with)",
+        "fades the old type out over 20 milliseconds",
+        "under a millionth (0.000 001, -120 dB)",
+        "a chain of 30 all-pass filters",
+        "Eight delay lines",
+        "within 3 cents of its pitch",
+        "by 15% at the very most",
+        "440 KB at 48 kHz",
+    ] {
+        assert!(flat.contains(text), "the document no longer says: {text}");
+    }
+}
+
+#[test]
 fn the_document_gives_the_engines_limits() {
     assert_eq!((MAX_VOICES, NUM_PARTS, MAX_SAMPLES), (64, 64, 1024));
     assert_eq!((QUEUE_CAPACITY, EVENT_BUFFER, OUTPUT_FRAMES, EVENT_SIZE), (4096, 256, 4096, 32));
