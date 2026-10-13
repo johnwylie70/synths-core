@@ -297,7 +297,7 @@ fn in_a_version_1_song_a_chord_is_the_fast_arpeggio_by_name_by_offsets_or_by_not
 
 /// A song of one pattern with these events, in version 2 unless it says otherwise.
 fn with_events(events: &str) -> String {
-    format!(r#"{{"format": "synths-song", "version": 2, "channels": 2, "patterns": [{{"rows": 32, "events": [{events}]}}], "instruments": [{{"sample": 0}}], "samples": [{{"wave": [50, -50], "loop": {{}}}}]}}"#)
+    format!(r#"{{"format": "synths-song", "version": 2, "channels": 2, "patterns": [{{"rows": 64, "events": [{events}]}}], "instruments": [{{"sample": 0}}], "samples": [{{"wave": [50, -50], "loop": {{}}}}]}}"#)
 }
 
 #[test]
@@ -459,6 +459,43 @@ fn mistakes_in_a_chord_or_an_arp_are_reported_in_words() {
     assert!(message(r#"{"arp": {"chord": "Xm"}}"#).contains("\"chord\" must be"));
     assert!(message(r#"{"arp": {"chord": "maj"}, "chordHz": 50}"#).contains("go with \"chord\""));
     assert!(message(r#"{"chord": "maj", "chordOrder": "together"}"#).contains("\"chordOrder\" must be \"up\", \"down\", \"updown\", \"written\" or \"random\""));
+}
+
+#[test]
+fn the_examples_in_the_document_are_songs_this_reads() {
+    let doc = include_str!("../docs/song-format.md");
+    let mut whole = 0;
+    let mut lines = 0;
+    for block in doc.split("```json\n").skip(1) {
+        let block = block.split("```").next().unwrap();
+        if block.contains("\"format\"") {
+            let song = native::load(block, &no_files).unwrap();
+            assert_eq!(load_saved(&native::save(&song)).unwrap(), song);
+            whole += 1;
+        } else if block.starts_with("{\"row\"") {
+            let song = native::load(&with_events(block.trim_end().trim_end_matches(',')), &no_files).unwrap_or_else(|e| panic!("{e}: {block}"));
+            assert!(song.patterns[0].events.iter().any(|e| e.chord.is_some()), "{block}");
+            lines += block.lines().count();
+        }
+    }
+    assert!(whole == 1 && lines >= 4, "{whole} {lines}");
+    // The first lines of "Chords and arpeggios" are what the text says they are.
+    let at = doc.find("### Chords and arpeggios").unwrap();
+    let block = doc[at..].split("```json\n").nth(1).unwrap().split("```").next().unwrap();
+    let song = native::load(&with_events(block), &no_files).unwrap();
+    let p = &song.patterns[0];
+    assert_eq!(p.chord(0, 0), Some(Chord::new(&[0, 3, 7, 10])));
+    assert_eq!(p.chord(16, 0), Some(Chord::arp(&[0, 3, 7, 10], Arp { octaves: 2, ..Arp::SIXTEENTHS })));
+    assert_eq!(p.chord(32, 0), Some(Chord::arp(&[0, 4, 7], Arp { rate: ArpRate::PerSecond(50.0), ..Arp::FAST })));
+    assert_eq!(p.chord(48, 0), Some(Chord::OFF));
+    // Every key and every order the document's table gives is one the reader takes.
+    for key in ["chord", "rate", "perRow", "perTick", "hz", "order", "style", "gate", "octaves", "swing", "accent"] {
+        assert!(doc.contains(&format!("| `{key}` |")), "{key}");
+    }
+    for order in ["up", "down", "updown", "updown2", "written", "random", "together"] {
+        assert!(doc.contains(&format!("`\"{order}\"`")), "{order}");
+        native::load(&with_events(&format!(r#"{{"row": 0, "ch": 0, "note": "C-4", "arp": {{"chord": "maj", "order": "{order}"}}}}"#)), &no_files).unwrap();
+    }
 }
 
 #[test]

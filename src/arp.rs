@@ -170,16 +170,6 @@ impl ArpSpec {
             }
             return n;
         }
-        let mut list = self.offsets;
-        if self.order != ORDER_AS_GIVEN {
-            for i in 1..n {
-                let mut j = i;
-                while j > 0 && list[j - 1] > list[j] {
-                    list.swap(j - 1, j);
-                    j -= 1;
-                }
-            }
-        }
         // The pattern is the notes, then the notes an octave up, and so on.
         let len = n as u32 * octaves;
         let at = match self.order {
@@ -204,7 +194,20 @@ impl ArpSpec {
             ORDER_RANDOM => rng.next_u32() % len,
             _ => k % len,
         };
-        out[0] = list[at as usize % n] as i16 + 12 * (at / n as u32) as i16;
+        let which = at as usize % n;
+        let list = &self.offsets[..n];
+        // Which of the notes that is: as given, or the one with that many
+        // below it (of two the same, the first given counts as the lower).
+        let mut note = list[which];
+        if self.order != ORDER_AS_GIVEN {
+            for (i, &a) in list.iter().enumerate() {
+                let below = list.iter().enumerate().filter(|&(j, &b)| b < a || (b == a && j < i)).count();
+                if below == which {
+                    note = a;
+                }
+            }
+        }
+        out[0] = note as i16 + 12 * (at / n as u32) as i16;
         1
     }
 

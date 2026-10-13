@@ -4,14 +4,14 @@ A song is one JSON document. It is meant to be read and changed by hand in a tex
 
 The code is `src/song/native.rs`; the model it loads into is `src/song/mod.rs`. MOD and XM files load into the same model, so anything they can say, a song can say.
 
-This is version 1.
+This is version 2. Version 1 had no way to say a chord whose notes sound together: its `chord` was always a fast one-voice arpeggio. Version 2 tells the two apart ([Chords and arpeggios](#chords-and-arpeggios)), and still reads every version 1 song as it was meant ([Songs from before](#songs-from-before)).
 
 ## A whole song
 
 ```json
 {
   "format": "synths-song",
-  "version": 1,
+  "version": 2,
   "title": "Three Notes",
   "rules": "ft2",
   "slides": "linear",
@@ -24,7 +24,7 @@ This is version 1.
       {"row": 0, "ch": 0, "note": "C-4", "ins": 1},
       {"row": 4, "ch": 0, "note": "E-4", "ins": 1, "vol": 32},
       {"row": 8, "ch": 0, "note": "G-4", "ins": 1, "fx": "A04"},
-      {"row": 8, "ch": 1, "note": "C-3", "ins": 2},
+      {"row": 8, "ch": 1, "note": "C-3", "ins": 2, "arp": {"chord": "min", "rate": "1/16"}},
       {"row": 12, "ch": 0, "note": "off"}
     ]}
   ],
@@ -42,7 +42,7 @@ That is a complete, playable song with no other files: the one sample is eight n
 
 ## Rules for readers and writers
 
-- `format` must be `"synths-song"`. `version` is a whole number; a reader refuses a version higher than it knows and says so.
+- `format` must be `"synths-song"`. `version` is a whole number, 1 if it is left out; a reader refuses a version higher than it knows and says so. A writer writes 2 for a song with a chord or an arpeggio in it and 1 for a song without, which says nothing a version 1 reader would get wrong.
 - A key a reader does not know is ignored, so a newer writer can add keys without breaking an older reader. A change that an older reader would get wrong raises `version`.
 - A key that is left out takes the default given below. A writer leaves out what is at its default.
 - Numbers are whole numbers unless said otherwise. Counting starts at 0 for rows, channels, patterns, orders and samples, and at 1 for instruments (so that 0 can mean "no instrument", as trackers have it).
@@ -81,41 +81,80 @@ An event:
 | `ins` | The instrument, from 1. |
 | `vol` | A number 0 to 64 sets the volume. A two-character text is a volume-column command, below. |
 | `fx` | An effect: a letter or digit and two hexadecimal digits, as a tracker shows it (`"A04"`, `"F7D"`, `"R23"`). `[10, 4]` is read too. |
-| `chord` | A chord for the note to play as a fast arpeggio; see [Chords](#chords). |
-| `chordSpeed`, `chordHz`, `chordOrder` | How fast and in what order the chord's notes go by. |
+| `chord` | A chord on the note: several notes sounding together. See [Chords and arpeggios](#chords-and-arpeggios). |
+| `arp` | An arpeggio on the note: the notes of a chord one at a time. |
+| `chordSpeed`, `chordHz`, `chordOrder` | Only in [songs from before](#songs-from-before). |
 
 C-4 plays a sample at 8363 frames a second (unless the sample is tuned otherwise), and is middle C for a synth patch.
 
-### Chords
+### Chords and arpeggios
 
-One channel can sound like a chord by stepping through the chord's notes very quickly, the way Commodore 64 music does. In this format that is not an effect code: the note's event says which chord.
+A **chord** is several notes sounding together. An **arpeggio** is the notes of a chord played one at a time, in a pattern, at a speed. An event has one or the other.
 
 ```json
-{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "min"},
-{"row": 4, "ch": 0, "note": "F-4", "ins": 1, "chord": [0, 4, 7, 12], "chordOrder": "updown"},
-{"row": 8, "ch": 0, "ins": 1, "chord": "Gm7", "chordHz": 60},
-{"row": 12, "ch": 0, "chord": "off"}
+{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "m7"},
+{"row": 16, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "m7", "rate": "1/16", "order": "up", "octaves": 2, "gate": 0.5}},
+{"row": 32, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj", "hz": 50}},
+{"row": 48, "ch": 0, "arp": "off"}
 ```
 
-`chord` is one of:
+The first is the four notes of C minor seventh together. The second is a trance arpeggio: those notes one after another in sixteenths, up through two octaves, each held for half its step. The third is the chord of a Commodore 64 tune: one voice stepping through C major 50 times a second, so fast that the ear hears the notes together.
+
+**The notes** are given the same way for both, as `chord` (on the event for notes together, inside `arp` for an arpeggio):
 
 - A kind of chord by name, built on the event's note: `"maj"`, `"min"` (or `"m"`), `"dim"`, `"aug"`, `"sus2"`, `"sus4"`, `"5"`, `"6"`, `"m6"`, `"7"`, `"maj7"`, `"m7"`, `"dim7"`, `"m7b5"`, `"9"`, `"maj9"`, `"m9"`, `"add9"`, `"oct"`.
 - A chord with its root, as on a song sheet: `"C"`, `"Cm7"`, `"F#maj7"`, `"Bb7"`. If the event has no `note`, the root in octave 4 becomes its note; if it has one, the root must be that note.
 - A list of 1 to 8 numbers: each note of the chord in semitones from the event's note. The note itself is 0, and is only played if it is in the list.
 - A list of 1 to 8 note names, which needs the event to have a `note` to measure them from.
-- `"off"`, to stop the channel's chord and leave its note sounding plain.
 
-A chord carries on, row after row, until the channel's next note. That note plays plain unless it has a chord of its own. An event with a chord and no note changes the chord of the note that is sounding.
+**`chord`**, on an event, plays those notes together, all starting on the row. They are one thing on the channel: the channel's volume, panning, slides and effects move them all, key off lets them all go, and the channel's next note takes their place. It takes a voice for each note.
+
+**`arp`** is `{"chord": ..., ...}` with any of:
 
 | Key | Meaning | Default |
 |---|---|---|
-| `chordSpeed` | Steps in each tick, so the chord keeps time with the song. May be a fraction. | 1 |
-| `chordHz` | Steps a second, whatever the tempo. 50 is the classic rate. Give this or `chordSpeed`, not both. | |
-| `chordOrder` | `"up"` (lowest to highest, round and round), `"down"`, `"updown"`, `"written"` (as listed) or `"random"`. | `"up"` |
+| `chord` | The notes, as above. It must be there. | |
+| `rate` | How long each step is, as a note length: `"1/1"`, `"1/2"`, `"1/4"`, `"1/8"`, `"1/16"`, `"1/32"` or `"1/64"`; with a `t` for one of a triplet (`"1/8t"`, two thirds as long) or a dot for a dotted note (`"1/8."`, half as long again). | `"1/16"` |
+| `perRow` | Or: steps in each row of the pattern. May be a fraction (0.5 is a step every two rows). | |
+| `perTick` | Or: steps in each tick. | |
+| `hz` | Or: steps a second, whatever the song's tempo. 50 is the classic rate of a chip's chord. | |
+| `order` | `"up"` (lowest to highest, round and round), `"down"`, `"updown"` (up and back down, the top and bottom played once), `"updown2"` (the top and bottom played twice), `"written"` (as listed), `"random"`, or `"together"` (every note at once on each step: a chord stabbed in time). | `"up"` |
+| `style` | `"strike"`: each step is a new note, its sample or its envelopes starting again. `"slide"`: one voice, struck once, whose pitch jumps from note to note. | `"strike"` with `rate` or `perRow`; `"slide"` with `perTick` or `hz` |
+| `gate` | Struck notes: how much of its step each is held before it is let go, 0.05 to 1. At 1 each is held until the next is struck. | 0.5 |
+| `octaves` | 1 to 4: the pattern runs through the chord, then the chord an octave up, and so on. | 1 |
+| `swing` | 0 to 0.75: every second step is this part of a step late. | 0 |
+| `accent` | Struck notes: how hard each step is struck, a list of up to 8 levels that goes round, each 0 (a rest) to 15 (full). The last must not be 0. | every step full |
 
-A writer always writes a chord as its list of numbers, so a name survives loading and saving as the chord it meant, not as the name.
+An `arp` has one of `rate`, `perRow`, `perTick` and `hz`.
 
-The player hands a chord to the voice as one instruction, and the voice does the stepping, so the steps do not have to fall on ticks. This is separate from the trackers' arpeggio effect `0xy`, which is kept for songs that came from MOD and XM files and behaves exactly as those trackers did: three notes, a step a tick, restarting on every row.
+**Note lengths count four rows to the beat**, as trackers do: a sixteenth is a row, an eighth two rows, a quarter four, whatever the song's `speed`. So `"1/16"` puts a step on every row, `"1/8t"` three steps in every four rows, and `"1/32"` two in a row. (At speed 6 a row's six ticks give `"1/32"` and the triplets whole ticks; at other speeds a step may fall between two ticks, and does.) A change of tempo or speed in the song is taken up at the arpeggio's next step.
+
+**How long it lasts.** A chord or an arpeggio carries on, row after row, until the channel's next note; that note plays plain unless it has one of its own. An event with an `arp` or a `chord` and no note changes the one that is running: an arpeggio takes its new notes, rate and style at its next step and keeps its place in the pattern, so a held arpeggio can follow a song's chords; a chord is struck anew on that row. `"arp": "off"` (or `"chord": "off"`) ends an arpeggio: a voice whose pitch was jumping plays on at the note's own pitch, and a struck arpeggio strikes no more, the note in hand finishing its gate. Key off lets go of a chord's notes and ends a struck arpeggio.
+
+**What is struck.** With an instrument that is samples, each struck note starts the sample again (from where an offset effect put the start of the note); with a synth patch it is a new note of the patch. The instrument's volume and panning envelopes, its fade and its vibrato are the channel's and run across the whole arpeggio as across one note. A short gate cuts a sample short, as the cut effect does; with samples that should ring, use a gate of 1.
+
+A writer writes the notes as their list of numbers, so a name survives loading and saving as the chord it meant, not as the name, and leaves out what is at its default.
+
+This is all separate from the trackers' arpeggio effect `0xy`, which is kept for songs that came from MOD and XM files and behaves exactly as those trackers did: three notes, a step a tick, restarting on every row.
+
+### Songs from before
+
+In version 1 there was only `chord`, and it always meant the fast one-voice arpeggio, timed by three keys beside it on the event:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `chordSpeed` | Steps in each tick. May be a fraction. | 1 |
+| `chordHz` | Steps a second, whatever the tempo. Give this or `chordSpeed`, not both. | |
+| `chordOrder` | `"up"`, `"down"`, `"updown"`, `"written"` or `"random"`. | `"up"` |
+
+A reader still takes them, by this rule:
+
+- In a song whose `version` is 1 (or is left out), every `chord` is that arpeggio, with or without the three keys.
+- In a version 2 song, a `chord` with any of `chordSpeed`, `chordHz` and `chordOrder` beside it is that arpeggio too. A `chord` alone is notes together.
+
+Either way it is read as `"arp": {"chord": ..., "perTick": chordSpeed, "order": chordOrder}` (or `"hz": chordHz`), which is one voice (the style `perTick` and `hz` have unless they say otherwise), sounds exactly as it did, and is written back in that shape: a writer never writes the three keys. (`arp` may be used in a version 1 song; its meaning never changed. The three keys beside an `arp` are a mistake.)
+
+One thing about such an arpeggio is as it always was: with `perTick`, one octave and no swing, its speed is worked out from the tempo of the row it begins on, and a later change of tempo does not move it.
 
 ### Volume-column commands
 
@@ -224,7 +263,7 @@ All numbers are little-endian. Text is a `u16` length and then that many bytes o
 | bytes | |
 |---|---|
 | 4 | The letters `SYSG`. |
-| `u16` | Version: 1. A reader refuses a higher one. |
+| `u16` | Version: 1, or 2 if any event is followed by a chord in full (below). A reader refuses a higher one. |
 | `u16` | Flags: bit 0 set for ProTracker rules (clear for FastTracker 2); bit 1 set for Amiga slides (clear for linear). |
 | `u8`, `u8` | Speed (ticks in a row) and tempo (beats a minute). |
 | `u16` | Restart: the place in the order to go back to. |
@@ -247,20 +286,37 @@ and each of its events, in order of row and then channel:
 |---|---|
 | `u16` | Row. |
 | `u8` | Channel. |
-| `u8` | 1 if a chord follows this event, else 0. |
+| `u8` | What follows this event: 0 nothing, 1 an arpeggio as version 1 packed it (16 bytes), 2 a chord or arpeggio in full (32 bytes). |
 | `u8` × 5 | Note (0 none, 1 to 96 for C-0 to B-7, 97 off), instrument (0 none), the volume column, the effect, the effect's number. |
 
 The volume column is as FastTracker 2 stores it: 0 for nothing, `0x10` to `0x50` for a volume of 0 to 64, and from `0x60` a command in the high four bits (`6` `-`, `7` `+`, `8` `D`, `9` `U`, `A` `S`, `B` `V`, `C` `P`, `D` `L`, `E` `R`, `F` `M`, in the JSON's letters) with its number in the low four. The effect is 0 to 35: the JSON's digit or letter as a base-36 digit.
 
-A chord, when the event has one, is 16 bytes:
+An arpeggio as version 1 packed it is 16 bytes. It is always one voice whose pitch jumps (`"style": "slide"`), one octave, and it is what a writer still uses for an arpeggio that needs no more, and for "off", so that a song with nothing newer in it packs to the same bytes as before:
 
 | bytes | |
 |---|---|
-| `u8` | How many offsets are used, 0 to 8; 0 is "chord off". |
+| `u8` | How many offsets are used, 0 to 8; 0 is "off". |
 | `u8` | Order: 0 up, 1 down, 2 updown, 3 written, 4 random. |
-| `u8` | 0 if the rate is steps a tick (`chordSpeed`), 1 if steps a second (`chordHz`). |
+| `u8` | 0 if the rate is steps a tick (`perTick`), 1 if steps a second (`hz`). |
 | `u8` | 0. |
 | `f32` | The rate. |
+| `i8` × 8 | The offsets; those not used are 0. |
+
+A chord or arpeggio in full is 32 bytes:
+
+| bytes | |
+|---|---|
+| `u8` | How many offsets are used, 1 to 8. |
+| `u8` | 0 for a chord (its notes together; the next 22 bytes are then not used), 1 for an arpeggio. |
+| `u8` | Order: 0 up, 1 down, 2 updown, 3 written, 4 random, 5 updown2, 6 together. |
+| `u8` | Style: 0 slide, 1 strike. |
+| `u8` | What the rate is: 0 steps a tick, 1 steps a second, 2 steps a row, 3 a note length. |
+| `u8`, `u8` | For a note length: how many make a whole note (1, 2, 4 ... 64), and 0 for plain, 1 for one of a triplet, 2 for dotted. |
+| `u8` | Octaves, 1 to 4. |
+| `f32` | The rate, when it is not a note length. |
+| `f32` | Gate, 0.05 to 1. |
+| `f32` | Swing, 0 to 0.75. |
+| `u32` | Accents: four bits a step, the first step lowest, each 0 to 15; as long as its last four bits that are not 0; 0 for none. |
 | `i8` × 8 | The offsets; those not used are 0. |
 
 **Then each instrument**
@@ -298,9 +354,8 @@ This comes after everything a reader of the first layout looks at, so such a rea
 
 A reader takes a file that ends early as far as it goes, treats counts and lengths that the bytes cannot back up as smaller, and never fails on a damaged one: what does not make sense is left out.
 
-## What is not in version 1
+## What is not in the format
 
 - Stereo samples (the channels are mixed to one).
 - Mixer and effect settings beyond panning.
 - A separate order list for each channel.
-- A packed binary form. The JSON is made so that one can be derived from it mechanically: notes, instruments and effects all have a number form as well as a text one.

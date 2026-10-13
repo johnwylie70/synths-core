@@ -59,7 +59,7 @@ const engine = x.synths_create(SR);
 // Write events into the engine's buffer, then hand them over.
 function push(events) {
   const view = new DataView(memory.buffer, x.synths_event_buffer(engine), events.length * 32);
-  events.forEach(([time, type, part, a, xv, y], i) => {
+  events.forEach(([time, type, part, a, xv, y, z, b], i) => {
     const at = i * 32;
     view.setFloat64(at, time, true);
     view.setUint16(at + 8, type, true);
@@ -67,8 +67,8 @@ function push(events) {
     view.setUint32(at + 12, a, true);
     view.setFloat32(at + 16, xv, true);
     view.setFloat32(at + 20, y || 0, true);
-    view.setFloat32(at + 24, 0, true);
-    view.setUint32(at + 28, 0, true);
+    view.setFloat32(at + 24, z || 0, true);
+    view.setUint32(at + 28, b || 0, true);
   });
   const taken = x.synths_push_events(engine, events.length);
   if (taken !== events.length) throw new Error(`only ${taken} of ${events.length} events were taken`);
@@ -121,6 +121,43 @@ if (x.synths_macro_set(engine, 0, macro, 3, 0, 3, 255, 0) !== 0) throw new Error
 x.synths_render(engine, 4096);
 x.synths_macro_set(engine, 0xffff, 0, 0, 0, 0, 0, 0);
 [scope, levels, words, macro].forEach((p) => x.synths_free(p));
+
+// A chord (its notes together under one handle), then an arpeggio struck in
+// sixteenths at 150 beats a minute: four steps in 19200 frames at 48 kHz.
+x.synths_reset(engine);
+const ARP = 13, ARP_STYLE = 17, ARP_BEAT = 18, ARP_NOTES = 19, NOTE_OFF = 2;
+let t0 = x.synths_time(engine);
+push([
+  [t0, PARAM, 0, id['amp.release'], 0],
+  [t0, PARAM, 0, id.tempo, 150],
+  [t0, ARP, 0, 0, -1, 6, 3, 0x00070300],
+  [t0, NOTE_ON, 0, 5, 60, 0.3],
+  [t0 + 4800, NOTE_OFF, 0, 5, 0],
+]);
+x.synths_render(engine, 2048);
+const together = x.synths_active_voices(engine);
+x.synths_render(engine, 4096);
+t0 = x.synths_time(engine);
+push([
+  [t0, ARP_NOTES, 0, 0, 0, 0, 3, 0x00070300],
+  [t0, ARP_STYLE, 0, 0, 0.25, 2, 0, 0],
+  [t0, ARP_BEAT, 0, 0, 4],
+  [t0, NOTE_ON, 0, 6, 60, 0.3],
+  [t0 + 19200, NOTE_OFF, 0, 6, 0],
+]);
+let struck = 0, sounding = 0;
+for (let i = 0; i < 180; i++) {
+  x.synths_render(engine, 128);
+  const now = x.synths_active_voices(engine);
+  if (now > sounding) struck++;
+  sounding = now;
+}
+console.log(`a chord of ${together} voices under one handle; an arpeggio in sixteenths at 150: ${struck} notes struck in 0.4 s`);
+if (together !== 3 || struck !== 4 || sounding !== 0) {
+  console.error('the chord or the arpeggio is not what was asked for');
+  process.exit(1);
+}
+push(['amp.release', 'tempo'].map((name) => [x.synths_time(engine), PARAM, 0, id[name], table.params.find((p) => p.name === name).default]));
 
 // A sample, through memory from synths_alloc.
 const frames = 4800;

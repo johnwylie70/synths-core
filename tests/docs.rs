@@ -187,7 +187,7 @@ fn the_document_lists_everything_a_sequencer_can_do() {
             assert!(DOC.contains(&format!("`{name}(")), "Voices::{name} is not in the document");
         }
     }
-    assert_eq!(count, 21);
+    assert_eq!(count, 27);
     for text in ["fn advance(&mut self, voices: &mut Voices<'_>) -> u32", "`Sequencer::reset`", "`Engine::set_sequencer("] {
         assert!(DOC.contains(text), "the document no longer says: {text}");
     }
@@ -265,4 +265,30 @@ fn the_document_gives_the_zone_record_and_the_numbers_of_the_sample_maps() {
     ] {
         assert!(flat.contains(text), "the document no longer says: {text}");
     }
+}
+
+#[test]
+fn the_document_gives_the_numbers_of_the_arpeggiators() {
+    use synths_core::arp::*;
+    assert_eq!((MAX_ARPEGGIATORS, ARPEGGIATOR_VOICES, MAX_OFFSETS, MAX_OCTAVES), (32, 8, 8, 4));
+    assert_eq!((MIN_GATE, MAX_SWING, ORDER_UP_DOWN_ENDS, ORDER_TOGETHER), (0.05, 0.75, 5, 6));
+    let tempo = synths_core::params::by_name("tempo").unwrap();
+    assert_eq!((tempo.id, tempo.min, tempo.max, tempo.default), (224, 20.0, 999.0, 120.0));
+    for text in [
+        "32 can run at once",
+        "It never has more than 8",
+        "up to 8 voices in all for one arpeggio",
+        "0.05..1. At 1 a note is held until the next is struck",
+        "octaves, 1..4",
+        "swing, 0..0.75",
+        "parameter (id 224, beats a minute), 0.01..64",
+        "5 up then down with the top and bottom notes twice, 6 all the notes together",
+        "`sample_rate * 60 / (tempo * steps)` frames",
+        "every 6000 frames exactly",
+    ] {
+        assert!(DOC.contains(text), "the document no longer says: {text}");
+    }
+    // The examples' packed offsets are the chords they say they are.
+    assert_eq!(u32::from_le_bytes([0, 3, 7, 10]), 0x0a070300);
+    assert!(DOC.matches("0x0a070300);").count() == 2);
 }

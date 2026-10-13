@@ -113,6 +113,7 @@ impl Engine {
     /// Make an arpeggiator, in a free place or else the place of the one
     /// that has run longest. Its first step is taken on this frame, once
     /// every event of the frame has had its say.
+    #[inline(never)]
     fn arp_new(&mut self, part: u16, handle: u32, root: f32, velocity: f32, spec: ArpSpec) -> usize {
         let i = match self.arps.iter().position(|a| !a.live) {
             Some(i) => i,
@@ -142,6 +143,7 @@ impl Engine {
 
     /// A `note_on` for a part with an arpeggio waiting that an arpeggiator
     /// is to play: the arpeggiator is the note.
+    #[inline(never)]
     pub(super) fn arp_begin(&mut self, part: u16, handle: u32, note: f32, velocity: f32) {
         let spec = core::mem::replace(&mut self.parts[part as usize].next_arp, ArpSpec::NONE);
         if handle != 0 {
@@ -152,6 +154,7 @@ impl Engine {
 
     /// Let go of the notes an arpeggiator is holding down. One that has
     /// made no sound yet is simply taken away.
+    #[inline(never)]
     fn arp_let_go(&mut self, id: u16) {
         for v in self.voices.iter_mut() {
             if v.state == VoiceState::Held && v.arp.owner == id {
@@ -169,6 +172,7 @@ impl Engine {
 
     /// Cut the oldest of an arpeggiator's notes that are dying away until
     /// it has no more than `room` voices.
+    #[inline(never)]
     fn arp_trim(&mut self, id: u16, room: usize) {
         loop {
             let mut count = 0;
@@ -190,12 +194,14 @@ impl Engine {
 
     /// Strike one note for an arpeggiator: an ordinary note of its part,
     /// marked as its own.
+    #[inline(never)]
     fn arp_note_on(&mut self, a: &Arpeggiator, shift: f32, velocity: f32) {
         let pi = a.part as usize;
         let before = self.born;
         // An arpeggio waiting for the part's next note is not for this one.
         let waiting = core::mem::replace(&mut self.parts[pi].next_arp, ArpSpec::NONE);
-        self.note_on(a.part, a.handle, a.root + shift, velocity);
+        // (Through `apply`, so that there is one copy of the code that starts a note.)
+        self.apply(&Event::note_on(0.0, a.part, a.handle, a.root + shift, velocity));
         self.parts[pi].next_arp = waiting;
         // In mono and legato mode the part's one voice has moved to the note.
         let mono = self.parts[pi].p[MODE] as u8 != 0;
@@ -219,6 +225,7 @@ impl Engine {
     }
 
     /// Begin a step: now, or with swing a little later.
+    #[inline(never)]
     fn arp_take_step(&mut self, i: usize, frames: f32) {
         let mut a = self.arps[i];
         if !a.live || a.stopping {
@@ -260,6 +267,7 @@ impl Engine {
     }
 
     /// Sound the step that is waiting.
+    #[inline(never)]
     fn arp_strike(&mut self, i: usize) {
         let mut a = self.arps[i];
         a.strike_at = NEVER;
@@ -313,6 +321,7 @@ impl Engine {
 
     /// Whatever the arpeggiators have to do on this frame. Returns the
     /// next frame any of them has something to do on.
+    #[inline(never)]
     pub(super) fn run_arps(&mut self) -> u64 {
         let now = self.time;
         let mut next = NEVER;
@@ -348,6 +357,7 @@ impl Engine {
     /// note whose pitch was jumping goes back to its own pitch and stays);
     /// without, they are simply gone, and their voices are the caller's
     /// business.
+    #[inline(never)]
     pub(super) fn arp_end(&mut self, part: u16, handle: u32, finish: bool) {
         for i in 0..MAX_ARPEGGIATORS {
             let a = self.arps[i];
@@ -447,6 +457,7 @@ impl Engine {
 
     /// An event about arpeggios. True if it has been dealt with here;
     /// false if it is for a voice's own arpeggio (`arp` and `arp_more`).
+    #[inline(never)]
     pub(super) fn arp_event(&mut self, e: &Event) -> bool {
         let (part, handle) = (e.part, e.a);
         let (now, sr, tempo) = (self.time, self.sample_rate, self.tempo());
