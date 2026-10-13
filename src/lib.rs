@@ -22,11 +22,15 @@ pub mod macros;
 pub mod math;
 pub mod osc;
 pub mod params;
+#[cfg(feature = "songs")]
 pub mod replayer;
 pub mod sample;
 pub mod sequencer;
+#[cfg(feature = "songs")]
 pub mod song;
+#[cfg(feature = "songs")]
 pub mod song_abi;
+#[cfg(feature = "songs")]
 pub mod song_player;
 pub mod taps;
 pub mod voice;

@@ -185,6 +185,7 @@ pub struct Engine {
     /// What a display reads: scope, meters, sounding notes.
     pub(crate) taps: Box<Taps>,
     /// The song that is loaded, as a host may read it while sound is made.
+    #[cfg(feature = "songs")]
     pub(crate) song: Option<std::sync::Arc<crate::song_player::Shared>>,
     meter: [f32; 4],
     /// How much a meter's peak and mean square keep, per control period and per sample.
@@ -236,6 +237,7 @@ impl Engine {
             tick_loud: false,
             arp_at: u64::MAX,
             taps: Box::new(Taps::new(NUM_PARTS)),
+            #[cfg(feature = "songs")]
             song: None,
             meter: [0.0; 4],
             peak_keep: (-(CONTROL as f32) / (0.5 * sr)).exp(),

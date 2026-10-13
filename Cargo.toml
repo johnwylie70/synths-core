@@ -15,11 +15,15 @@ publish = false
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-default = ["json"]
+default = ["songs", "json"]
+# The tracker song player: the MOD and XM loaders, the replayer, the packed
+# song form and the `synths_song_` functions. About 100 KB of a WebAssembly
+# module; a build that only wants the synth can leave it out.
+songs = []
 # Reading and writing songs as JSON (docs/song-format.md). The WebAssembly
 # build leaves it out: a host there reads JSON for nothing, and hands the
 # engine the packed form of the song instead.
-json = []
+json = ["songs"]
 
 [dependencies]
 

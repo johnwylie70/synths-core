@@ -35,7 +35,14 @@ sound, the levels and the notes that are playing.
 | iOS static library | `cargo build --release --target aarch64-apple-ios` | `target/aarch64-apple-ios/release/libsynths_core.a` |
 | library for this machine | `cargo build --release` | `target/release/libsynths_core.a` and `.dylib` (or `.so`) |
 
-The functions are the same in all three.
+The functions are the same in all three, but for two cargo features, both on
+unless turned off. `songs` is the tracker song player and every
+`synths_song_` function; `scripts/build-wasm.sh --no-songs` builds a module
+without it, `target/wasm/synths_core.synth-only.wasm`, for a page that only
+wants the synth. `json` (which needs `songs`) is the reader of songs as JSON;
+`scripts/build-wasm.sh --no-json` builds a module without it,
+`target/wasm/synths_core.no-json.wasm`. See
+[Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 ## Words and units
 
@@ -1007,15 +1014,15 @@ quirks included. Our own songs say which they want.
 
 | kind | read by |
 |---|---|
-| MOD, XM | every build |
-| our own format, packed | every build |
+| MOD, XM | every build with the `songs` feature |
+| our own format, packed | every build with the `songs` feature |
 | our own format, as JSON | builds with the `json` feature, which is on unless a build turns it off |
 
 The JSON reader is about 35 KB of a WebAssembly module. `scripts/build-wasm.sh`
 leaves it in, so that one reader decides what a song's JSON means for a page,
-for Python and for a native app alike; a build made with
-`--no-default-features` is that much smaller and reads MOD, XM and packed
-songs only. `synths_song_pack` turns a MOD or an XM into the packed form for
+for Python and for a native app alike; a module built with
+`scripts/build-wasm.sh --no-json` is that much smaller and reads MOD, XM and
+packed songs only. `synths_song_pack` turns a MOD or an XM into the packed form for
 a page to unpack into its own JSON (`docs/song-format.md` gives both, field
 for field), which is how an editor opens a tracker module.
 
@@ -1293,7 +1300,10 @@ bound.
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro and times it. The
 module is about 308 KB (124 KB gzipped), of which the song loaders and
-player are about 135 KB, the JSON song reader 35 KB of that: see
+player are about 135 KB, the JSON song reader 35 KB of that. Two smaller
+modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
+reader (273 KB, 110 KB gzipped), and `--no-songs` the whole song player
+(175 KB, 69 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
