@@ -165,6 +165,62 @@ if (up !== 440 || recording !== 0 || recorded !== 4800 || read !== 4800 || x.syn
 x.synths_sample_free(engine, 1);
 push([[x.synths_time(engine), PARAM, VOICE, id['fx.pitch'], 0]]);
 
+// A sample map: two recordings, of the A below middle C and the A two
+// octaves above it, each covering half the keyboard. A note in each half
+// comes out at its own pitch, from the recording nearest it.
+x.synths_reset(engine);
+[[2, 220], [3, 880]].forEach(([slot, hz]) => {
+  const tone = x.synths_alloc(2 * SR * 4);
+  new Float32Array(memory.buffer, tone, 2 * SR).forEach((_, i, data) => { data[i] = 0.5 * Math.sin((2 * Math.PI * hz * i) / SR); });
+  if (x.synths_sample_load(engine, slot, tone, 2 * SR, 1, SR) !== 0) throw new Error('the sample did not load');
+  x.synths_free(tone);
+});
+const ZONE = table.limits.zone_size;
+const zones = x.synths_alloc(4 * ZONE);
+new Uint8Array(memory.buffer, zones, 4 * ZONE).fill(0);
+const zone = new DataView(memory.buffer, zones, 2 * ZONE);
+[[2, 0, 68, 57], [3, 69, 127, 81]].forEach(([slot, lowest, highest, root], i) => {
+  const at = i * ZONE;
+  zone.setUint16(at, slot, true);
+  zone.setUint8(at + 2, lowest);
+  zone.setUint8(at + 3, highest);
+  zone.setUint8(at + 5, 127);          // every velocity
+  zone.setFloat32(at + 8, root, true);
+  zone.setFloat32(at + 16, 1, true);   // volume
+  zone.setFloat32(at + 24, -1, true);  // the part's own release
+});
+if (x.synths_zones_set(engine, 5, zones, 2, 0) !== 0) throw new Error('the zones were refused');
+const readBack = x.synths_zones_read(engine, 5, zones + 2 * ZONE, 2);
+const bytes = new Uint8Array(memory.buffer, zones, 4 * ZONE);
+const same = bytes.subarray(0, 2 * ZONE).every((b, i) => b === bytes[2 * ZONE + i]);
+const pitches = [45, 93].map((note) => {
+  x.synths_reset(engine);
+  const at = x.synths_time(engine);
+  push([[at, PARAM, 5, id['osc1.wave'], 4], [at, PARAM, 5, id['amp.attack'], 0], [at, NOTE_ON, 5, 0, note, 1]]);
+  const sound = new Float32Array(SR);
+  for (let done = 0; done < SR; done += 128) {
+    const n = x.synths_render(engine, Math.min(128, SR - done));
+    sound.set(new Float32Array(memory.buffer, x.synths_output_left(engine), n), done);
+  }
+  // The pitch, from the time between the first and last upward crossings of zero.
+  let ups = 0, from = 0, to = 0;
+  for (let i = 12001; i < SR; i++) {
+    if (sound[i - 1] < 0 && sound[i] >= 0) {
+      to = i - 1 + sound[i - 1] / (sound[i - 1] - sound[i]);
+      if (ups++ === 0) from = to;
+    }
+  }
+  return ((ups - 1) * SR) / (to - from);
+});
+console.log(`a sample map: ${x.synths_zones_count(engine, 5)} zones of ${ZONE} bytes, notes 45 and 93 at ${pitches.map((hz) => hz.toFixed(1)).join(' and ')} Hz`);
+if (readBack !== 2 || !same || x.synths_zones_count(engine, 5) !== 2 || Math.abs(pitches[0] - 110) > 0.1 || Math.abs(pitches[1] - 1760) > 1) {
+  console.error('the sample map did not play the notes it should');
+  process.exit(1);
+}
+x.synths_zones_clear(engine, 0xffff);
+x.synths_free(zones);
+x.synths_reset(engine);
+
 // Time a busy engine: 64 voices with everything on, 10 seconds of sound.
 x.synths_reset(engine);
 const busy = [
