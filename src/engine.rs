@@ -3,6 +3,7 @@
 //! `render` never allocates, locks or waits. Everything it needs is made in
 //! `Engine::new`.
 
+use crate::arp::ArpSpec;
 use crate::event::*;
 use crate::fx::{Chorus, Crusher, Delay, Limiter, Reverb};
 use crate::lfo::FreeLfo;
@@ -59,6 +60,8 @@ struct Part {
     ended: [f32; 2],
     volume: f32,
     crusher: Crusher,
+    /// An arpeggio waiting for the part's next note.
+    next_arp: ArpSpec,
     steps: Macro,
     /// Peak left and right, and mean square left and right, for the meters.
     meter: [f32; 4],
@@ -79,6 +82,7 @@ impl Part {
             ended: [0.0; 2],
             volume: p[VOLUME],
             crusher: Crusher::default(),
+            next_arp: ArpSpec::NONE,
             steps: Macro::none(),
             meter: [0.0; 4],
             bus_l: [0.0; CONTROL],
@@ -132,6 +136,8 @@ pub struct Engine {
     asleep: bool,
     /// Something has sounded in this control period.
     tick_loud: bool,
+    /// The frame of the next arpeggio step of any voice.
+    arp_at: u64,
     /// What a display reads: scope, meters, sounding notes.
     pub(crate) taps: Box<Taps>,
     meter: [f32; 4],
@@ -178,6 +184,7 @@ impl Engine {
             sleep_after: ((MAX_DELAY + 0.5) * sr) as u64,
             asleep: true,
             tick_loud: false,
+            arp_at: u64::MAX,
             taps: Box::new(Taps::new(NUM_PARTS)),
             meter: [0.0; 4],
             peak_keep: (-(CONTROL as f32) / (0.5 * sr)).exp(),
@@ -218,6 +225,7 @@ impl Engine {
         for part in self.parts.iter_mut() {
             part.declick = [0.0; 2];
             part.ended = [0.0; 2];
+            part.next_arp = ArpSpec::NONE;
             part.has_note = false;
             part.volume = part.p[VOLUME];
         }
@@ -556,7 +564,17 @@ impl Engine {
                 born: self.born,
             };
             self.voices[slot].start(&start, p, &self.samples, sr);
+            // An arpeggio that was waiting for this note.
+            let arp = self.parts[pi].next_arp;
+            if arp.count > 0 {
+                let v = &mut self.voices[slot];
+                let mut rng = v.rng;
+                v.arp.set(&arp, self.time, sr, &mut rng);
+                v.rng = rng;
+                self.arp_at = self.time;
+            }
         }
+        self.parts[pi].next_arp = ArpSpec::NONE;
         self.parts[pi].last_note = note;
         self.parts[pi].has_note = true;
     }
@@ -596,8 +614,41 @@ impl Engine {
                 for v in self.voices.iter_mut() {
                     if v.active() && (all || v.part == part) {
                         v.macro_player.ticks = v.macro_player.ticks.saturating_add(1);
+                        let mut rng = v.rng;
+                        if v.arp.tick(&mut rng) {
+                            v.pitch_jump = true;
+                        }
+                        v.rng = rng;
                     }
                 }
+            }
+            EV_ARP | EV_ARP_MORE => {
+                let first = e.kind == EV_ARP;
+                if e.a == 0 {
+                    // For the next note of the part.
+                    if let Some(p) = self.parts.get_mut(part as usize) {
+                        if first {
+                            p.next_arp = ArpSpec::from_event(e.x, e.y, e.z, e.b);
+                        } else {
+                            p.next_arp.set_packed(4, e.b);
+                        }
+                    }
+                    return;
+                }
+                let spec = ArpSpec::from_event(e.x, e.y, e.z, e.b);
+                for v in self.voices.iter_mut() {
+                    if v.active() && v.handle == e.a && (all || v.part == part) {
+                        let mut rng = v.rng;
+                        if first {
+                            v.arp.set(&spec, self.time, sr, &mut rng);
+                        } else {
+                            v.arp.set_more(4, e.b, self.time, sr, &mut rng);
+                        }
+                        v.rng = rng;
+                        v.pitch_jump = true;
+                    }
+                }
+                self.arp_at = self.time;
             }
             EV_PARAM => self.set_param_gliding(part, e.a as usize, e.x, e.y),
             EV_PITCH_BEND => self.set_param_gliding(part, BEND, e.x, e.y),
@@ -650,10 +701,27 @@ impl Engine {
                     self.apply(&e);
                 }
             }
+            // Arpeggio steps that fall on this frame; then find the next one.
+            if self.arp_at <= self.time {
+                let mut next = u64::MAX;
+                for v in self.voices.iter_mut() {
+                    if v.active() && v.arp.active() {
+                        let mut rng = v.rng;
+                        if v.arp.run(self.time, &mut rng) {
+                            v.pitch_jump = true;
+                            self.dirty = true;
+                        }
+                        v.rng = rng;
+                        next = next.min(v.arp.next_frame());
+                    }
+                }
+                self.arp_at = next;
+            }
             let mut n = (frames - done).min(CONTROL - self.tick_pos);
             if let Some(t) = self.queue.next_time() {
                 n = n.min((t - self.time).min(CONTROL as u64) as usize);
             }
+            n = n.min((self.arp_at - self.time).min(CONTROL as u64) as usize);
             if self.tick_pos == 0 && self.live_ramps > 0 {
                 self.run_ramps();
             }

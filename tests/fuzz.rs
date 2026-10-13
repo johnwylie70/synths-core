@@ -49,7 +49,7 @@ fn storm(seed: u32, seconds: usize, sr: f32) {
                 1 => 1000,
                 _ => (rng.next_u32() % 6) as u16,
             };
-            let kind = if rng.next_u32() % 2 == 0 { 1 } else { (rng.next_u32() % 14) as u16 };
+            let kind = if rng.next_u32() % 2 == 0 { 1 } else { (rng.next_u32() % 17) as u16 };
             let mut ev = Event::note_on(time, part, rng.next_u32() % 5, wild(&mut rng, 0.0, 127.0), wild(&mut rng, 0.0, 1.0));
             ev.kind = kind;
             if kind == 4 {
@@ -66,7 +66,12 @@ fn storm(seed: u32, seconds: usize, sr: f32) {
             if kind == 10 {
                 ev.x = wild(&mut rng, -100.0, 5000.0);
             }
-            ev.z = wild(&mut rng, -1.0, 1.0);
+            ev.z = wild(&mut rng, -1.0, 9.0);
+            ev.b = rng.next_u32();
+            if kind == 13 {
+                ev.x = wild(&mut rng, -10.0, 2000.0);
+                ev.y = wild(&mut rng, -1.0, 6.0);
+            }
             e.push(ev);
         }
         if rng.next_u32() % 50 == 0 {
@@ -100,6 +105,7 @@ fn storm(seed: u32, seconds: usize, sr: f32) {
         if rng.next_u32() % 8 == 0 {
             // Back to many voices, however the storm has left things.
             e.set_param(0, VOICES, 64.0);
+            e.set_param(0, MASTER_VOLUME, 0.5);
             e.set_param((rng.next_u32() % 6) as u16, MODE, 0.0);
             e.set_param((rng.next_u32() % 6) as u16, AMP_SUSTAIN, 0.7);
         }
@@ -115,7 +121,7 @@ fn storm(seed: u32, seconds: usize, sr: f32) {
         done += n;
     }
     // The storm really did make a noise.
-    assert!(loud > total / 10 && most == MAX_VOICES, "seed {seed}: {loud} loud frames of {total}, {most} voices");
+    assert!(loud > total / 10 && most == MAX_VOICES, "seed {seed}: {loud} loud frames of {total}, {most} voices; master {} vol0 {} voices {}", e.param(0, MASTER_VOLUME), e.param(0, VOLUME), e.param(0, VOICES));
 }
 
 #[test]

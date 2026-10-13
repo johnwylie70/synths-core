@@ -19,6 +19,8 @@ pub const EV_VOICE_PAN: u16 = 9;
 pub const EV_VOICE_POSITION: u16 = 10;
 pub const EV_VOICE_KILL: u16 = 11;
 pub const EV_MACRO_TICK: u16 = 12;
+pub const EV_ARP: u16 = 13;
+pub const EV_ARP_MORE: u16 = 14;
 
 /// The part number that means "every part".
 pub const ALL_PARTS: u16 = 0xFFFF;
@@ -37,6 +39,8 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_VOICE_POSITION, "voice_position", "part; a: handle; x: sample position in frames"),
     (EV_VOICE_KILL, "voice_kill", "part; a: handle"),
     (EV_MACRO_TICK, "macro_tick", "part (65535: every part): step the macros of parts with macro.sync on"),
+    (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
+    (EV_ARP_MORE, "arp_more", "part; a: handle, or 0 for the part's next note; b: offsets 4-7, a signed byte each"),
 ];
 
 /// One event, exactly as it is laid out in memory (little-endian).
@@ -55,7 +59,7 @@ pub struct Event {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    /// Not used yet; write 0.
+    /// A second whole-number argument (the arpeggio's offsets); 0 otherwise.
     pub b: u32,
 }
 
@@ -97,6 +101,23 @@ impl Event {
     }
     pub fn voice_kill(time: f64, part: u16, handle: u32) -> Event {
         Event::new(time, EV_VOICE_KILL, part, handle, 0.0, 0.0)
+    }
+    /// An arpeggio of up to four offsets (`arp_more` adds four more).
+    pub fn arp(time: f64, part: u16, handle: u32, rate: f32, order: u8, offsets: &[i8]) -> Event {
+        let mut bytes = [0u8; 4];
+        for (b, o) in bytes.iter_mut().zip(offsets.iter()) {
+            *b = *o as u8;
+        }
+        let count = offsets.len().min(crate::arp::MAX_OFFSETS) as f32;
+        Event { time, kind: EV_ARP, part, a: handle, x: rate, y: order as f32, z: count, b: u32::from_le_bytes(bytes) }
+    }
+    /// Offsets 4 to 7 of an arpeggio.
+    pub fn arp_more(time: f64, part: u16, handle: u32, offsets: &[i8]) -> Event {
+        let mut bytes = [0u8; 4];
+        for (b, o) in bytes.iter_mut().zip(offsets.iter()) {
+            *b = *o as u8;
+        }
+        Event { time, kind: EV_ARP_MORE, part, a: handle, x: 0.0, y: 0.0, z: 0.0, b: u32::from_le_bytes(bytes) }
     }
     pub fn macro_tick(time: f64, part: u16) -> Event {
         Event::new(time, EV_MACRO_TICK, part, 0, 0.0, 0.0)

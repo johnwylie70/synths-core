@@ -11,6 +11,7 @@
 //! host uses. Rust code can use `Engine` directly.
 
 pub mod abi;
+pub mod arp;
 pub mod engine;
 pub mod env;
 pub mod event;

@@ -19,3 +19,4 @@
 - The filter's outputs can be added together (low + band, band + high, all three), as a sound chip's filter is switched.
 - The pulse width goes all the way from 0 to 1, and the pulse wave has no steady offset, so it fades to silence at the ends.
 - Taps for a display, readable while sound is being made: the last 4096 frames of the output and 1024 of each part, peak and RMS levels, and the notes held and sounding on each part.
+- A per-note arpeggio: the `arp` event gives one note (by handle, or the next note of a part) up to eight semitone offsets to step through, at a rate or on tracker ticks, up, down, up and down, as given or at random. Steps land on the exact frame, and a sounding note's arpeggio can be changed without starting the note again.

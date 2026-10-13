@@ -17,6 +17,7 @@ sound, the levels and the notes that are playing.
 - [Parameters](#parameters)
 - [Samples](#samples)
 - [Step macros](#step-macros)
+- [The arpeggio of a note](#the-arpeggio-of-a-note)
 - [Scope, meters and notes](#scope-meters-and-notes)
 - [How notes get voices](#how-notes-get-voices)
 - [The path of the sound](#the-path-of-the-sound)
@@ -286,8 +287,8 @@ An event is 32 bytes:
 | 12..15 | `u32` | `a` | a whole-number argument: a handle or a parameter id |
 | 16..19 | `f32` | `x` | first value |
 | 20..23 | `f32` | `y` | second value |
-| 24..27 | `f32` | `z` | not used yet; write 0 |
-| 28..31 | `u32` | `b` | not used yet; write 0 |
+| 24..27 | `f32` | `z` | third value; 0 where an event does not use it |
+| 28..31 | `u32` | `b` | a second whole-number argument; 0 where an event does not use it |
 
 In JavaScript, with `view` a `DataView` over the event buffer and `at` the
 record's offset (its index times 32):
@@ -340,6 +341,10 @@ millisecond at 48 kHz.
 | 10 | `voice_position` | one part or all | handle | position in frames | |
 | 11 | `voice_kill` | one part or all | handle | | |
 | 12 | `macro_tick` | one part or all | | | |
+| 13 | `arp` | one part or all | handle, or 0 for the part's next note | steps a second | order |
+| 14 | `arp_more` | one part or all | handle, or 0 for the part's next note | | |
+
+Events 13 and 14 also use `z` and `b`; see [their descriptions](#the-arpeggio-of-a-note).
 
 An event with a type not in this table, or a part that does not exist, is
 ignored. So is one whose `x` is not a number, if it uses `x`. A velocity that
@@ -400,7 +405,11 @@ position at or past the end of a sample with no loop ends that oscillator. An
 **12 `macro_tick`** Move the step macro of every sounding voice of the part
 on by one step, on this exact frame, if the part's `macro.sync` is on. If it
 is off the tick is ignored. A tracker sends one of these, to every part, on
-each of its ticks. See [Step macros](#step-macros).
+each of its ticks. It also steps any arpeggio that was asked to step on
+ticks. See [Step macros](#step-macros).
+
+**13 `arp`**, **14 `arp_more`** Give a note an arpeggio, change it, or take it
+away. See [The arpeggio of a note](#the-arpeggio-of-a-note).
 
 ### Handles
 
@@ -798,6 +807,73 @@ Hard sync (`osc2.sync`), ring modulation (`osc2.ring`), the pitched noise
 (`noise.type` 2) and the combined filter outputs (`filter.type` 4 to 7) are
 the other things a chip-style patch reaches for. They are ordinary
 parameters.
+
+## The arpeggio of a note
+
+One event turns a note into a fast arpeggio chord, the sound of a C64 tune:
+a single voice stepping through a few pitches 50 times a second. It belongs
+to the note, not the part, so every note can have its own chord, and a
+sounding note's chord can be changed.
+
+**13 `arp`**
+
+| field | meaning |
+|---|---|
+| `part` | the part; with a handle, 65535 for every part |
+| `a` | the handle of the note, or 0 for the next note that starts on the part |
+| `x` | steps a second, 0.1..1000. 0 means 50. Below 0: no clock, one step on each `macro_tick` event. |
+| `y` | the order: 0 up, 1 down, 2 up then down, 3 as given, 4 random |
+| `z` | how many offsets there are, 0..8. 0 takes the arpeggio away. |
+| `b` | the first four offsets, one signed byte each, in semitones (-128..127): offset 0 in the lowest byte |
+
+So in JavaScript, for offsets `o` (whole numbers):
+`b = ((o[0] & 255) | (o[1] & 255) << 8 | (o[2] & 255) << 16 | (o[3] & 255) << 24) >>> 0`.
+A major chord is offsets 0, 4, 7 with `z` 3: `b` is `0x00070400`.
+
+**14 `arp_more`** carries offsets 4 to 7 in its `b`, packed the same way, for
+an arpeggio of more than four. Send it straight after the `arp` event (which
+gives the count), with the same time, part and `a`. Its `x`, `y` and `z` are
+not used. Sent later to a sounding note, it changes those offsets without
+starting the pattern again.
+
+How it behaves:
+
+- **With a handle**, the event addresses the sounding voices of the part
+  with that handle. To give a note an arpeggio from its first frame, send
+  the `note_on` and then the `arp`, with the same time. Sent later, it
+  changes the arpeggio of the note as it sounds: the pattern starts again
+  from its first step on the frame of the event, and nothing else about the
+  note changes (its envelopes, its LFOs and its macro carry on). If no voice
+  has the handle, nothing happens.
+- **With handle 0**, the arpeggio waits on the part and is taken by the next
+  `note_on` of that part, whatever handle that note has. It is used once.
+  Send it before the `note_on`, with the same time. This is the form for
+  notes that have no handle.
+- **Steps.** The first step sounds at once. With a rate, step `k` begins on
+  frame `start + floor(k * sample_rate / rate)`, counted from the frame the
+  arpeggio was set: exactly, wherever that falls in a block. At 50 steps a
+  second and 48 kHz that is every 960 frames. With `x` below 0, a step
+  begins on the frame of each `macro_tick` event instead (whatever
+  `macro.sync` says). At each step the pitch jumps; it does not slide.
+- **Order.** Up, down and up-then-down play the offsets sorted by pitch,
+  whatever order they were given in; up-then-down does not repeat the top or
+  the bottom note (0, 4, 7, 12 plays 0 4 7 12 7 4 and round again). As given
+  plays them in the order given, so an offset can appear twice. Random picks
+  one of them at each step; the choice comes from the engine's seeded
+  generator, so the same events always make the same tune.
+- **What it adds to.** The offset is added to the pitch of the whole voice,
+  on top of the part's macro, transpose, bend, LFOs and so on. Each unison
+  voice of the note runs it.
+- An arpeggio lasts as long as its voice. In mono and legato modes, where a
+  new note moves the sounding voice, the voice keeps the arpeggio it has
+  unless the new note brings another.
+
+To play a C minor chord from one voice on part 0, now:
+
+```js
+event(now, 13 /* arp */,     0, 0, 0, 0, 3, 0x00070300);  // x: 50 a second, y: up, z: 3 offsets, b: 0, 3, 7
+event(now, 1  /* note_on */, 0, 0, 60, 0.8);
+```
 
 ## Scope, meters and notes
 

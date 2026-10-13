@@ -244,6 +244,27 @@ fn main() {
     line(&mut e, 0, 0.0, 0.5, 0.92, &[33.0, 33.0, 45.0, 33.0, 36.0, 36.0, 48.0, 31.0, 33.0, 33.0, 45.0, 33.0]);
     save("10-macro-pulse-bass", &mut e, 6.5);
 
+    // 11. Per-note arpeggios: each note carries its own chord, so one part
+    // plays a whole progression, and a held note changes chord as it sounds.
+    let mut e = Engine::new(SR);
+    set(&mut e, 0, &[(OSC1_WAVE, 3.0), (OSC1_PW, 0.25), (LFO1_PW, 0.2), (LFO1_RATE, 0.7), (AMP_ATTACK, 0.0), (AMP_RELEASE, 0.2), (SEND_DELAY, 0.2)]);
+    let chords: [(f32, [i8; 3]); 4] = [(57.0, [0, 3, 7]), (53.0, [0, 4, 7]), (60.0, [0, 4, 7]), (55.0, [0, 4, 7])];
+    for (i, (note, chord)) in chords.iter().enumerate() {
+        let t = (i as f32 * 0.8 * SR) as f64;
+        e.push(Event::arp(t, 0, 0, 50.0, 0, chord));
+        e.push(Event::note_on(t, 0, 0, *note, 0.9));
+        e.push(Event::note_off(t + (0.7 * SR) as f64, 0, 0, *note));
+    }
+    // One long note, handle 1, whose chord and speed change under it.
+    let t = (3.4 * SR) as f64;
+    e.push(Event::note_on(t, 0, 1, 57.0, 0.9));
+    e.push(Event::arp(t, 0, 1, 50.0, 0, &[0, 3, 7]));
+    e.push(Event::arp(t + (0.6 * SR) as f64, 0, 1, 50.0, 0, &[0, 3, 8]));
+    e.push(Event::arp(t + (1.2 * SR) as f64, 0, 1, 25.0, 2, &[0, 5, 8, 12]));
+    e.push(Event::arp(t + (2.0 * SR) as f64, 0, 1, 12.5, 4, &[0, 7, 12, 19]));
+    e.push(Event::note_off(t + (3.0 * SR) as f64, 0, 1, 57.0));
+    save("11-note-arpeggio", &mut e, 7.5);
+
     // 7. Everything at once, far too loud, to hear the limiter hold it.
     let mut e = Engine::new(SR);
     set(&mut e, 0, &[(OSC1_WAVE, 2.0), (MASTER_VOLUME, 1.5)]);

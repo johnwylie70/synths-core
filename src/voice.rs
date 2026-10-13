@@ -2,6 +2,7 @@
 //! samples), a sub oscillator and noise go through a filter and an amplifier,
 //! shaped by three envelopes and two LFOs.
 
+use crate::arp::Arp;
 use crate::env::{Env, EnvShape};
 use crate::filter::{self, Svf, FILTER_OFF};
 use crate::lfo::{FreeLfo, Lfo, LfoShape};
@@ -75,7 +76,10 @@ pub struct Voice {
     mod_env: Env,
     lfos: [Lfo; 2],
     pub macro_player: MacroPlayer,
-    rng: Rng,
+    pub arp: Arp,
+    /// The arpeggio has just stepped: the pitch jumps instead of sliding.
+    pub pitch_jump: bool,
+    pub rng: Rng,
 
     // Worked out by `control`, used by `render`.
     amp_shape: EnvShape,
@@ -144,6 +148,8 @@ impl Voice {
             mod_env: Env::default(),
             lfos: [Lfo::default(); 2],
             macro_player: MacroPlayer::default(),
+            arp: Arp::default(),
+            pitch_jump: false,
             rng: Rng::new(1),
             amp_shape: EnvShape::default(),
             filter_shape: EnvShape::default(),
@@ -284,6 +290,8 @@ impl Voice {
         let elapsed = self.since_control;
         self.since_control = 0;
         let jump = self.fresh;
+        let pitch_jump = jump || self.pitch_jump;
+        self.pitch_jump = false;
         let inv_len = 1.0 / len.max(1) as f32;
         let inv_sr = 1.0 / sample_rate;
 
@@ -326,6 +334,7 @@ impl Voice {
 
         // Pitch. `bend` is everything that moves the pitch away from the note.
         let bend = step.pitch
+            + self.arp.offset
             + p[TRANSPOSE]
             + p[TUNE] * 0.01
             + p[BEND] * p[BEND_RANGE]
@@ -369,14 +378,14 @@ impl Voice {
                     _ => 0.0,
                 };
                 let pl = &mut self.players[i];
-                aim(&mut pl.inc, &mut pl.dinc, rate.min(1024.0), jump, inv_len);
+                aim(&mut pl.inc, &mut pl.dinc, rate.min(1024.0), pitch_jump, inv_len);
             } else {
                 let mut hz = if keytrack { base_hz } else { note_to_hz(60.0 + bend) };
                 if semis != 0.0 {
                     hz *= semis_to_ratio(semis);
                 }
                 let o = &mut self.osc[i];
-                aim(&mut o.inc, &mut o.dinc, (hz * inv_sr).min(top), jump, inv_len);
+                aim(&mut o.inc, &mut o.dinc, (hz * inv_sr).min(top), pitch_jump, inv_len);
                 let width = if step.pulse_width >= 0.0 { step.pulse_width } else { p[OSC1_PW + b] };
                 let pw = (width + pw_mod).clamp(0.0, 1.0);
                 aim(&mut o.pw, &mut o.dpw, pw, jump, inv_len);
@@ -392,7 +401,7 @@ impl Voice {
             _ => WAVE_TRIANGLE,
         };
         let sub_hz = base_hz * if p[SUB_OCTAVE] <= -1.5 { 0.25 } else { 0.5 };
-        aim(&mut self.sub.inc, &mut self.sub.dinc, (sub_hz * inv_sr).min(top), jump, inv_len);
+        aim(&mut self.sub.inc, &mut self.sub.dinc, (sub_hz * inv_sr).min(top), pitch_jump, inv_len);
         self.sub.pw = 0.5;
         self.sub.dpw = 0.0;
 

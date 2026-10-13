@@ -19,6 +19,7 @@ The libraries never work out samples. They send the engine commands with a time 
 - A filter per voice (low-pass, high-pass, band-pass, or any of them added together; 12 or 24 dB), three envelopes and two LFOs.
 - Step macros: short looping tables, 50 steps a second or on a tracker's tick, that change the wave, pitch, pulse width, filter and volume. They are what makes an 8-bit sound chip sound the way it does: one-voice arpeggio chords, drums from a burst of noise and a falling tone.
 - Distortion and a bit crusher per part; an echo, a reverb and a chorus to send to; a limiter on the way out, so nothing clips.
+- A per-note arpeggio: one event makes a note step through up to eight pitches, 50 times a second or on a tracker's tick, for C64-style chords from a single voice.
 - Events are timed to the exact sample, and the same events always give exactly the same sound.
 - For drawing: the latest sound (a scope), level meters and the notes that are playing, for the whole output and for each part, readable at any time without disturbing the audio.
 
@@ -48,7 +49,7 @@ cargo build --release --target aarch64-apple-ios    # makes target/aarch64-apple
 ## Listen and measure
 
 ```
-cargo run --release --example demo     # renders ten short phrases to target/demo/*.wav
+cargo run --release --example demo     # renders eleven short phrases to target/demo/*.wav
 cargo run --release --example bench    # how many voices this machine plays in real time
 cargo run --example param_table        # the parameter table, as it appears in the document
 ```
