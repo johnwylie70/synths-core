@@ -1009,16 +1009,15 @@ quirks included. Our own songs say which they want.
 |---|---|
 | MOD, XM | every build |
 | our own format, packed | every build |
-| our own format, as JSON | builds with the `json` feature: every build but the WebAssembly module |
+| our own format, as JSON | builds with the `json` feature, which is on unless a build turns it off |
 
-The JSON reader is about 35 KB of a WebAssembly module, and a web page reads
-JSON for nothing, so `scripts/build-wasm.sh` leaves it out
-(`--no-default-features`). A page turns the song's JSON into the packed
-form itself (`docs/song-format.md` gives both, field for field) and loads
-that. Going the other way, `synths_song_pack` turns a MOD or an XM into the
-packed form for the page to unpack into its own JSON, which is how an editor
-opens a tracker module. A native build has the `json` feature unless it is
-turned off, and reads all three.
+The JSON reader is about 35 KB of a WebAssembly module. `scripts/build-wasm.sh`
+leaves it in, so that one reader decides what a song's JSON means for a page,
+for Python and for a native app alike; a build made with
+`--no-default-features` is that much smaller and reads MOD, XM and packed
+songs only. `synths_song_pack` turns a MOD or an XM into the packed form for
+a page to unpack into its own JSON (`docs/song-format.md` gives both, field
+for field), which is how an editor opens a tracker module.
 
 A MOD or an XM loaded as it is has `sample.antialias` turned off on its
 parts, for the sound those trackers had. One of our own songs, packed or
@@ -1293,8 +1292,8 @@ bound.
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro and times it. The
-module is about 273 KB (110 KB gzipped), of which the song loaders and
-player are about 100 KB. It is built without the `json` feature: see
+module is about 308 KB (124 KB gzipped), of which the song loaders and
+player are about 135 KB, the JSON song reader 35 KB of that: see
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no

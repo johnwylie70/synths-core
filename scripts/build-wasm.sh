@@ -30,9 +30,11 @@ fi
 
 # Leave out the names of functions: they are a third of the file and the
 # browser does not need them.
-# Leave out the JSON song reader too (the "json" feature): a web page reads
-# JSON for nothing, and hands the engine a song in its packed form.
-CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --lib --target $TARGET --no-default-features
+# The JSON song reader (the "json" feature) is left in, though it is about
+# 35 KB: one reader then decides what a song's JSON means, for the page, for
+# Python and for a native app alike. Add --no-default-features for a module
+# without it, which reads MOD, XM and packed songs only.
+CARGO_PROFILE_RELEASE_STRIP=true cargo build --release --lib --target $TARGET
 
 mkdir -p target/wasm
 cp target/$TARGET/release/synths_core.wasm target/wasm/synths_core.wasm
