@@ -97,6 +97,31 @@ if (first !== 1000 || crossings !== 220 || !(peak > 0.1 && peak < 0.3)) {
   process.exit(1);
 }
 
+// What a display reads. The scope's last frame is the last frame rendered.
+const scope = x.synths_alloc(4096 * 4);
+const got = x.synths_scope_read(engine, 0xffff, scope, 4096);
+const seen = new Float32Array(memory.buffer, scope, 4096);
+const right = new Float32Array(memory.buffer, x.synths_output_right(engine), 128);
+const levels = x.synths_alloc(16);
+x.synths_levels_read(engine, 0xffff, 1, levels);
+const peakNow = new Float32Array(memory.buffer, levels, 4)[0];
+const words = x.synths_alloc(32);
+x.synths_notes_read(engine, 0, words);
+const held = new Uint32Array(memory.buffer, words, 8);
+const lastLeft = out[SR - 1];
+console.log(`taps: ${got} scope frames, master peak ${peakNow.toFixed(3)}, note 69 held: ${(held[2] >>> 5) & 1}`);
+if (got !== 4096 || Math.abs(seen[4095] - 0.5 * (lastLeft + right[127])) > 1e-6 || !(peakNow > 0.15) || ((held[2] >>> 5) & 1) !== 1) {
+  console.error('the taps do not show what was played');
+  process.exit(1);
+}
+// A step macro: three steps looping make a chord of one voice.
+const macro = x.synths_alloc(15 * 4);
+new Float32Array(memory.buffer, macro, 15).set([-1, 0, -1, 0, 1, -1, 4, -1, 0, 1, -1, 7, -1, 0, 1]);
+if (x.synths_macro_set(engine, 0, macro, 3, 0, 3, 255, 0) !== 0) throw new Error('the macro was refused');
+x.synths_render(engine, 4096);
+x.synths_macro_set(engine, 0xffff, 0, 0, 0, 0, 0, 0);
+[scope, levels, words, macro].forEach((p) => x.synths_free(p));
+
 // A sample, through memory from synths_alloc.
 const frames = 4800;
 const ptr = x.synths_alloc(frames * 4);

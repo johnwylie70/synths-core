@@ -181,6 +181,69 @@ fn main() {
     e.push(Event::voice_kill((t0 + 2.0 * SR) as f64, 1, 1));
     save("6-samples", &mut e, 6.0);
 
+    // 8 to 10. Step macros, the sound of an 8-bit sound chip.
+    // (wave, pitch, pulse width, cutoff, volume) a step, 50 steps a second.
+    let steps = |s: &[(f32, f32, f32, f32, f32)]| -> Vec<f32> { s.iter().flat_map(|&(a, b, c, d, e)| [a, b, c, d, e]).collect() };
+
+    // 8. A snare drum: one step of noise, then a pulse wave falling in pitch,
+    // then noise again dying away. Played as a simple beat.
+    let mut e = Engine::new(SR);
+    set(&mut e, 0, &[(OSC1_WAVE, 3.0), (NOISE_TYPE, 2.0), (AMP_ATTACK, 0.0), (AMP_DECAY, 0.16), (AMP_SUSTAIN, 0.0), (AMP_CURVE, 0.3)]);
+    let snare = steps(&[
+        (4.0, 24.0, -1.0, 0.0, 1.0),
+        (3.0, 0.0, 0.5, 0.0, 1.0),
+        (3.0, -5.0, 0.5, 0.0, 0.9),
+        (4.0, 18.0, -1.0, 0.0, 0.8),
+        (4.0, 14.0, -1.0, 0.0, 0.6),
+        (4.0, 12.0, -1.0, 0.0, 0.45),
+        (4.0, 10.0, -1.0, 0.0, 0.3),
+        (4.0, 9.0, -1.0, 0.0, 0.2),
+    ]);
+    e.set_macro(0, &snare, 0, 0, 255, 0).unwrap();
+    // A bass drum from the same idea, on another part: a triangle dropping fast.
+    set(&mut e, 1, &[(OSC1_WAVE, 1.0), (AMP_ATTACK, 0.0), (AMP_DECAY, 0.2), (AMP_SUSTAIN, 0.0)]);
+    let kick = steps(&[(3.0, 12.0, 0.5, 0.0, 1.0), (1.0, 0.0, -1.0, 0.0, 1.0), (1.0, -7.0, -1.0, 0.0, 1.0), (1.0, -12.0, -1.0, 0.0, 0.9), (1.0, -16.0, -1.0, 0.0, 0.7), (1.0, -19.0, -1.0, 0.0, 0.5)]);
+    e.set_macro(1, &kick, 0, 0, 255, 0).unwrap();
+    line(&mut e, 1, 0.0, 0.25, 0.5, &[36.0, 0.0, 0.0, 36.0, 36.0, 0.0, 0.0, 0.0, 36.0, 0.0, 0.0, 36.0, 36.0, 0.0, 36.0, 0.0]);
+    line(&mut e, 0, 0.0, 0.25, 0.5, &[0.0, 0.0, 57.0, 0.0, 0.0, 0.0, 57.0, 0.0, 0.0, 0.0, 57.0, 0.0, 0.0, 0.0, 57.0, 57.0]);
+    save("8-macro-snare", &mut e, 4.5);
+
+    // 9. Arpeggio chords: one voice running through three notes 50 times a
+    // second sounds like a chord. Major, minor, and one that opens out when let go.
+    let mut e = Engine::new(SR);
+    set(&mut e, ALL_PARTS, &[(OSC1_WAVE, 3.0), (OSC1_PW, 0.3), (AMP_ATTACK, 0.0), (AMP_RELEASE, 0.25)]);
+    let chord = |a: f32, b: f32| steps(&[(-1.0, 0.0, -1.0, 0.0, 1.0), (-1.0, a, -1.0, 0.0, 1.0), (-1.0, b, -1.0, 0.0, 1.0)]);
+    e.set_macro(0, &chord(4.0, 7.0), 0, 3, 255, 0).unwrap();
+    e.set_macro(1, &chord(3.0, 7.0), 0, 3, 255, 0).unwrap();
+    let mut wide = chord(4.0, 7.0);
+    wide.extend(steps(&[(-1.0, 12.0, -1.0, 0.0, 1.0), (-1.0, 16.0, -1.0, 0.0, 0.8), (-1.0, 19.0, -1.0, 0.0, 0.6), (-1.0, 24.0, -1.0, 0.0, 0.4)]));
+    e.set_macro(2, &wide, 0, 3, 3, 0).unwrap();
+    line(&mut e, 0, 0.0, 0.5, 0.9, &[60.0, 65.0, 0.0, 67.0]);
+    line(&mut e, 1, 1.0, 0.5, 0.9, &[57.0]);
+    line(&mut e, 2, 2.0, 0.5, 0.9, &[60.0, 65.0, 67.0, 60.0]);
+    save("9-macro-arpeggio", &mut e, 4.5);
+
+    // 10. A bass with the pulse width sweeping slowly from narrow to square
+    // and back (sliding between steps), through a resonant filter.
+    let mut e = Engine::new(SR);
+    set(&mut e, 0, &[
+        (OSC1_WAVE, 3.0), (SUB_LEVEL, 0.4), (SUB_WAVE, 1.0), (MACRO_RATE, 4.0), (VOLUME, 0.5),
+        (FILTER_TYPE, 5.0), (CUTOFF, 900.0), (RESONANCE, 0.5), (AMP_ATTACK, 0.0), (AMP_RELEASE, 0.1),
+    ]);
+    let sweep = steps(&[
+        (3.0, 0.0, 0.06, -6.0, 1.0),
+        (3.0, 0.0, 0.2, 0.0, 1.0),
+        (3.0, 0.0, 0.5, 12.0, 1.0),
+        (3.0, 0.0, 0.8, 0.0, 1.0),
+        (3.0, 0.0, 0.94, -6.0, 1.0),
+        (3.0, 0.0, 0.8, 0.0, 1.0),
+        (3.0, 0.0, 0.5, 12.0, 1.0),
+        (3.0, 0.0, 0.2, 0.0, 1.0),
+    ]);
+    e.set_macro(0, &sweep, 0, 8, 255, synths_core::macros::MACRO_SMOOTH).unwrap();
+    line(&mut e, 0, 0.0, 0.5, 0.92, &[33.0, 33.0, 45.0, 33.0, 36.0, 36.0, 48.0, 31.0, 33.0, 33.0, 45.0, 33.0]);
+    save("10-macro-pulse-bass", &mut e, 6.5);
+
     // 7. Everything at once, far too loud, to hear the limiter hold it.
     let mut e = Engine::new(SR);
     set(&mut e, 0, &[(OSC1_WAVE, 2.0), (MASTER_VOLUME, 1.5)]);

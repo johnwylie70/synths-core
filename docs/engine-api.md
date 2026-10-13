@@ -7,7 +7,8 @@ version **1** (`synths_abi_version()`).
 The engine is one object. A host creates it for a sample rate, sends it
 **events** (start a note, set a parameter, move a live voice) stamped with the
 time they should happen, and asks it to **render** blocks of stereo sound. The
-host never works out samples itself.
+host never works out samples itself. For drawing, it can read back the latest
+sound, the levels and the notes that are playing.
 
 - [Building](#building)
 - [Words and units](#words-and-units)
@@ -15,6 +16,8 @@ host never works out samples itself.
 - [Events](#events)
 - [Parameters](#parameters)
 - [Samples](#samples)
+- [Step macros](#step-macros)
+- [Scope, meters and notes](#scope-meters-and-notes)
 - [How notes get voices](#how-notes-get-voices)
 - [The path of the sound](#the-path-of-the-sound)
 - [Threads](#threads)
@@ -92,6 +95,13 @@ int32_t        synths_sample_load(SynthsEngine *engine, uint32_t slot, const flo
 int32_t        synths_sample_config(SynthsEngine *engine, uint32_t slot, float base_note,
                                     uint32_t loop_mode, uint32_t loop_start, uint32_t loop_end);
 int32_t        synths_sample_free(SynthsEngine *engine, uint32_t slot);
+
+int32_t        synths_macro_set(SynthsEngine *engine, uint32_t part, const float *steps, uint32_t count,
+                                uint32_t loop_start, uint32_t loop_end, uint32_t release, uint32_t flags);
+
+uint32_t       synths_scope_read(const SynthsEngine *engine, uint32_t source, float *out, uint32_t frames);
+uint32_t       synths_levels_read(const SynthsEngine *engine, uint32_t source, uint32_t count, float *out);
+uint32_t       synths_notes_read(const SynthsEngine *engine, uint32_t part, uint32_t *out);
 ```
 
 In WebAssembly a pointer is a `u32` offset into the module's `memory`, `float`
@@ -226,6 +236,42 @@ These three return 0 when they work, or:
 They allocate and free memory, so they are not for the middle of a render; see
 [Threads](#threads).
 
+### Macros
+
+**`synths_macro_set(engine, part, steps: *const f32, count, loop_start, loop_end, release, flags) -> i32`**
+Give a part its [step macro](#step-macros), replacing any it had. `steps`
+holds `count * 5` numbers, five a step. `count` is 0 to 64; 0 takes the
+macro away (and `steps` may then be null). `part` 65535 gives the same macro
+to every part. The engine copies the numbers. Voices already sounding on the
+part carry on from the same step number in the new macro. Returns 0, or -1
+(the part does not exist), -2 (more than 64 steps) or -4 (the engine, or
+`steps` with a count above 0, is null). It allocates nothing.
+
+### Reading the sound back
+
+These three are for a display: see [Scope, meters and notes](#scope-meters-and-notes).
+They only read, and unlike everything else that takes an engine they may be
+called while another thread is rendering.
+
+**`synths_scope_read(engine, source, out: *mut f32, frames) -> u32`** Copy the
+most recent `frames` frames of a part's sound into `out`, oldest first, or of
+the master output for `source` 65535. Returns how many were written: at most
+4096 for the master and 1024 for a part, and 0 for a part that does not
+exist.
+
+**`synths_levels_read(engine, source, count, out: *mut f32) -> u32`** Write
+the levels of `count` parts, starting at part `source`, into `out`: four
+numbers each. Stops at the last part. For `source` 65535 it writes the master
+output's four numbers and nothing more. Returns how many sets of four it
+wrote.
+
+**`synths_notes_read(engine, part, out: *mut u32) -> u32`** Write which notes
+a part is playing into `out`: eight 32-bit words. `part` 65535 gives every
+part together. Returns 8, or 0 for a part that does not exist.
+
+In WebAssembly `out` must be inside the module's memory: get it once with
+`synths_alloc` and keep it.
+
 ## Events
 
 ### The event record
@@ -293,6 +339,7 @@ millisecond at 48 kHz.
 | 9 | `voice_pan` | one part or all | handle | pan, -1..1 | |
 | 10 | `voice_position` | one part or all | handle | position in frames | |
 | 11 | `voice_kill` | one part or all | handle | | |
+| 12 | `macro_tick` | one part or all | | | |
 
 An event with a type not in this table, or a part that does not exist, is
 ignored. So is one whose `x` is not a number, if it uses `x`. A velocity that
@@ -350,6 +397,11 @@ position at or past the end of a sample with no loop ends that oscillator. An
 
 **11 `voice_kill`** Cut live voices at once.
 
+**12 `macro_tick`** Move the step macro of every sounding voice of the part
+on by one step, on this exact frame, if the part's `macro.sync` is on. If it
+is off the tick is ignored. A tracker sends one of these, to every part, on
+each of its ticks. See [Step macros](#step-macros).
+
 ### Handles
 
 A handle is any number from 1 to 4294967295 that the host chooses and puts in
@@ -399,7 +451,7 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 17 | `osc1.level` | float | 0 | 1 | 1 | gain | How loud oscillator 1 is. |
 | 18 | `osc1.coarse` | float | -48 | 48 | 0 | semitones | Tuning in semitones. |
 | 19 | `osc1.fine` | float | -100 | 100 | 0 | cents | Fine tuning. |
-| 20 | `osc1.pulse_width` | float | 0.02 | 0.98 | 0.5 |  | The width of the pulse wave (0.5 is a square). |
+| 20 | `osc1.pulse_width` | float | 0 | 1 | 0.5 |  | The width of the pulse wave (0.5 is a square; at 0 and 1 it is silent). |
 | 21 | `osc1.sample` | int | 0 | 1023 | 0 | slot | Which sample slot the sample wave plays. |
 | 22 | `osc1.start` | float | 0 | 1 | 0 |  | Where in the sample a note starts (0: the beginning, 1: the end). |
 | 23 | `osc1.keytrack` | bool | 0 | 1 | 1 |  | On: the pitch follows the note. Off: every note plays at the same pitch (drums). |
@@ -407,7 +459,7 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 25 | `osc2.level` | float | 0 | 1 | 0 | gain | How loud oscillator 2 is. |
 | 26 | `osc2.coarse` | float | -48 | 48 | 0 | semitones | Tuning in semitones. |
 | 27 | `osc2.fine` | float | -100 | 100 | 0 | cents | Fine tuning. |
-| 28 | `osc2.pulse_width` | float | 0.02 | 0.98 | 0.5 |  | The width of the pulse wave (0.5 is a square). |
+| 28 | `osc2.pulse_width` | float | 0 | 1 | 0.5 |  | The width of the pulse wave (0.5 is a square; at 0 and 1 it is silent). |
 | 29 | `osc2.sample` | int | 0 | 1023 | 0 | slot | Which sample slot the sample wave plays. |
 | 30 | `osc2.start` | float | 0 | 1 | 0 |  | Where in the sample a note starts. |
 | 31 | `osc2.keytrack` | bool | 0 | 1 | 1 |  | On: the pitch follows the note. |
@@ -419,7 +471,7 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 40 | `noise.level` | float | 0 | 1 | 0 | gain | How loud the noise is. |
 | 41 | `noise.type` | choice: 0 white, 1 pink, 2 lfsr, 3 lfsr_short | 0 | 3 | 0 |  | white and pink are hiss; lfsr is the pitched noise of an 8-bit sound chip; lfsr_short is its buzzy, metallic version. |
 | 42 | `noise.pitch` | float | -48 | 48 | 0 | semitones | Tuning of the lfsr noise, which follows the note. |
-| 48 | `filter.type` | choice: 0 off, 1 lowpass, 2 highpass, 3 bandpass, 4 notch | 0 | 4 | 0 |  | What the filter lets through. |
+| 48 | `filter.type` | choice: 0 off, 1 lowpass, 2 highpass, 3 bandpass, 4 notch, 5 low_band, 6 band_high, 7 all | 0 | 7 | 0 |  | What the filter lets through. The last four add outputs together, as a sound chip does: notch is low + high, low_band is low + band, band_high is band + high, all is all three. |
 | 49 | `filter.slope` | choice: 0 12db, 1 24db | 0 | 1 | 0 |  | How steeply the filter cuts. |
 | 50 | `filter.cutoff` | float | 20 | 20000 | 2000 | hz | The frequency where the filter starts to cut. |
 | 51 | `filter.resonance` | float | 0 | 1 | 0.15 |  | How much the filter emphasises the cutoff frequency. |
@@ -470,6 +522,8 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 115 | `send.delay` | float | 0 | 1 | 0 | gain | How much of the part goes to the echo. |
 | 116 | `send.reverb` | float | 0 | 1 | 0 | gain | How much of the part goes to the reverb. |
 | 117 | `send.chorus` | float | 0 | 1 | 0 | gain | How much of the part goes to the chorus. |
+| 120 | `macro.rate` | float | 1 | 1000 | 50 | hz | How many steps of the part's macro play each second. |
+| 121 | `macro.sync` | bool | 0 | 1 | 0 |  | On: the macro steps on each macro_tick event (a tracker's tick) instead of by the clock. |
 | 200 | `master.volume` | float | 0 | 2 | 0.35 | gain | How loud everything is. |
 | 201 | `master.limiter` | bool | 0 | 1 | 1 |  | Turns loud passages down so they do not distort. The output never goes past -1..1 either way. |
 | 202 | `delay.time` | float | 0.001 | 2 | 0.3 | seconds | The time between echoes. |
@@ -489,6 +543,9 @@ list shown.
 Oscillator 2's parameters are oscillator 1's with 8 added to the id (as far
 as `keytrack`), and LFO 2's are LFO 1's with 16 added.
 
+A part's step macro is not in this table, because it is a list and not one
+number: it is set with `synths_macro_set`.
+
 ### Notes on some parameters
 
 - **`volume`, `master.volume`** are plain multipliers. A change slides over
@@ -504,6 +561,13 @@ as `keytrack`), and LFO 2's are LFO 1's with 16 added.
 - **`mode`, `glide`, `unison.*`** See [How notes get voices](#how-notes-get-voices).
 - **`osc1.wave`** 4 plays the sample in slot `osc1.sample`. An empty slot is
   silent.
+- **`osc1.pulse_width`** The width used is this (or the macro step's), plus
+  what the LFOs and the modulation envelope add, kept within 0..1. The pulse
+  wave is made without its steady offset, so it has none at any width, and
+  as the width reaches 0 or 1 the wave thins away to silence rather than
+  jumping. A narrow pulse therefore stands taller than a square: up to twice
+  the height at the extremes. The edges stay band-limited while the width
+  moves.
 - **`osc1.keytrack`** Off, a wave plays at the pitch of note 60 and a sample
   at its own pitch, whatever note is played. Tuning, bend and modulation
   still apply.
@@ -521,6 +585,12 @@ as `keytrack`), and LFO 2's are LFO 1's with 16 added.
   from 60, `filter.env` times the filter envelope (0..1), `filter.velocity`
   times the velocity, and the LFOs, all in semitones, and then kept between
   16 Hz and 0.45 of the sample rate.
+- **`filter.type`** The filter has three outputs at once: low-pass,
+  band-pass and high-pass. Types 1 to 3 pick one. Types 4 to 7 add outputs
+  together, the way the filter of an 8-bit sound chip is switched: 4 `notch`
+  is low + high, 5 `low_band` is low + band, 6 `band_high` is band + high,
+  and 7 `all` is all three (everything passes, with a lift at the cutoff
+  that grows with the resonance).
 - **`filter.resonance`** `r` gives a Q of `0.5 * 2^(6.5 * r)`: 0.5 (no peak
   at all) at 0, 1.4 at 0.23, about 45 at 1. It rings but does not
   oscillate by itself. With `filter.slope` 24 dB a second stage with a Q of
@@ -556,7 +626,8 @@ editor can be made from it rather than typed in again:
   "version": "0.0.0",
   "abi": 1,
   "limits": {"voices": 64, "parts": 64, "samples": 1024, "event_size": 32,
-             "event_buffer": 256, "event_queue": 4096, "output_frames": 4096},
+             "event_buffer": 256, "event_queue": 4096, "output_frames": 4096,
+             "macro_steps": 64, "scope_master": 4096, "scope_part": 1024},
   "events": [
     {"type": 1, "name": "note_on", "help": "part; a: handle (0 for none); x: note; y: velocity 0..1"}
   ],
@@ -621,6 +692,173 @@ note and an optional loop. A part plays it by setting `osc1.wave` (or
   same position, or stop.
 - **Positions** (`osc1.start`, `voice_position`) are in frames of the sample.
   In a ping-pong loop a position past `loop_end` is on the way back.
+
+## Step macros
+
+A step macro is a short table that belongs to a part and plays through, one
+step at a time, on every note of that part. It is what gives the music of
+8-bit sound chips its character: a fast arpeggio that makes one voice sound
+like a chord, a drum made of a burst of noise and a falling tone, a pulse
+width that keeps moving. The macro runs inside the engine, on the audio
+thread; the host only supplies the table.
+
+### A step
+
+Each step is five `f32` numbers, in this order:
+
+| # | name | values | what it does |
+|---|---|---|---|
+| 0 | wave | -1, or 0 to 4 | Oscillator 1's wave for this step: 0 sine, 1 triangle, 2 saw, 3 pulse, 4 noise. -1 leaves the patch's `osc1.wave`. |
+| 1 | pitch | -96..96 | Semitones added to the pitch of the whole voice. 0 for none. |
+| 2 | pulse width | -1, or 0..1 | The pulse width of both oscillators for this step, in place of the patch's. -1 (anything below 0) leaves the patch's. |
+| 3 | cutoff | -120..120 | Semitones added to the filter cutoff. 0 for none. |
+| 4 | volume | 0..1 | Multiplies the loudness of the voice. 1 for unchanged. |
+
+So a step that changes nothing is `-1, 0, -1, 0, 1`. Numbers out of range
+are brought in; a number that is not a number becomes the "changes nothing"
+value of its column.
+
+For a step of **noise** (wave 4), oscillator 1 falls silent and the voice's
+noise sounds at `osc1.level` (or `noise.level` if that is higher), of the
+kind the patch's `noise.type` says. With `noise.type` 2 (`lfsr`) the step's
+pitch tunes the noise, as on a sound chip.
+
+Everything else in the patch still applies on top of the macro: envelopes,
+LFOs, bend, the filter envelope. The macro's pitch is added to them and its
+volume multiplies them.
+
+### How the steps go by
+
+- A voice starts at step 0 on the frame its note starts.
+- With `macro.sync` off (the default), steps go by `macro.rate` times a
+  second: 50 unless changed, which is the frame rate chip music was written
+  to. A step takes effect at the first control period at or after its time,
+  so within 16 frames of it.
+- With `macro.sync` on, the clock is ignored and each `macro_tick` event
+  moves the macro on one step, on the exact frame of the event. This is how
+  a tracker keeps macros in time with its own ticks, whatever its tempo.
+- **Loop.** If `loop_end` is above `loop_start`, then while the note is
+  held, the step after `loop_end - 1` is `loop_start`. With no loop
+  (`loop_start` and `loop_end` both 0), the macro plays to its last step.
+- **The end.** The last step holds for as long as the voice lasts.
+- **Release.** `release` is the step to jump to, at once, when the note is
+  let go (a `note_off`, or `all_notes_off` with `a` 0). From there the macro
+  plays on to its last step and holds, with no looping. A `release` of 255,
+  or any number not below the count of steps, means there is none: the macro
+  takes no notice of the note being let go.
+- **Flags.** Bit 0 (the value 1): slide. Pulse width, cutoff and volume move
+  in a straight line from each step's value to the next's instead of
+  jumping, so a slow sweep needs only a few steps. Wave and pitch always
+  jump. Sliding does nothing when `macro.sync` is on. The other bits are not
+  used yet; write 0.
+- A note in mono mode that starts the envelopes again starts the macro
+  again too; a legato note does not.
+- Changes of pitch, width, cutoff and volume from one step to the next are
+  slid over at most 16 frames, like every slow-moving value, so they do not
+  click.
+
+### Three classic patches
+
+With `step(wave, pitch, width, cutoff, volume)`:
+
+A **snare drum**: `osc1.wave` 3, `noise.type` 2, `amp.attack` 0, `amp.decay`
+0.16, `amp.sustain` 0, and the macro, with no loop:
+
+```
+step(4, 24, -1, 0, 1.0)     noise, tuned high
+step(3,  0, .5, 0, 1.0)     a square wave at the note
+step(3, -5, .5, 0, 0.9)     and a fourth lower
+step(4, 18, -1, 0, 0.8)     then noise, falling and fading
+step(4, 14, -1, 0, 0.6)
+step(4, 12, -1, 0, 0.45)
+```
+
+A **major chord from one voice**: any wave, and three steps looping
+(`loop_start` 0, `loop_end` 3):
+
+```
+step(-1, 0, -1, 0, 1)
+step(-1, 4, -1, 0, 1)
+step(-1, 7, -1, 0, 1)
+```
+
+A **bass with a sweeping pulse width**: `osc1.wave` 3, `macro.rate` 4,
+flags 1 (slide), eight steps looping:
+
+```
+step(3, 0, 0.06, 0, 1)   step(3, 0, 0.2, 0, 1)   step(3, 0, 0.5, 0, 1)   step(3, 0, 0.8, 0, 1)
+step(3, 0, 0.94, 0, 1)   step(3, 0, 0.8, 0, 1)   step(3, 0, 0.5, 0, 1)   step(3, 0, 0.2, 0, 1)
+```
+
+`cargo run --release --example demo` renders all three
+(`target/demo/8-macro-snare.wav`, `9-macro-arpeggio.wav`,
+`10-macro-pulse-bass.wav`).
+
+Hard sync (`osc2.sync`), ring modulation (`osc2.ring`), the pitched noise
+(`noise.type` 2) and the combined filter outputs (`filter.type` 4 to 7) are
+the other things a chip-style patch reaches for. They are ordinary
+parameters.
+
+## Scope, meters and notes
+
+Three things a host can read at any time, to draw with. The engine keeps
+them up to date as it renders; reading them changes nothing and costs the
+audio nothing.
+
+They are made so that a display on one thread can read while audio renders
+on another, with no lock: the engine only ever stores single numbers and the
+reader only ever loads them. A reading taken in the middle of a render can
+be a few frames out of step with itself, which a drawing does not show.
+
+### Scope
+
+The engine keeps the last 4096 frames of the master output (what
+`synths_render` wrote, after the limiter) and the last 1024 frames of each
+part (after the part's drive, bit crusher and volume, before the sends and
+the master volume). Each frame is one number: the mean of left and right.
+
+`synths_scope_read` copies out the most recent frames, oldest first, so the
+last number is the newest frame rendered. Silence is real silence: a part
+that has stopped, or an engine that has gone to sleep, reads as zeros from
+the frame it stopped. To draw a steady waveform, read more than you draw and
+start at an upward crossing of zero.
+
+### Levels
+
+Four numbers for each part and four for the master output:
+
+| # | what |
+|---|---|
+| 0 | peak, left |
+| 1 | peak, right |
+| 2 | RMS, left |
+| 3 | RMS, right |
+
+They are plain amplitudes (1 is full scale), measured at the same two places
+as the scope. The peak jumps up to the loudest sample at once and falls back
+to 37% in half a second. The RMS is the level averaged over about a tenth of
+a second: a steady sine reads 0.707 of its peak, a square wave the same as
+its peak. Both reach exactly 0 in the end. For decibels,
+`20 * log10(level)`.
+
+### Notes
+
+Eight 32-bit words for each part, which are two sets of 128 bits, one bit a
+note:
+
+- words 0 to 3: the notes **held**: started and not yet let go;
+- words 4 to 7: the notes **sounding**: held, or let go and still dying away.
+
+Note `n` (0..127) is bit `n % 32` of word `n / 32` of its set. In JavaScript,
+with `w` a `Uint32Array` over the eight words:
+`held = (w[n >> 5] >>> (n & 31)) & 1`, and
+`sounding = (w[4 + (n >> 5)] >>> (n & 31)) & 1`.
+
+A voice's note is the note it is playing now, rounded to the nearest whole
+note and kept within 0..127: the note it was started with, or the one a
+`voice_pitch` event or a mono-mode note has since moved it to. Transpose,
+bend and macros do not move it. The notes are brought up to date every 256
+frames (about 5 milliseconds at 48 kHz), and at once by `synths_reset`.
 
 ## How notes get voices
 
@@ -694,6 +932,12 @@ as another on the same engine. In practice:
   stop calling render for that moment and put out silence.
 - `synths_alloc` and `synths_free` touch only the memory allocator and are
   safe from any thread in a native build.
+- `synths_scope_read`, `synths_levels_read` and `synths_notes_read` are the
+  exception to the rule: they may be called from any one thread at any time,
+  even during a render. (Not during `synths_destroy`.)
+- `synths_macro_set` allocates nothing and is quick, but it changes the
+  engine, so it must not overlap a render: in a native app call it from the
+  audio callback, between renders, like `synths_push_events`.
 - `synths_abi_version`, `synths_version`, `synths_param_table`,
   `synths_param_table_len`, `synths_output_capacity` and
   `synths_event_capacity` need no engine and are safe from any thread.
@@ -706,8 +950,8 @@ bound.
 
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
-plays a note through it and times it. The module is about 145 KB (57 KB
-gzipped).
+plays a note through it, reads the taps, sets a macro and times it. The
+module is about 160 KB (62 KB gzipped).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
 `_initialize`; the module is ready as soon as it is instantiated.
@@ -860,9 +1104,10 @@ engine.render(&mut left, &mut right);
 
 - `Engine::push(event) -> bool` queues an event; `Engine::apply(&event)`
   carries one out at once, at the engine's current time.
-- `Engine::load_sample`, `configure_sample`, `free_sample`, `param`,
-  `set_param`, `time`, `active_voices`, `reset` are the functions above
-  without the pointers.
+- `Engine::load_sample`, `configure_sample`, `free_sample`, `set_macro`,
+  `param`, `set_param`, `time`, `active_voices`, `reset` are the functions
+  above without the pointers, and `Engine::taps()` gives `read_scope`,
+  `read_levels` and `read_notes`.
 - `synths_core::params` has a constant for every parameter id (`CUTOFF`,
   `OSC1_WAVE`, ...) and the table itself (`PARAMS`).
 - A sequencer that lives inside the core (a tracker song player) drives the

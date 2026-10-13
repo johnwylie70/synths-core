@@ -80,6 +80,23 @@ fn storm(seed: u32, seconds: usize, sr: f32) {
         if rng.next_u32() % 400 == 0 {
             e.reset();
         }
+        if rng.next_u32() % 30 == 0 {
+            // A step macro of any length, full of anything.
+            let count = (rng.next_u32() % 65) as usize;
+            let numbers: Vec<f32> = (0..count * 5).map(|_| wild(&mut rng, -5.0, 5.0)).collect();
+            let part = (rng.next_u32() % 6) as u16;
+            e.set_macro(part, &numbers, rng.next_u32() % 70, rng.next_u32() % 70, rng.next_u32() % 70, rng.next_u32() % 2).unwrap();
+        }
+        if rng.next_u32() % 20 == 0 {
+            // The taps are read as a display would.
+            let mut scope = [0.0f32; 512];
+            e.taps().read_scope(rng.next_u32() % 70, &mut scope);
+            e.taps().read_scope(synths_core::taps::MASTER, &mut scope);
+            assert!(scope.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+            if let Some(levels) = e.taps().read_levels(rng.next_u32() % 64) {
+                assert!(levels.iter().all(|v| v.is_finite() && *v >= 0.0));
+            }
+        }
         if rng.next_u32() % 8 == 0 {
             // Back to many voices, however the storm has left things.
             e.set_param(0, VOICES, 64.0);

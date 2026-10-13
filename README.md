@@ -16,9 +16,11 @@ The libraries never work out samples. They send the engine commands with a time 
 - 64 voices shared between 64 parts. A part is one instrument, with its own patch, volume, pan, pitch bend and effect sends.
 - Each voice has two oscillators (sine, triangle, saw, pulse, or a sample), a sub oscillator and noise (white, pink, and two kinds of 8-bit chip noise), with hard sync, ring modulation and unison. The waves are band-limited, so high notes do not alias.
 - Samples play at any pitch, with forward and ping-pong loops, smoothed between frames.
-- A filter per voice (low-pass, high-pass, band-pass, notch; 12 or 24 dB), three envelopes and two LFOs.
+- A filter per voice (low-pass, high-pass, band-pass, or any of them added together; 12 or 24 dB), three envelopes and two LFOs.
+- Step macros: short looping tables, 50 steps a second or on a tracker's tick, that change the wave, pitch, pulse width, filter and volume. They are what makes an 8-bit sound chip sound the way it does: one-voice arpeggio chords, drums from a burst of noise and a falling tone.
 - Distortion and a bit crusher per part; an echo, a reverb and a chorus to send to; a limiter on the way out, so nothing clips.
 - Events are timed to the exact sample, and the same events always give exactly the same sound.
+- For drawing: the latest sound (a scope), level meters and the notes that are playing, for the whole output and for each part, readable at any time without disturbing the audio.
 
 [docs/engine-api.md](docs/engine-api.md) is the full description of the interface: every function, the layout of an event, every parameter.
 
@@ -46,7 +48,7 @@ cargo build --release --target aarch64-apple-ios    # makes target/aarch64-apple
 ## Listen and measure
 
 ```
-cargo run --release --example demo     # renders seven short phrases to target/demo/*.wav
+cargo run --release --example demo     # renders ten short phrases to target/demo/*.wav
 cargo run --release --example bench    # how many voices this machine plays in real time
 cargo run --example param_table        # the parameter table, as it appears in the document
 ```
@@ -60,7 +62,8 @@ cargo run --example param_table        # the parameter table, as it appears in t
 | `src/params.rs` | the parameter table: every value, defined once |
 | `src/event.rs` | the event record and the queue |
 | `src/voice.rs` | one note: oscillators, filter, envelopes, LFOs |
-| `src/osc.rs`, `src/sample.rs`, `src/filter.rs`, `src/env.rs`, `src/lfo.rs` | the parts of a voice |
+| `src/osc.rs`, `src/sample.rs`, `src/filter.rs`, `src/env.rs`, `src/lfo.rs`, `src/macros.rs` | the parts of a voice |
+| `src/taps.rs` | the scope, the meters and the sounding notes, for a display |
 | `src/fx.rs` | echo, reverb, chorus, distortion, bit crusher, limiter |
 
 To add a parameter, add a line to the table in `src/params.rs` with an id that has never been used, use it in the engine, then run `cargo run --example param_table` and paste the result into the document; a test fails if the two disagree.

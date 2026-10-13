@@ -5,6 +5,8 @@
 
 use crate::engine::{Engine, SampleError, EVENT_BUFFER, OUTPUT_FRAMES};
 use crate::event::Event;
+use crate::macros::STEP_SIZE;
+use crate::taps::{Taps, LEVEL_SIZE, NOTES_SIZE};
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::OnceLock;
 
@@ -328,5 +330,113 @@ pub unsafe extern "C" fn synths_sample_free(engine: *mut Engine, slot: u32) -> i
     match engine.as_mut() {
         Some(e) => code(e.free_sample(slot as usize)),
         None => SampleError::Null as i32,
+    }
+}
+
+/// Give a part its step macro: `count` steps of five numbers each (wave,
+/// pitch, pulse width, cutoff, volume). A count of 0 takes the macro away.
+/// Returns 0, or a negative number for an error.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `steps` must point to `count * 5`
+/// numbers (it may be null when `count` is 0).
+#[no_mangle]
+pub unsafe extern "C" fn synths_macro_set(
+    engine: *mut Engine,
+    part: u32,
+    steps: *const f32,
+    count: u32,
+    loop_start: u32,
+    loop_end: u32,
+    release: u32,
+    flags: u32,
+) -> i32 {
+    let e = match engine.as_mut() {
+        Some(e) => e,
+        None => return SampleError::Null as i32,
+    };
+    if count as usize > crate::macros::MAX_STEPS {
+        return SampleError::BadFormat as i32;
+    }
+    if part > u16::MAX as u32 {
+        return SampleError::BadSlot as i32;
+    }
+    let numbers: &[f32] = if count == 0 {
+        &[]
+    } else if steps.is_null() {
+        return SampleError::Null as i32;
+    } else {
+        core::slice::from_raw_parts(steps, count as usize * STEP_SIZE)
+    };
+    code(e.set_macro(part as u16, numbers, loop_start, loop_end, release, flags))
+}
+
+/// The engine's taps, reached without touching the rest of the engine, so
+/// that a display may read them while another thread renders.
+unsafe fn taps<'a>(engine: *const Engine) -> Option<&'a Taps> {
+    if engine.is_null() {
+        None
+    } else {
+        Some(&*(*engine).taps)
+    }
+}
+
+/// Copy the most recent `frames` frames of a part's sound (or, for source
+/// 65535, of the master output) into `out`, oldest first. Returns how many
+/// were written.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `out` must have room for `frames` numbers.
+#[no_mangle]
+pub unsafe extern "C" fn synths_scope_read(engine: *const Engine, source: u32, out: *mut f32, frames: u32) -> u32 {
+    match taps(engine) {
+        Some(t) if !out.is_null() => {
+            let frames = (frames as usize).min(crate::taps::SCOPE_MASTER);
+            t.read_scope(source, core::slice::from_raw_parts_mut(out, frames)) as u32
+        }
+        _ => 0,
+    }
+}
+
+/// Write the levels of `count` parts starting at part `source` (or, for
+/// source 65535, of the master output alone) into `out`: four numbers each,
+/// peak left, peak right, RMS left, RMS right. Returns how many sources were written.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `out` must have room for `count * 4` numbers.
+#[no_mangle]
+pub unsafe extern "C" fn synths_levels_read(engine: *const Engine, source: u32, count: u32, out: *mut f32) -> u32 {
+    let t = match taps(engine) {
+        Some(t) if !out.is_null() => t,
+        _ => return 0,
+    };
+    let mut done = 0;
+    while done < count {
+        match source.checked_add(done).and_then(|s| t.read_levels(s)) {
+            Some(v) => core::ptr::copy_nonoverlapping(v.as_ptr(), out.add(done as usize * LEVEL_SIZE), LEVEL_SIZE),
+            None => break,
+        }
+        done += 1;
+        if source == crate::taps::MASTER {
+            break;
+        }
+    }
+    done
+}
+
+/// Write which notes a part is playing (or, for part 65535, every part
+/// together) into `out`: eight 32-bit words, 128 bits of notes held and then
+/// 128 of notes sounding. Returns 8, or 0 if the part does not exist.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `out` must have room for 8 words.
+#[no_mangle]
+pub unsafe extern "C" fn synths_notes_read(engine: *const Engine, part: u32, out: *mut u32) -> u32 {
+    match taps(engine).and_then(|t| t.read_notes(part)) {
+        Some(v) if !out.is_null() => {
+            core::ptr::copy_nonoverlapping(v.as_ptr(), out, NOTES_SIZE);
+            NOTES_SIZE as u32
+        }
+        _ => 0,
     }
 }

@@ -112,7 +112,7 @@ param_table! {
     17, OSC1_LEVEL, "osc1.level", Float, 0, 1, 1, "gain", "", "How loud oscillator 1 is.";
     18, OSC1_COARSE, "osc1.coarse", Float, -48, 48, 0, "semitones", "", "Tuning in semitones.";
     19, OSC1_FINE, "osc1.fine", Float, -100, 100, 0, "cents", "", "Fine tuning.";
-    20, OSC1_PW, "osc1.pulse_width", Float, 0.02, 0.98, 0.5, "", "", "The width of the pulse wave (0.5 is a square).";
+    20, OSC1_PW, "osc1.pulse_width", Float, 0, 1, 0.5, "", "", "The width of the pulse wave (0.5 is a square; at 0 and 1 it is silent).";
     21, OSC1_SAMPLE, "osc1.sample", Int, 0, 1023, 0, "slot", "", "Which sample slot the sample wave plays.";
     22, OSC1_START, "osc1.start", Float, 0, 1, 0, "", "", "Where in the sample a note starts (0: the beginning, 1: the end).";
     23, OSC1_KEYTRACK, "osc1.keytrack", Bool, 0, 1, 1, "", "", "On: the pitch follows the note. Off: every note plays at the same pitch (drums).";
@@ -122,7 +122,7 @@ param_table! {
     25, OSC2_LEVEL, "osc2.level", Float, 0, 1, 0, "gain", "", "How loud oscillator 2 is.";
     26, OSC2_COARSE, "osc2.coarse", Float, -48, 48, 0, "semitones", "", "Tuning in semitones.";
     27, OSC2_FINE, "osc2.fine", Float, -100, 100, 0, "cents", "", "Fine tuning.";
-    28, OSC2_PW, "osc2.pulse_width", Float, 0.02, 0.98, 0.5, "", "", "The width of the pulse wave (0.5 is a square).";
+    28, OSC2_PW, "osc2.pulse_width", Float, 0, 1, 0.5, "", "", "The width of the pulse wave (0.5 is a square; at 0 and 1 it is silent).";
     29, OSC2_SAMPLE, "osc2.sample", Int, 0, 1023, 0, "slot", "", "Which sample slot the sample wave plays.";
     30, OSC2_START, "osc2.start", Float, 0, 1, 0, "", "", "Where in the sample a note starts.";
     31, OSC2_KEYTRACK, "osc2.keytrack", Bool, 0, 1, 1, "", "", "On: the pitch follows the note.";
@@ -138,7 +138,7 @@ param_table! {
     42, NOISE_PITCH, "noise.pitch", Float, -48, 48, 0, "semitones", "", "Tuning of the lfsr noise, which follows the note.";
 
     // ---- filter ----
-    48, FILTER_TYPE, "filter.type", Choice, 0, 4, 0, "", "off|lowpass|highpass|bandpass|notch", "What the filter lets through.";
+    48, FILTER_TYPE, "filter.type", Choice, 0, 7, 0, "", "off|lowpass|highpass|bandpass|notch|low_band|band_high|all", "What the filter lets through. The last four add outputs together, as a sound chip does: notch is low + high, low_band is low + band, band_high is band + high, all is all three.";
     49, FILTER_SLOPE, "filter.slope", Choice, 0, 1, 0, "", "12db|24db", "How steeply the filter cuts.";
     50, CUTOFF, "filter.cutoff", Float, 20, 20000, 2000, "hz", "", "The frequency where the filter starts to cut.";
     51, RESONANCE, "filter.resonance", Float, 0, 1, 0.15, "", "", "How much the filter emphasises the cutoff frequency.";
@@ -201,6 +201,10 @@ param_table! {
     115, SEND_DELAY, "send.delay", Float, 0, 1, 0, "gain", "", "How much of the part goes to the echo.";
     116, SEND_REVERB, "send.reverb", Float, 0, 1, 0, "gain", "", "How much of the part goes to the reverb.";
     117, SEND_CHORUS, "send.chorus", Float, 0, 1, 0, "gain", "", "How much of the part goes to the chorus.";
+
+    // ---- the part's step macro ----
+    120, MACRO_RATE, "macro.rate", Float, 1, 1000, 50, "hz", "", "How many steps of the part's macro play each second.";
+    121, MACRO_SYNC, "macro.sync", Bool, 0, 1, 0, "", "", "On: the macro steps on each macro_tick event (a tracker's tick) instead of by the clock.";
 
     // ---- the whole engine ----
     200, MASTER_VOLUME, "master.volume", Float, 0, 2, 0.35, "gain", "", "How loud everything is.";
@@ -300,7 +304,7 @@ pub fn table_json() -> String {
     let mut s = String::with_capacity(16 * 1024);
     let _ = write!(
         s,
-        "{{\"version\":\"{}\",\"abi\":{},\"limits\":{{\"voices\":{},\"parts\":{},\"samples\":{},\"event_size\":{},\"event_buffer\":{},\"event_queue\":{},\"output_frames\":{}}},",
+        "{{\"version\":\"{}\",\"abi\":{},\"limits\":{{\"voices\":{},\"parts\":{},\"samples\":{},\"event_size\":{},\"event_buffer\":{},\"event_queue\":{},\"output_frames\":{},\"macro_steps\":{},\"scope_master\":{},\"scope_part\":{}}},",
         crate::VERSION,
         crate::ABI_VERSION,
         e::MAX_VOICES,
@@ -309,7 +313,10 @@ pub fn table_json() -> String {
         crate::event::EVENT_SIZE,
         e::EVENT_BUFFER,
         e::QUEUE_CAPACITY,
-        e::OUTPUT_FRAMES
+        e::OUTPUT_FRAMES,
+        crate::macros::MAX_STEPS,
+        crate::taps::SCOPE_MASTER,
+        crate::taps::SCOPE_PART
     );
     s.push_str("\"events\":[");
     for (i, (id, name, help)) in crate::event::EVENT_TYPES.iter().enumerate() {

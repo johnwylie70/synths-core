@@ -6,9 +6,11 @@
 use crate::event::*;
 use crate::fx::{Chorus, Crusher, Delay, Limiter, Reverb};
 use crate::lfo::FreeLfo;
+use crate::macros::{Macro, Step, MACRO_SMOOTH, MAX_STEPS, STEP_SIZE};
 use crate::math::{hz_to_note, Rng};
 use crate::params::{self, *};
 use crate::sample::{Sample, LOOP_PINGPONG};
+use crate::taps::{Taps, NOTES_SIZE};
 use crate::voice::{Start, Voice, VoiceState, CONTROL};
 
 /// How many voices can sound at once.
@@ -28,12 +30,16 @@ const MAX_DELAY: f32 = 2.0;
 /// How many parameter glides can run at once.
 const MAX_RAMPS: usize = 64;
 
-/// Why a sample could not be loaded or changed.
+/// How often the notes that are sounding are written out for a display, in control periods.
+const NOTES_EVERY: u32 = 16;
+
+/// Why a sample or a macro could not be loaded or changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SampleError {
-    /// The slot number is past the last slot.
+    /// The slot number is past the last slot (or the part past the last part).
     BadSlot = -1,
-    /// Not 1 or 2 channels, no frames, or a sample rate that is not positive.
+    /// Not 1 or 2 channels, no frames, or a sample rate that is not positive
+    /// (or a macro with too many steps).
     BadFormat = -2,
     /// There is no sample in the slot.
     Empty = -3,
@@ -53,6 +59,9 @@ struct Part {
     ended: [f32; 2],
     volume: f32,
     crusher: Crusher,
+    steps: Macro,
+    /// Peak left and right, and mean square left and right, for the meters.
+    meter: [f32; 4],
     bus_l: [f32; CONTROL],
     bus_r: [f32; CONTROL],
     in_use: bool,
@@ -70,6 +79,8 @@ impl Part {
             ended: [0.0; 2],
             volume: p[VOLUME],
             crusher: Crusher::default(),
+            steps: Macro::none(),
+            meter: [0.0; 4],
             bus_l: [0.0; CONTROL],
             bus_r: [0.0; CONTROL],
             in_use: false,
@@ -121,6 +132,14 @@ pub struct Engine {
     asleep: bool,
     /// Something has sounded in this control period.
     tick_loud: bool,
+    /// What a display reads: scope, meters, sounding notes.
+    pub(crate) taps: Box<Taps>,
+    meter: [f32; 4],
+    /// How much a meter's peak and mean square keep, per control period and per sample.
+    peak_keep: f32,
+    rms_keep: f32,
+    rms_take: f32,
+    notes_in: u32,
     /// Buffers for hosts that use the C interface.
     pub(crate) out_l: Box<[f32]>,
     pub(crate) out_r: Box<[f32]>,
@@ -159,6 +178,12 @@ impl Engine {
             sleep_after: ((MAX_DELAY + 0.5) * sr) as u64,
             asleep: true,
             tick_loud: false,
+            taps: Box::new(Taps::new(NUM_PARTS)),
+            meter: [0.0; 4],
+            peak_keep: (-(CONTROL as f32) / (0.5 * sr)).exp(),
+            rms_keep: (-(CONTROL as f32) / (0.1 * sr)).exp(),
+            rms_take: 1.0 - (-1.0 / (0.1 * sr)).exp(),
+            notes_in: 0,
             out_l: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             out_r: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             event_buf: vec![Event::default(); EVENT_BUFFER].into_boxed_slice(),
@@ -208,6 +233,7 @@ impl Engine {
         self.master = self.globals[MASTER_VOLUME - GLOBAL_BASE];
         self.quiet = u64::MAX / 2;
         self.asleep = true;
+        self.write_notes();
     }
 
     // ---- samples ----
@@ -277,6 +303,51 @@ impl Engine {
                 Ok(())
             }
         }
+    }
+
+    // ---- macros ----
+
+    /// Give a part its step macro, replacing any it had. `numbers` holds
+    /// five numbers a step: wave, pitch, pulse width, cutoff, volume (see
+    /// `macros::Step`). No numbers at all takes the macro away.
+    /// `part` may be `ALL_PARTS`.
+    pub fn set_macro(
+        &mut self,
+        part: u16,
+        numbers: &[f32],
+        loop_start: u32,
+        loop_end: u32,
+        release: u32,
+        flags: u32,
+    ) -> Result<(), SampleError> {
+        let count = numbers.len() / STEP_SIZE;
+        if count > MAX_STEPS {
+            return Err(SampleError::BadFormat);
+        }
+        if part != ALL_PARTS && part as usize >= NUM_PARTS {
+            return Err(SampleError::BadSlot);
+        }
+        let mut m = Macro::none();
+        for (i, v) in numbers.chunks_exact(STEP_SIZE).enumerate() {
+            m.steps[i] = Step::from_numbers(v);
+        }
+        m.len = count as u8;
+        m.loop_end = loop_end.min(count as u32) as u8;
+        m.loop_start = loop_start.min(m.loop_end as u32) as u8;
+        m.release = release.min(255) as u8;
+        m.smooth = flags & MACRO_SMOOTH != 0;
+        for (i, p) in self.parts.iter_mut().enumerate() {
+            if part == ALL_PARTS || part as usize == i {
+                p.steps = m;
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// What a display reads: the scope, the meters and the sounding notes.
+    pub fn taps(&self) -> &Taps {
+        &self.taps
     }
 
     // ---- parameters ----
@@ -521,6 +592,13 @@ impl Engine {
                     }
                 }
             }
+            EV_MACRO_TICK => {
+                for v in self.voices.iter_mut() {
+                    if v.active() && (all || v.part == part) {
+                        v.macro_player.ticks = v.macro_player.ticks.saturating_add(1);
+                    }
+                }
+            }
             EV_PARAM => self.set_param_gliding(part, e.a as usize, e.x, e.y),
             EV_PITCH_BEND => self.set_param_gliding(part, BEND, e.x, e.y),
             EV_VOICE_PITCH | EV_VOICE_FREQ | EV_VOICE_VOLUME | EV_VOICE_PAN | EV_VOICE_POSITION | EV_VOICE_KILL => {
@@ -586,6 +664,55 @@ impl Engine {
         }
     }
 
+    /// Let a meter fall back by one control period.
+    fn fall(m: &mut [f32; 4], peak_keep: f32, rms_keep: f32) {
+        m[0] *= peak_keep;
+        m[1] *= peak_keep;
+        m[2] *= rms_keep;
+        m[3] *= rms_keep;
+        for v in m.iter_mut() {
+            if *v < 1.0e-9 {
+                *v = 0.0;
+            }
+        }
+    }
+
+    /// Take some sound into a meter.
+    fn measure(m: &mut [f32; 4], l: &[f32], r: &[f32], take: f32) {
+        for (&a, &b) in l.iter().zip(r.iter()) {
+            m[0] = m[0].max(a.abs());
+            m[1] = m[1].max(b.abs());
+            m[2] += a * a * take;
+            m[3] += b * b * take;
+        }
+    }
+
+    /// A meter as a host reads it: peaks, then RMS.
+    fn levels(m: &[f32; 4]) -> [f32; 4] {
+        [m[0], m[1], m[2].sqrt(), m[3].sqrt()]
+    }
+
+    /// Write out which notes each part is playing.
+    fn write_notes(&mut self) {
+        let mut bits = [[0u32; NOTES_SIZE]; NUM_PARTS];
+        for v in self.voices.iter() {
+            if !v.active() {
+                continue;
+            }
+            let note = (v.current_note() + 0.5).clamp(0.0, 127.0) as usize;
+            if let Some(b) = bits.get_mut(v.part as usize) {
+                let (word, bit) = (note / 32, 1u32 << (note % 32));
+                if v.state == VoiceState::Held {
+                    b[word] |= bit;
+                }
+                b[4 + word] |= bit;
+            }
+        }
+        for (i, b) in bits.iter().enumerate() {
+            self.taps.write_notes(i, b);
+        }
+    }
+
     /// Render up to `CONTROL` frames with nothing changing part way through.
     fn chunk(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let n = out_l.len();
@@ -600,14 +727,32 @@ impl Engine {
                     part.lfo[i].advance(CONTROL as f32 * rate * inv_sr, &mut self.rng);
                 }
             }
+            // The meters fall back, whether or not their part is sounding.
+            for (i, part) in self.parts.iter_mut().enumerate() {
+                if part.meter != [0.0; 4] {
+                    Engine::fall(&mut part.meter, self.peak_keep, self.rms_keep);
+                    self.taps.write_levels(i, Engine::levels(&part.meter));
+                }
+            }
+            if self.meter != [0.0; 4] {
+                Engine::fall(&mut self.meter, self.peak_keep, self.rms_keep);
+                self.taps.write_levels(NUM_PARTS, Engine::levels(&self.meter));
+            }
             // Asleep: no voice has sounded and no echo has rung for a while.
             self.asleep = self.quiet >= self.sleep_after;
             self.tick_loud = false;
+            if !self.asleep {
+                self.notes_in = if self.notes_in == 0 { NOTES_EVERY - 1 } else { self.notes_in - 1 };
+                if self.notes_in == NOTES_EVERY - 1 {
+                    self.write_notes();
+                }
+            }
         }
         if self.asleep {
             out_l.fill(0.0);
             out_r.fill(0.0);
             self.dirty = false;
+            self.taps.set_time(self.time + n as u64);
             return;
         }
 
@@ -627,7 +772,7 @@ impl Engine {
                 }
             };
             if look {
-                v.control(&part.p, &part.lfo, &self.samples, sr, to_tick);
+                v.control(&part.p, &part.lfo, &part.steps, &self.samples, sr, to_tick);
             }
             if !part.in_use {
                 part.in_use = true;
@@ -647,7 +792,7 @@ impl Engine {
         let mut mix_r = [0.0f32; CONTROL];
         let mut sends = [[0.0f32; CONTROL]; 6];
         let mut any_send = [false; 3];
-        for part in self.parts.iter_mut() {
+        for (index, part) in self.parts.iter_mut().enumerate() {
             let clicking = part.declick[0] != 0.0 || part.declick[1] != 0.0;
             if !part.in_use && !clicking {
                 continue;
@@ -705,6 +850,9 @@ impl Engine {
                 }
             }
             part.volume = vol;
+            Engine::measure(&mut part.meter, bl, br, self.rms_take);
+            self.taps.write_levels(index, Engine::levels(&part.meter));
+            self.taps.write_scope(index, self.time, bl, br);
             for i in 0..n {
                 mix_l[i] += bl[i];
                 mix_r[i] += br[i];
@@ -766,6 +914,10 @@ impl Engine {
             out_r[i] = r;
         }
         self.master = master;
+        Engine::measure(&mut self.meter, out_l, out_r, self.rms_take);
+        self.taps.write_levels(NUM_PARTS, Engine::levels(&self.meter));
+        self.taps.write_scope(NUM_PARTS, self.time, out_l, out_r);
+        self.taps.set_time(self.time + n as u64);
         // Silence is counted a whole control period at a time, so that when
         // the engine falls asleep does not depend on how a host slices time.
         if sounding > 0 || peak >= 1.0e-6 {

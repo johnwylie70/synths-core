@@ -36,7 +36,7 @@ fn the_document_lists_every_function() {
             assert!(DOC.matches(&format!("{name}(")).count() >= 2, "{name} should be in the header and described");
         }
     }
-    assert_eq!(count, 25);
+    assert_eq!(count, 29);
 }
 
 #[test]
@@ -45,6 +45,9 @@ fn the_document_gives_the_engines_limits() {
     assert_eq!((QUEUE_CAPACITY, EVENT_BUFFER, OUTPUT_FRAMES, EVENT_SIZE), (4096, 256, 4096, 32));
     assert_eq!(synths_core::voice::CONTROL, 16);
     assert_eq!(synths_core::ABI_VERSION, 1);
+    use synths_core::{macros, taps};
+    assert_eq!((macros::MAX_STEPS, macros::STEP_SIZE, taps::SCOPE_MASTER, taps::SCOPE_PART), (64, 5, 4096, 1024));
+    assert_eq!((taps::LEVEL_SIZE, taps::NOTES_SIZE, taps::MASTER), (4, 8, 65535));
     for text in [
         "There are 64, numbered from 0",
         "There are 64 to share",
@@ -55,6 +58,11 @@ fn the_document_gives_the_engines_limits() {
         "the queue (4096 events) is full",
         "An event is 32 bytes",
         "version **1**",
+        "`count` is 0 to 64",
+        "the last 4096 frames of the master output",
+        "the last 1024 frames of each",
+        "Each step is five `f32` numbers",
+        "every 256\nframes",
     ] {
         assert!(DOC.contains(text), "the document no longer says: {text}");
     }

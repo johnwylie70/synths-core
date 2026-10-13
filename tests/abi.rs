@@ -98,6 +98,43 @@ fn a_host_can_drive_the_engine_through_the_c_interface() {
         assert!((r[200] - 0.25).abs() < 1e-5, "{}", r[200]);
         assert_eq!(synths_sample_free(e, 9), 0);
 
+        // What a display reads: the scope, the meters, the notes.
+        let scope = synths_alloc(4096 * 4) as *mut f32;
+        assert_eq!(synths_scope_read(e, 0xFFFF, scope, 100_000), 4096);
+        assert_eq!(synths_scope_read(e, 2, scope, 100_000), 1024);
+        assert_eq!(synths_scope_read(e, 64, scope, 16), 0);
+        assert_eq!(synths_scope_read(e, 2, scope, 256), 256);
+        let seen = std::slice::from_raw_parts(scope, 256);
+        for i in 0..256 {
+            assert_eq!(seen[i], 0.5 * r[i], "the scope holds the mean of left and right");
+        }
+        let mut levels = [0.0f32; 12];
+        assert_eq!(synths_levels_read(e, 1, 3, levels.as_mut_ptr()), 3);
+        assert!(levels[0..4] == [0.0; 4] && levels[8..12] == [0.0; 4]);
+        // (The peak still remembers the louder square wave from before.)
+        assert!(levels[4] == 0.0 && levels[5] >= 0.2499 && levels[5] < 1.0 && levels[7] > 0.01, "{levels:?}");
+        assert_eq!(synths_levels_read(e, 0xFFFF, 3, levels.as_mut_ptr()), 1);
+        assert!(levels[1] >= 0.2499 && levels[1] < 0.36);
+        assert_eq!(synths_levels_read(e, 62, 5, levels.as_mut_ptr()), 2);
+        let mut notes = [0u32; 8];
+        assert_eq!(synths_notes_read(e, 2, notes.as_mut_ptr()), 8);
+        assert_eq!(notes, [0, 1 << 28, 0, 0, 0, 1 << 28, 0, 0], "note 60 is held and sounding");
+        assert_eq!(synths_notes_read(e, 3, notes.as_mut_ptr()), 8);
+        assert_eq!(notes, [0; 8]);
+        assert_eq!(synths_notes_read(e, 0xFFFF, notes.as_mut_ptr()), 8);
+        assert_eq!(notes[1], 1 << 28);
+        assert_eq!(synths_notes_read(e, 64, notes.as_mut_ptr()), 0);
+        synths_free(scope as *mut u8);
+
+        // A step macro: an arpeggio of three steps on part 2.
+        let steps: [f32; 15] = [-1.0, 0.0, -1.0, 0.0, 1.0, -1.0, 4.0, -1.0, 0.0, 1.0, -1.0, 7.0, -1.0, 0.0, 1.0];
+        assert_eq!(synths_macro_set(e, 2, steps.as_ptr(), 3, 0, 3, 255, 0), 0);
+        assert_eq!(synths_macro_set(e, 0xFFFF, steps.as_ptr(), 3, 0, 3, 255, 0), 0);
+        assert_eq!(synths_macro_set(e, 64, steps.as_ptr(), 3, 0, 3, 255, 0), -1);
+        assert_eq!(synths_macro_set(e, 2, steps.as_ptr(), 65, 0, 3, 255, 0), -2);
+        assert_eq!(synths_macro_set(e, 2, std::ptr::null(), 3, 0, 3, 255, 0), -4);
+        assert_eq!(synths_macro_set(e, 2, std::ptr::null(), 0, 0, 0, 0, 0), 0);
+
         // Filling the queue: the count taken says where it stopped.
         synths_reset(e);
         assert_eq!(synths_active_voices(e), 0);
@@ -120,6 +157,12 @@ fn a_host_can_drive_the_engine_through_the_c_interface() {
         assert!(synths_output_left(none).is_null() && synths_event_buffer(none).is_null());
         assert_eq!(synths_push_events(none, 1), 0);
         assert_eq!(synths_sample_free(none, 0), -4);
+        assert_eq!(synths_macro_set(none, 0, std::ptr::null(), 0, 0, 0, 0, 0), -4);
+        let mut word = [0u32; 8];
+        let mut number = [0.0f32; 4];
+        assert_eq!(synths_scope_read(none, 0, number.as_mut_ptr(), 4), 0);
+        assert_eq!(synths_levels_read(none, 0, 1, number.as_mut_ptr()), 0);
+        assert_eq!(synths_notes_read(none, 0, word.as_mut_ptr()), 0);
     }
 }
 
@@ -130,7 +173,7 @@ fn the_parameter_table_is_json_a_host_can_read() {
         assert_eq!(text.len() as u32, synths_param_table_len());
         assert!(text.starts_with("{\"version\":\"") && text.ends_with("]}"));
         assert!(text.contains("\"abi\":1"));
-        assert!(text.contains("\"limits\":{\"voices\":64,\"parts\":64,\"samples\":1024,\"event_size\":32,\"event_buffer\":256,\"event_queue\":4096,\"output_frames\":4096}"));
+        assert!(text.contains("\"limits\":{\"voices\":64,\"parts\":64,\"samples\":1024,\"event_size\":32,\"event_buffer\":256,\"event_queue\":4096,\"output_frames\":4096,\"macro_steps\":64,\"scope_master\":4096,\"scope_part\":1024}"));
         assert!(text.contains("{\"type\":1,\"name\":\"note_on\""));
         assert!(text.contains("{\"id\":50,\"name\":\"filter.cutoff\",\"scope\":\"part\",\"kind\":\"float\",\"min\":20,\"max\":20000,\"default\":2000,\"unit\":\"hz\","));
         assert!(text.contains("{\"id\":16,\"name\":\"osc1.wave\",\"scope\":\"part\",\"kind\":\"choice\",\"min\":0,\"max\":4,\"default\":1,\"unit\":\"\",\"choices\":[\"sine\",\"triangle\",\"saw\",\"pulse\",\"sample\"],"));

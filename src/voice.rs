@@ -3,8 +3,9 @@
 //! shaped by three envelopes and two LFOs.
 
 use crate::env::{Env, EnvShape};
-use crate::filter::{Svf, FILTER_OFF};
+use crate::filter::{self, Svf, FILTER_OFF};
 use crate::lfo::{FreeLfo, Lfo, LfoShape};
+use crate::macros::{Macro, MacroPlayer, STEP_NOISE};
 use crate::math::{fast_sin, note_to_hz, semis_to_ratio, Rng, PI};
 use crate::osc::{Noise, Osc, NOISE_LFSR};
 use crate::params::*;
@@ -73,6 +74,7 @@ pub struct Voice {
     filter_env: Env,
     mod_env: Env,
     lfos: [Lfo; 2],
+    pub macro_player: MacroPlayer,
     rng: Rng,
 
     // Worked out by `control`, used by `render`.
@@ -141,6 +143,7 @@ impl Voice {
             filter_env: Env::default(),
             mod_env: Env::default(),
             lfos: [Lfo::default(); 2],
+            macro_player: MacroPlayer::default(),
             rng: Rng::new(1),
             amp_shape: EnvShape::default(),
             filter_shape: EnvShape::default(),
@@ -171,6 +174,12 @@ impl Voice {
     #[inline]
     pub fn active(&self) -> bool {
         self.state != VoiceState::Free
+    }
+
+    /// The note the voice is playing (or sliding to), for a keyboard display.
+    #[inline]
+    pub fn current_note(&self) -> f32 {
+        self.note_target
     }
 
     fn read_shapes(&mut self, p: &[f32; PART_PARAMS], sample_rate: f32) {
@@ -236,6 +245,7 @@ impl Voice {
         self.set_pitch(note, glide, sample_rate);
         if retrigger || self.state == VoiceState::Released {
             self.velocity = velocity;
+            self.macro_player.restart();
             self.amp_env.gate_on(&self.amp_shape);
             self.filter_env.gate_on(&self.filter_shape);
             self.mod_env.gate_on(&self.mod_shape);
@@ -247,6 +257,7 @@ impl Voice {
     pub fn release(&mut self) {
         if self.state == VoiceState::Held {
             self.state = VoiceState::Released;
+            self.macro_player.release();
             self.amp_env.gate_off(&self.amp_shape);
             self.filter_env.gate_off(&self.filter_shape);
             self.mod_env.gate_off(&self.mod_shape);
@@ -265,6 +276,7 @@ impl Voice {
         &mut self,
         p: &[f32; PART_PARAMS],
         free: &[FreeLfo; 2],
+        steps: &Macro,
         samples: &[Option<Sample>],
         sample_rate: f32,
         len: usize,
@@ -308,8 +320,13 @@ impl Voice {
         let off = |id: usize| id - LFO1_WAVE;
         let lfo_sum = |id: usize| lfo[0] * p[l1 + off(id)] + lfo[1] * p[l2 + off(id)];
 
+        // The part's step macro.
+        let step = self.macro_player.advance(steps, elapsed as f32 * p[MACRO_RATE] * inv_sr, p[MACRO_SYNC] >= 0.5);
+        let noise_step = step.wave == STEP_NOISE;
+
         // Pitch. `bend` is everything that moves the pitch away from the note.
-        let bend = p[TRANSPOSE]
+        let bend = step.pitch
+            + p[TRANSPOSE]
             + p[TUNE] * 0.01
             + p[BEND] * p[BEND_RANGE]
             + self.detune
@@ -322,9 +339,17 @@ impl Voice {
         self.stereo = false;
         for i in 0..2 {
             let b = i * OSC_STRIDE;
-            let wave = p[OSC1_WAVE + b] as u8;
-            self.waves[i] = wave;
+            let mut wave = p[OSC1_WAVE + b] as u8;
             self.levels[i] = p[OSC1_LEVEL + b];
+            if i == 0 && step.wave >= 0.0 {
+                // A macro step picks the wave; for a step of noise the
+                // oscillator falls silent and the noise takes its level.
+                wave = if noise_step { WAVE_PULSE } else { step.wave as u8 };
+                if noise_step {
+                    self.levels[0] = 0.0;
+                }
+            }
+            self.waves[i] = wave;
             let mut semis = p[OSC1_COARSE + b] + p[OSC1_FINE + b] * 0.01;
             if i == 1 {
                 semis += menv * p[MENV_OSC2_PITCH];
@@ -352,7 +377,8 @@ impl Voice {
                 }
                 let o = &mut self.osc[i];
                 aim(&mut o.inc, &mut o.dinc, (hz * inv_sr).min(top), jump, inv_len);
-                let pw = (p[OSC1_PW + b] + pw_mod).clamp(0.02, 0.98);
+                let width = if step.pulse_width >= 0.0 { step.pulse_width } else { p[OSC1_PW + b] };
+                let pw = (width + pw_mod).clamp(0.0, 1.0);
                 aim(&mut o.pw, &mut o.dpw, pw, jump, inv_len);
             }
         }
@@ -370,7 +396,7 @@ impl Voice {
         self.sub.pw = 0.5;
         self.sub.dpw = 0.0;
 
-        self.noise_level = p[NOISE_LEVEL];
+        self.noise_level = if noise_step { p[NOISE_LEVEL].max(p[OSC1_LEVEL]) } else { p[NOISE_LEVEL] };
         self.noise_type = p[NOISE_TYPE] as u8;
         if self.noise_level > 0.0 && self.noise_type >= NOISE_LFSR {
             self.noise.clock_inc = base_hz * 16.0 * semis_to_ratio(p[NOISE_PITCH]) * inv_sr;
@@ -384,6 +410,7 @@ impl Voice {
             let semis = p[FILTER_KEYTRACK] * (self.note - 60.0)
                 + p[FILTER_ENV] * fenv
                 + p[FILTER_VELOCITY] * self.velocity
+                + step.cutoff
                 + lfo_sum(LFO1_CUTOFF);
             let hz = (p[CUTOFF] * semis_to_ratio(semis.clamp(-120.0, 120.0))).clamp(16.0, sample_rate * 0.45);
             let g = (PI * hz * inv_sr).tan();
@@ -400,7 +427,7 @@ impl Voice {
 
         // Loudness and pan.
         let sens = p[VELOCITY_SENS];
-        let mut gain = (1.0 - sens + sens * self.velocity) * self.volume * self.unison_gain;
+        let mut gain = (1.0 - sens + sens * self.velocity) * self.volume * self.unison_gain * step.volume;
         gain *= 1.0 - p[LFO1_AMP] * (0.5 - 0.5 * lfo[0]);
         gain *= 1.0 - p[LFO2_AMP] * (0.5 - 0.5 * lfo[1]);
         let pan = (p[PAN] + self.pan + self.unison_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
@@ -527,7 +554,7 @@ impl Voice {
         }
 
         if self.filter_type != FILTER_OFF {
-            let (g, dg, k, kind) = (self.g, self.dg, self.k, self.filter_type);
+            let (g, dg, k, kind) = (self.g, self.dg, self.k, filter::outputs(self.filter_type));
             let sides = if stereo { 2 } else { 1 };
             for side in 0..sides {
                 let buf: &mut [f32] = if side == 0 { &mut *a } else { &mut *b };

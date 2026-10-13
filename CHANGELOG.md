@@ -15,3 +15,7 @@
 - A C interface, the same for WebAssembly and for a native library, described in docs/engine-api.md.
 - A script that builds the WebAssembly module and checks it in node.
 - Tests, a demo that renders phrases to WAV files, and a benchmark.
+- Step macros: each part can have a table of up to 64 steps that set the wave (including noise), a pitch offset, the pulse width, a filter offset and the volume, with a loop, a release point and an option to slide between steps. They run at 50 steps a second, or any rate, or on `macro_tick` events from a tracker.
+- The filter's outputs can be added together (low + band, band + high, all three), as a sound chip's filter is switched.
+- The pulse width goes all the way from 0 to 1, and the pulse wave has no steady offset, so it fades to silence at the ends.
+- Taps for a display, readable while sound is being made: the last 4096 frames of the output and 1024 of each part, peak and RMS levels, and the notes held and sounding on each part.

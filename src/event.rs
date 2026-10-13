@@ -18,6 +18,7 @@ pub const EV_VOICE_VOLUME: u16 = 8;
 pub const EV_VOICE_PAN: u16 = 9;
 pub const EV_VOICE_POSITION: u16 = 10;
 pub const EV_VOICE_KILL: u16 = 11;
+pub const EV_MACRO_TICK: u16 = 12;
 
 /// The part number that means "every part".
 pub const ALL_PARTS: u16 = 0xFFFF;
@@ -35,6 +36,7 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_VOICE_PAN, "voice_pan", "part; a: handle; x: pan -1..1, added to the part's pan"),
     (EV_VOICE_POSITION, "voice_position", "part; a: handle; x: sample position in frames"),
     (EV_VOICE_KILL, "voice_kill", "part; a: handle"),
+    (EV_MACRO_TICK, "macro_tick", "part (65535: every part): step the macros of parts with macro.sync on"),
 ];
 
 /// One event, exactly as it is laid out in memory (little-endian).
@@ -95,6 +97,9 @@ impl Event {
     }
     pub fn voice_kill(time: f64, part: u16, handle: u32) -> Event {
         Event::new(time, EV_VOICE_KILL, part, handle, 0.0, 0.0)
+    }
+    pub fn macro_tick(time: f64, part: u16) -> Event {
+        Event::new(time, EV_MACRO_TICK, part, 0, 0.0, 0.0)
     }
 }
 

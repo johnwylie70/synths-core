@@ -17,10 +17,12 @@ pub mod event;
 pub mod filter;
 pub mod fx;
 pub mod lfo;
+pub mod macros;
 pub mod math;
 pub mod osc;
 pub mod params;
 pub mod sample;
+pub mod taps;
 pub mod voice;
 
 pub use engine::Engine;

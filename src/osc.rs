@@ -47,13 +47,7 @@ fn naive(wave: u8, t: f32, pw: f32) -> f32 {
             1.0 - 4.0 * (u - 0.5).abs()
         }
         WAVE_SAW => t + t - 1.0,
-        _ => {
-            if t < pw {
-                1.0
-            } else {
-                -1.0
-            }
-        }
+        _ => (if t < pw { 1.0 } else { -1.0 }) - (pw + pw - 1.0),
     }
 }
 
@@ -164,7 +158,9 @@ impl Osc {
                         t2 += 1.0;
                     }
                     y -= blep(t2, inc);
-                    *o = y;
+                    // Without its average, so that a pulse narrowed to
+                    // nothing fades to silence instead of a thump.
+                    *o = y - (pw + pw - 1.0);
                 }
                 self.pw = pw;
             }
@@ -212,7 +208,7 @@ impl Osc {
                         if t2 < 0.0 {
                             t2 += 1.0;
                         }
-                        (if ph < pw { 1.0 } else { -1.0 }) + blep(ph, inc) - blep(t2, inc)
+                        (if ph < pw { 1.0 } else { -1.0 }) + blep(ph, inc) - blep(t2, inc) - (pw + pw - 1.0)
                     }
                     _ => naive(wave, ph, pw),
                 };
