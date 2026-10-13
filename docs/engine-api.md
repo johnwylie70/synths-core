@@ -1277,7 +1277,7 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 | `note_on(part, handle, note, velocity)`, `note_off(part, handle)` | The `note_on` and `note_off` events, for parts that play synth patches. |
 | `set_param(part, id, value, glide)` | The `param` event. |
 | `macro_tick(part)` | The `macro_tick` event: step the macros of parts with `macro.sync` on. A tracker calls it once on each of its ticks. |
-| `event(&Event)` | Carry out any event a host could send, now (its time is ignored). Events added to the engine later can be sent this way without a method of their own. |
+| `event(&Event)` | Carry out any event a host could send, now (its time is ignored). This is how a sequencer sends the events that have no method of their own here (`arp` and `arp_more`, to give a voice it has started an arpeggio), and any the engine gains later. |
 
 `part` may be `ALL_PARTS` wherever the matching event allows it, and in
 `set_rate`, `fade` and `sounding`. A handle of 0 addresses nothing, except

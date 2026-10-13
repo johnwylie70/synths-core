@@ -225,6 +225,29 @@ fn a_sequencer_steps_macros_on_its_own_ticks() {
 }
 
 #[test]
+fn a_sequencer_can_send_any_event_such_as_an_arpeggio() {
+    let mut e = engine();
+    e.set_sequencer(script(|v, n| {
+        match n {
+            0 => assert!(v.trigger(0, 9, &Trigger { rate: 48000.0, ..hit(3) })),
+            // From frame 1000: the note and an octave above, 2400 frames each.
+            1 => v.event(&Event::arp(0.0, 0, 9, 20.0, 0, &[0, 12])),
+            _ => {}
+        }
+        1000
+    }));
+    let x = render(&mut e, 12000, 128).0;
+    let close = |from: usize, want: f32| {
+        let got = frequency(&x[from + 100..from + 2400], SR);
+        assert!((got / want - 1.0).abs() < 0.01, "from frame {from}: {got} Hz, wanted {want}");
+    };
+    close(1000, 480.0);
+    close(3400, 960.0);
+    close(5800, 480.0);
+    close(8200, 960.0);
+}
+
+#[test]
 fn a_sequencer_wakes_a_sleeping_engine_and_a_host_has_the_last_word() {
     let mut e = engine();
     e.set_sequencer(script(|v, n| {
