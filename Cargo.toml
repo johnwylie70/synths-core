@@ -21,3 +21,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Tests render a lot of sound, so they are compiled for speed; they keep
+# their checks for overflow and out-of-range indexes.
+[profile.test]
+opt-level = 2

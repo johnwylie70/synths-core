@@ -316,7 +316,7 @@ pub fn table_json() -> String {
         if i > 0 {
             s.push(',');
         }
-        let _ = write!(s, "{{\"type\":{},\"name\":", id);
+        let _ = write!(s, "{{\"type\":{id},\"name\":");
         json_str(&mut s, name);
         s.push_str(",\"help\":");
         json_str(&mut s, help);

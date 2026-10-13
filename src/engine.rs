@@ -219,7 +219,7 @@ impl Engine {
         if slot >= MAX_SAMPLES {
             return Err(SampleError::BadSlot);
         }
-        if !(channels == 1 || channels == 2) || !(rate > 0.0) || !rate.is_finite() {
+        if !(channels == 1 || channels == 2) || !rate.is_finite() || rate <= 0.0 {
             return Err(SampleError::BadFormat);
         }
         let frames = data.len() / channels as usize;
@@ -678,8 +678,10 @@ impl Engine {
             part.ended = [0.0; 2];
             // Nothing wild gets past here into the effects.
             for x in bl.iter_mut().chain(br.iter_mut()) {
-                if !(x.abs() < 64.0) {
-                    *x = if x.is_nan() { 0.0 } else { x.clamp(-64.0, 64.0) };
+                if x.is_nan() {
+                    *x = 0.0;
+                } else if x.abs() > 64.0 {
+                    *x = x.clamp(-64.0, 64.0);
                 }
             }
             let p = &part.p;

@@ -237,7 +237,7 @@ impl Reverb {
         let feedback = 0.7 + 0.28 * size.clamp(0.0, 1.0);
         let damp = 0.4 * damping.clamp(0.0, 1.0);
         for i in 0..in_l.len() {
-            let x = (in_l[i] + in_r[i]) * 0.03;
+            let x = (in_l[i] + in_r[i]) * 0.015;
             for (side, out) in [&mut out_l[i], &mut out_r[i]].into_iter().enumerate() {
                 let mut y = 0.0;
                 for c in self.combs[side].iter_mut() {
