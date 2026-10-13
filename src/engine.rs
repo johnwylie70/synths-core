@@ -15,6 +15,8 @@ use crate::sequencer::{Sequencer, Trigger, Voices};
 use crate::taps::{Taps, NOTES_SIZE};
 use crate::voice::{Start, Voice, VoiceState, CONTROL};
 
+mod io;
+
 /// How many voices can sound at once.
 pub const MAX_VOICES: usize = 64;
 /// How many parts there are. Each has its own patch, volume, pan and sends.
@@ -197,6 +199,10 @@ pub struct Engine {
     sequencer: Option<Box<dyn Sequencer>>,
     /// The frame it next wants to be called on.
     sequencer_at: u64,
+    /// The live input, the voice effects of the parts, and the recorder.
+    pub(crate) input: crate::input::Input,
+    vfx: crate::voicefx::VoiceFx,
+    pub(crate) recorder: crate::input::Recorder,
     /// Buffers for hosts that use the C interface.
     pub(crate) out_l: Box<[f32]>,
     pub(crate) out_r: Box<[f32]>,
@@ -246,6 +252,9 @@ impl Engine {
             notes_in: 0,
             sequencer: None,
             sequencer_at: 0,
+            input: crate::input::Input::new(sr),
+            vfx: crate::voicefx::VoiceFx::new(sr),
+            recorder: Default::default(),
             out_l: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             out_r: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             event_buf: vec![Event::default(); EVENT_BUFFER].into_boxed_slice(),
@@ -294,6 +303,7 @@ impl Engine {
         self.reverb.clear();
         self.chorus.clear();
         self.limiter.clear();
+        self.reset_io();
         self.master = self.globals[MASTER_VOLUME - GLOBAL_BASE];
         self.quiet = u64::MAX / 2;
         self.asleep = true;
@@ -496,10 +506,10 @@ impl Engine {
         }
         self.store(part, id, value);
         // With nothing sounding there is nothing to smooth: jump.
-        if id == VOLUME && self.part_is_silent(part) {
+        if id == VOLUME && self.part_is_silent(part) && !self.input_sounds_on(part) {
             self.parts[part as usize].volume = value;
         }
-        if id == MASTER_VOLUME && self.active_voices() == 0 {
+        if id == MASTER_VOLUME && self.active_voices() == 0 && !self.input.sounding {
             self.master = value;
         }
     }
@@ -722,6 +732,7 @@ impl Engine {
                 }
             }
             EV_SONG => self.sequencer_event(e),
+            EV_RECORD => self.record_event(e),
             EV_MACRO_TICK => {
                 for v in self.voices.iter_mut() {
                     if v.active() && (all || v.part == part) {
@@ -975,7 +986,13 @@ impl Engine {
     /// Render the next frames into `left` and `right` (any length; the
     /// shorter of the two is used).
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        let frames = left.len().min(right.len());
+        self.render_with(None, left, right);
+    }
+
+    /// `render`, with or without a live input (see `render_io`).
+    #[inline(never)]
+    fn render_with(&mut self, input: io::Frames<'_>, left: &mut [f32], right: &mut [f32]) {
+        let frames = io::length(&input, left.len().min(right.len()));
         let mut done = 0;
         while done < frames {
             // The sequencer goes first, so that a host's event for the same
@@ -1018,6 +1035,7 @@ impl Engine {
             if self.tick_pos == 0 && self.live_ramps > 0 {
                 self.run_ramps();
             }
+            let n = self.stage_input(&input, done, n);
             self.chunk(&mut left[done..done + n], &mut right[done..done + n]);
             self.time += n as u64;
             self.tick_pos = (self.tick_pos + n) % CONTROL;
@@ -1114,6 +1132,7 @@ impl Engine {
             out_r.fill(0.0);
             self.dirty = false;
             self.taps.set_time(self.time + n as u64);
+            self.record_silence(n);
             return;
         }
 
@@ -1152,15 +1171,22 @@ impl Engine {
             }
         }
 
+        sounding += self.monitor_input(n);
+
         let mut mix_l = [0.0f32; CONTROL];
         let mut mix_r = [0.0f32; CONTROL];
         let mut sends = [[0.0f32; CONTROL]; 6];
         let mut any_send = [false; 3];
+        let mut part_recorded = false;
         for (index, part) in self.parts.iter_mut().enumerate() {
             let clicking = part.declick[0] != 0.0 || part.declick[1] != 0.0;
-            if !part.in_use && !clicking {
+            // Its voice effects may still be ringing after its voices have stopped.
+            let ringing = self.vfx.live(index, self.tick_pos == 0);
+            if !part.in_use && !clicking && !ringing {
                 continue;
             }
+            let driven = part.in_use;
+            sounding += ringing as usize;
             if !part.in_use {
                 part.bus_l[..n].fill(0.0);
                 part.bus_r[..n].fill(0.0);
@@ -1194,6 +1220,7 @@ impl Engine {
                 }
             }
             let p = &part.p;
+            self.vfx.process(index, p, bl, br, driven);
             if p[DRIVE] > 0.0 || p[CRUSH_BITS] < 16.0 || p[CRUSH_RATE] > 1.0 {
                 part.crusher.process(bl, br, p[DRIVE], p[CRUSH_BITS], p[CRUSH_RATE] as u32);
             }
@@ -1217,6 +1244,10 @@ impl Engine {
             Engine::measure(&mut part.meter, bl, br, self.rms_take);
             self.taps.write_levels(index, Engine::levels(&part.meter));
             self.taps.write_scope(index, self.time, bl, br);
+            if self.recorder.source() == Some(crate::input::Source::Part(index as u16)) {
+                self.recorder.write(&mut self.samples, bl, br);
+                part_recorded = true;
+            }
             for i in 0..n {
                 mix_l[i] += bl[i];
                 mix_r[i] += br[i];
@@ -1233,6 +1264,10 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        if !part_recorded {
+            self.record_silence_of_part(n);
         }
 
         // The shared effects. Each keeps running after its input stops, for
@@ -1281,6 +1316,9 @@ impl Engine {
         Engine::measure(&mut self.meter, out_l, out_r, self.rms_take);
         self.taps.write_levels(NUM_PARTS, Engine::levels(&self.meter));
         self.taps.write_scope(NUM_PARTS, self.time, out_l, out_r);
+        if self.recorder.source() == Some(crate::input::Source::Master) {
+            self.recorder.write(&mut self.samples, out_l, out_r);
+        }
         self.taps.set_time(self.time + n as u64);
         // Silence is counted a whole control period at a time, so that when
         // the engine falls asleep does not depend on how a host slices time.

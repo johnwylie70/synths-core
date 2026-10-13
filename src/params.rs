@@ -199,6 +199,14 @@ param_table! {
     104, LFO2_AMP, "lfo2.amp", Float, 0, 1, 0, "", "", "How much it changes the loudness.";
     105, LFO2_PAN, "lfo2.pan", Float, 0, 1, 0, "", "", "How far it moves the sound left and right.";
 
+    // ---- the part's voice effects: they come before the distortion ----
+    106, FX_PITCH, "fx.pitch", Float, -12, 12, 0, "semitones", "", "Pitch shifter: moves the part's whole sound up or down without changing its speed (0 is off). Up is a chipmunk, down is a monster.";
+    107, FX_RING, "fx.ring", Float, 0, 1, 0, "", "", "Ring modulator: how much of the sound is multiplied by a steady wave (0 is off). The robot voice.";
+    108, FX_RING_FREQ, "fx.ring_freq", Float, 1, 5000, 30, "hz", "", "Ring modulator: how fast the wave goes. Slow is a wobble, 30 to 80 is a robot, hundreds is a bell-like alien.";
+    109, FX_RING_WAVE, "fx.ring_wave", Choice, 0, 1, 0, "", "sine|noise", "Ring modulator: sine is the robot. noise multiplies by a rumble as wide as fx.ring_freq, which blurs the pitch of a voice into a hoarse whisper.";
+    110, FX_COMB, "fx.comb", Float, 0, 1, 0, "", "", "Comb: how much of the sound is the ringing, metallic copy (0 is off).";
+    111, FX_COMB_FREQ, "fx.comb_freq", Float, 50, 5000, 200, "hz", "", "Comb: the note it rings at. Low is a robot in a pipe; high, and swept, is a flanger.";
+
     // ---- the part's effects ----
     112, DRIVE, "fx.drive", Float, 0, 1, 0, "", "", "Distortion (0 is off).";
     113, CRUSH_BITS, "fx.bits", Float, 1, 16, 16, "bits", "", "Bit crusher: how many bits each sample keeps (16 is off).";
@@ -210,6 +218,11 @@ param_table! {
     // ---- the part's step macro ----
     120, MACRO_RATE, "macro.rate", Float, 1, 1000, 50, "hz", "", "How many steps of the part's macro play each second.";
     121, MACRO_SYNC, "macro.sync", Bool, 0, 1, 0, "", "", "On: the macro steps on each macro_tick event (a tracker's tick) instead of by the clock.";
+
+    // ---- more of the comb ----
+    122, FX_COMB_FEEDBACK, "fx.comb_feedback", Float, -0.97, 0.97, 0.7, "", "", "Comb: how long it rings. Below 0 it rings an octave lower and hollow.";
+    123, FX_COMB_RATE, "fx.comb_rate", Float, 0.01, 10, 0.3, "hz", "", "Comb: how fast its note sweeps up and down.";
+    124, FX_COMB_DEPTH, "fx.comb_depth", Float, 0, 1, 0, "", "", "Comb: how far its note sweeps (0: it stays put).";
 
     // ---- the whole engine ----
     200, MASTER_VOLUME, "master.volume", Float, 0, 2, 0.35, "gain", "", "How loud everything is.";
@@ -223,6 +236,13 @@ param_table! {
     212, CHORUS_RATE, "chorus.rate", Float, 0.05, 10, 0.8, "hz", "", "How fast the chorus wobbles.";
     213, CHORUS_DEPTH, "chorus.depth", Float, 0, 1, 0.5, "", "", "How far the chorus wobbles.";
     216, VOICES, "voices", Int, 1, 64, 64, "voices", "", "The most voices that sound at once; a new note past this takes over the oldest.";
+
+    // ---- the live input (a microphone) ----
+    217, INPUT_PART, "input.part", Int, 0, 63, 31, "part", "", "The part the live input plays through: it gets that part's filter, pan, effects, volume and sends.";
+    218, INPUT_GAIN, "input.gain", Float, 0, 8, 1, "gain", "", "How much the live input is turned up before anything else (1 is unchanged).";
+    219, INPUT_MONITOR, "input.monitor", Bool, 0, 1, 1, "", "", "On: the live input is heard. Off: it can still be recorded, in silence.";
+    220, INPUT_GATE, "input.gate", Float, -100, 0, -100, "db", "", "Noise gate: the input is let through only while it is louder than this, which keeps a microphone's hiss out (-100 is off; try -45).";
+    221, INPUT_GATE_RELEASE, "input.gate_release", Float, 0.005, 2, 0.15, "seconds", "", "Noise gate: how long it takes to close once the input has gone quiet.";
 }
 
 // Offsets inside a group of parameters that repeats.
@@ -364,6 +384,25 @@ pub fn table_json() -> String {
         s.push_str(",\"help\":");
         json_str(&mut s, p.help);
         s.push('}');
+    }
+    s.push_str("],\"voice_presets\":[");
+    for (i, preset) in crate::presets::VOICE_PRESETS.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("{\"name\":");
+        json_str(&mut s, preset.name);
+        s.push_str(",\"help\":");
+        json_str(&mut s, preset.help);
+        s.push_str(",\"values\":{");
+        for (j, (name, value)) in preset.values.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            json_str(&mut s, name);
+            let _ = write!(s, ":{value}");
+        }
+        s.push_str("}}");
     }
     s.push_str("]}");
     s

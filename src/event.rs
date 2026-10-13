@@ -22,6 +22,12 @@ pub const EV_MACRO_TICK: u16 = 12;
 pub const EV_ARP: u16 = 13;
 pub const EV_ARP_MORE: u16 = 14;
 pub const EV_SONG: u16 = 15;
+pub const EV_RECORD: u16 = 16;
+
+/// What a `record` event records (its `y`).
+pub const RECORD_INPUT: u32 = 0;
+pub const RECORD_PART: u32 = 1;
+pub const RECORD_MASTER: u32 = 2;
 
 /// What a `song` event tells the song player to do (its `a`).
 pub const SONG_STOP: u32 = 0;
@@ -52,6 +58,7 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
     (EV_ARP_MORE, "arp_more", "part; a: handle, or 0 for the part's next note; b: offsets 4-7, a signed byte each"),
     (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part)"),
+    (EV_RECORD, "record", "a: 0 stop, 1 start; x: sample slot (made with synths_record_buffer); y: what to record, 0 the live input, 1 a part (part: which), 2 the whole output"),
 ];
 
 /// One event, exactly as it is laid out in memory (little-endian).
@@ -133,6 +140,15 @@ impl Event {
     /// A command for the song player (`SONG_...`), with its two numbers.
     pub fn song(time: f64, command: u32, x: f32, y: f32) -> Event {
         Event::new(time, EV_SONG, 0, command, x, y)
+    }
+    /// Start recording `source` (`RECORD_...`) into a sample slot made with
+    /// `Engine::record_buffer`; `part` matters only for `RECORD_PART`.
+    pub fn record_start(time: f64, slot: u32, source: u32, part: u16) -> Event {
+        Event::new(time, EV_RECORD, part, 1, slot as f32, source as f32)
+    }
+    /// Stop recording.
+    pub fn record_stop(time: f64) -> Event {
+        Event::new(time, EV_RECORD, 0, 0, 0.0, 0.0)
     }
     pub fn macro_tick(time: f64, part: u16) -> Event {
         Event::new(time, EV_MACRO_TICK, part, 0, 0.0, 0.0)

@@ -17,11 +17,14 @@ pub mod env;
 pub mod event;
 pub mod filter;
 pub mod fx;
+pub mod input;
+pub mod input_abi;
 pub mod lfo;
 pub mod macros;
 pub mod math;
 pub mod osc;
 pub mod params;
+pub mod presets;
 #[cfg(feature = "songs")]
 pub mod replayer;
 pub mod sample;
@@ -34,6 +37,7 @@ pub mod song_abi;
 pub mod song_player;
 pub mod taps;
 pub mod voice;
+pub mod voicefx;
 
 pub use engine::Engine;
 pub use event::Event;

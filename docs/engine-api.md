@@ -7,7 +7,8 @@ version **1** (`synths_abi_version()`).
 The engine is one object. A host creates it for a sample rate, sends it
 **events** (start a note, set a parameter, move a live voice) stamped with the
 time they should happen, and asks it to **render** blocks of stereo sound. The
-host never works out samples itself. For drawing, it can read back the latest
+host never works out samples itself. It can also hand the engine sound as it
+renders (a microphone), to be changed, mixed in and recorded. For drawing, it can read back the latest
 sound, the levels and the notes that are playing.
 
 - [Building](#building)
@@ -19,6 +20,9 @@ sound, the levels and the notes that are playing.
 - [Step macros](#step-macros)
 - [The arpeggio of a note](#the-arpeggio-of-a-note)
 - [Songs](#songs)
+- [The live input](#the-live-input)
+- [Voice effects](#voice-effects)
+- [Recording](#recording)
 - [Scope, meters and notes](#scope-meters-and-notes)
 - [How notes get voices](#how-notes-get-voices)
 - [The path of the sound](#the-path-of-the-sound)
@@ -112,6 +116,17 @@ uint32_t       synths_scope_read(const SynthsEngine *engine, uint32_t source, fl
 uint32_t       synths_levels_read(const SynthsEngine *engine, uint32_t source, uint32_t count, float *out);
 uint32_t       synths_notes_read(const SynthsEngine *engine, uint32_t part, uint32_t *out);
 
+float         *synths_input_left(SynthsEngine *engine);
+float         *synths_input_right(SynthsEngine *engine);
+uint32_t       synths_render_io(SynthsEngine *engine, uint32_t frames, uint32_t channels);
+void           synths_render_io_into(SynthsEngine *engine, const float *in_left, const float *in_right,
+                                     float *left, float *right, uint32_t frames);
+int32_t        synths_record_buffer(SynthsEngine *engine, uint32_t slot, uint32_t frames, uint32_t channels);
+uint32_t       synths_record_read(const SynthsEngine *engine, uint32_t *out);
+uint32_t       synths_sample_frames(const SynthsEngine *engine, uint32_t slot);
+uint32_t       synths_sample_read(const SynthsEngine *engine, uint32_t slot, uint32_t start,
+                                  float *out, uint32_t frames);
+
 int32_t        synths_song_file(const uint8_t *name, uint32_t name_len, const uint8_t *data, uint32_t len);
 int32_t        synths_song_load(SynthsEngine *engine, const uint8_t *data, uint32_t len,
                                 uint32_t first_slot);
@@ -152,16 +167,16 @@ while sound is playing. It needs no engine.
 **`synths_create(sample_rate: f32) -> *mut Engine`** Make an engine. The
 sample rate is brought into 8000..192000. Returns null if the rate is not a
 number or not above 0. This allocates everything the engine will ever need,
-apart from samples: between 1 and 2 MB at 48 kHz, and more at higher rates
-(most of it is the echo's two seconds of memory). A new engine holds every
+apart from samples: about 2.3 MB at 48 kHz, and more at higher rates (half
+of it is the echo's two seconds of memory). A new engine holds every
 parameter's default, no samples and no events, and its time is 0.
 
 **`synths_destroy(engine)`** Free an engine and its samples. Do not use the
 pointer afterwards.
 
 **`synths_reset(engine)`** The panic button: stop every voice at once, forget
-every queued event and every running glide, and empty the echo, reverb and
-chorus. Parameters, samples and the time stay as they are.
+every queued event and every running glide, empty the echo, reverb, chorus
+and voice effects, and stop a recording (what it has recorded stays). Parameters, samples and the time stay as they are.
 
 ### Reading the engine
 
@@ -180,7 +195,9 @@ for an engine-wide parameter. An id or part that does not exist gives 0.
 ### Rendering
 
 There are two ways; use whichever suits the host. Both advance the time, and
-both first carry out every queued event whose time has come.
+both first carry out every queued event whose time has come. Each has a twin
+that also takes sound in: see
+[The live input and recording](#the-live-input-and-recording).
 
 **`synths_render(engine, frames: u32) -> u32`** Render into the engine's own
 two buffers, which hold `synths_output_capacity()` (4096) frames. If `frames`
@@ -292,6 +309,72 @@ part together. Returns 8, or 0 for a part that does not exist.
 
 In WebAssembly `out` must be inside the module's memory: get it once with
 `synths_alloc` and keep it.
+
+### The live input and recording
+
+A host with a microphone renders with one of these two in place of
+`synths_render` and `synths_render_into`. What becomes of the sound is under
+[The live input](#the-live-input) and [Recording](#recording).
+
+**`synths_input_left(engine) -> *mut f32`** and
+**`synths_input_right(engine) -> *mut f32`** Two buffers inside the engine,
+of `synths_output_capacity()` (4096) frames each, for the host to put the
+input in before `synths_render_io`. The pointers do not change for the life
+of the engine.
+
+**`synths_render_io(engine, frames: u32, channels: u32) -> u32`**
+`synths_render`, with a live input: the first `frames` numbers of the input
+buffers are the sound that came in while the frames about to be rendered
+were due. `channels` is 1 for a mono input (the left buffer only), 2 for
+stereo, and 0 for none, which makes it exactly `synths_render`. Returns how
+many frames were rendered (at most 4096); read them from
+`synths_output_left` and `synths_output_right` as usual.
+
+**`synths_render_io_into(engine, in_left: *const f32, in_right: *const f32, left: *mut f32, right: *mut f32, frames: u32)`**
+`synths_render_into`, with a live input in the host's own buffers.
+`in_right` null is a mono input; `in_left` null is no input, and exactly
+`synths_render_into`. The input buffers hold `frames` numbers each and must
+not overlap the output buffers.
+
+The input must be at the engine's sample rate: the engine does not convert
+it. A host may change from one of the four ways of rendering to another
+from block to block; a block rendered with no input counts as silence
+coming in.
+
+**`synths_record_buffer(engine, slot, frames, channels) -> i32`** Make a
+sample slot to record into: memory for `frames` frames of 1 or 2 channels,
+at the engine's sample rate, with a base note of 60 and nothing in it yet.
+It replaces any sample in the slot. This is where a recording's memory
+comes from, so `frames` is the longest the recording can be: 30 seconds at
+48 kHz is 1,440,000 frames and 5.8 MB (twice that in stereo). Returns 0, or
+-1 (no such slot), -2 (not 1 or 2 channels, no frames, or no memory to be
+had) or -4 (a null engine). It allocates, so it is for before the
+recording, not during a render.
+
+**`synths_record_read(engine, out: *mut u32) -> u32`** Write the state of
+the recorder into `out`, four numbers, and return 4:
+
+| | |
+|---|---|
+| 0 | 1 while recording, 0 when not |
+| 1 | the slot of the recording, or of the last one |
+| 2 | how many frames have been recorded |
+| 3 | how many frames the slot has room for |
+
+Like the taps, it only reads, and may be called while another thread
+renders.
+
+**`synths_sample_frames(engine, slot) -> u32`** How many frames the sample
+in a slot has: for a recording, how many were recorded. 0 for an empty
+slot.
+
+**`synths_sample_read(engine, slot, start, out: *mut f32, frames) -> u32`**
+Copy `frames` frames of the sample in a slot into `out`, from frame `start`
+on: one number a frame for a mono sample, two (left, right) for a stereo
+one, so `out` needs room for `frames` or `2 * frames` numbers. Returns how
+many frames were copied, which is fewer at the end of the sample. This is
+how a host gets a recording out to save it. It works for any sample, and
+must not overlap a render.
 
 ### Songs
 
@@ -431,6 +514,7 @@ millisecond at 48 kHz.
 | 13 | `arp` | one part or all | handle, or 0 for the part's next note | steps a second | order |
 | 14 | `arp_more` | one part or all | handle, or 0 for the part's next note | | |
 | 15 | `song` | | what to do, 0 to 6 | its first number | its second number |
+| 16 | `record` | the part to record, when `y` is 1 | 0: stop, 1: start | sample slot | what to record: 0, 1 or 2 |
 
 Events 13 and 14 also use `z` and `b`; see [their descriptions](#the-arpeggio-of-a-note).
 
@@ -504,6 +588,11 @@ away. See [The arpeggio of a note](#the-arpeggio-of-a-note).
 **15 `song`** Steer the loaded song: play, pause, stop, seek and so on,
 chosen by `a`. `part` is ignored. With no song loaded it does nothing. See
 [Steering the song](#steering-the-song).
+
+**16 `record`** Start or stop recording into a sample slot, on this exact
+frame. `x` is a slot made with `synths_record_buffer`, and `y` says what is
+recorded: 0 the live input, 1 the part `part`, 2 the whole output. See
+[Recording](#recording).
 
 ### Handles
 
@@ -623,6 +712,12 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 103 | `lfo2.cutoff` | float | -96 | 96 | 0 | semitones | How far it moves the filter cutoff. |
 | 104 | `lfo2.amp` | float | 0 | 1 | 0 |  | How much it changes the loudness. |
 | 105 | `lfo2.pan` | float | 0 | 1 | 0 |  | How far it moves the sound left and right. |
+| 106 | `fx.pitch` | float | -12 | 12 | 0 | semitones | Pitch shifter: moves the part's whole sound up or down without changing its speed (0 is off). Up is a chipmunk, down is a monster. |
+| 107 | `fx.ring` | float | 0 | 1 | 0 |  | Ring modulator: how much of the sound is multiplied by a steady wave (0 is off). The robot voice. |
+| 108 | `fx.ring_freq` | float | 1 | 5000 | 30 | hz | Ring modulator: how fast the wave goes. Slow is a wobble, 30 to 80 is a robot, hundreds is a bell-like alien. |
+| 109 | `fx.ring_wave` | choice: 0 sine, 1 noise | 0 | 1 | 0 |  | Ring modulator: sine is the robot. noise multiplies by a rumble as wide as fx.ring_freq, which blurs the pitch of a voice into a hoarse whisper. |
+| 110 | `fx.comb` | float | 0 | 1 | 0 |  | Comb: how much of the sound is the ringing, metallic copy (0 is off). |
+| 111 | `fx.comb_freq` | float | 50 | 5000 | 200 | hz | Comb: the note it rings at. Low is a robot in a pipe; high, and swept, is a flanger. |
 | 112 | `fx.drive` | float | 0 | 1 | 0 |  | Distortion (0 is off). |
 | 113 | `fx.bits` | float | 1 | 16 | 16 | bits | Bit crusher: how many bits each sample keeps (16 is off). |
 | 114 | `fx.downsample` | int | 1 | 64 | 1 |  | Bit crusher: keep only one sample in this many (1 is off). |
@@ -631,6 +726,9 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 117 | `send.chorus` | float | 0 | 1 | 0 | gain | How much of the part goes to the chorus. |
 | 120 | `macro.rate` | float | 1 | 1000 | 50 | hz | How many steps of the part's macro play each second. |
 | 121 | `macro.sync` | bool | 0 | 1 | 0 |  | On: the macro steps on each macro_tick event (a tracker's tick) instead of by the clock. |
+| 122 | `fx.comb_feedback` | float | -0.97 | 0.97 | 0.7 |  | Comb: how long it rings. Below 0 it rings an octave lower and hollow. |
+| 123 | `fx.comb_rate` | float | 0.01 | 10 | 0.3 | hz | Comb: how fast its note sweeps up and down. |
+| 124 | `fx.comb_depth` | float | 0 | 1 | 0 |  | Comb: how far its note sweeps (0: it stays put). |
 | 200 | `master.volume` | float | 0 | 2 | 0.35 | gain | How loud everything is. |
 | 201 | `master.limiter` | bool | 0 | 1 | 1 |  | Turns loud passages down so they do not distort. The output never goes past -1..1 either way. |
 | 202 | `delay.time` | float | 0.001 | 2 | 0.3 | seconds | The time between echoes. |
@@ -642,6 +740,11 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 212 | `chorus.rate` | float | 0.05 | 10 | 0.8 | hz | How fast the chorus wobbles. |
 | 213 | `chorus.depth` | float | 0 | 1 | 0.5 |  | How far the chorus wobbles. |
 | 216 | `voices` | int | 1 | 64 | 64 | voices | The most voices that sound at once; a new note past this takes over the oldest. |
+| 217 | `input.part` | int | 0 | 63 | 31 | part | The part the live input plays through: it gets that part's filter, pan, effects, volume and sends. |
+| 218 | `input.gain` | float | 0 | 8 | 1 | gain | How much the live input is turned up before anything else (1 is unchanged). |
+| 219 | `input.monitor` | bool | 0 | 1 | 1 |  | On: the live input is heard. Off: it can still be recorded, in silence. |
+| 220 | `input.gate` | float | -100 | 0 | -100 | db | Noise gate: the input is let through only while it is louder than this, which keeps a microphone's hiss out (-100 is off; try -45). |
+| 221 | `input.gate_release` | float | 0.005 | 2 | 0.15 | seconds | Noise gate: how long it takes to close once the input has gone quiet. |
 
 Kinds: a `float` takes any value in its range; an `int` is rounded to a whole
 number; a `bool` is 0 or 1; a `choice` is a whole number that picks from the
@@ -722,9 +825,12 @@ number: it is set with `synths_macro_set`.
   swings the width by 0.5. The
   `amp` amount only ever turns the sound down: at 1 the level swings between
   nothing and full.
+- **`fx.pitch`, `fx.ring`, `fx.comb`** and the parameters that go with them
+  are under [Voice effects](#voice-effects).
 - **`fx.drive`** `d` above 0 puts the part through `tanh(g * x) / g^0.25`
   with `g = 1 + 30 * d * d`. The part's `volume` comes after the drive and
   the bit crusher, so it does not change their sound.
+- **`input.*`** are under [The live input](#the-live-input).
 - **`master.limiter`** On, the output never passes 0.98. Off, the output is
   cut off flat at 1. The limiter adds no delay.
 - **`voices`** Lowering it does not stop voices already sounding; it takes
@@ -753,6 +859,10 @@ editor can be made from it rather than typed in again:
      "min": 0, "max": 4, "default": 1, "unit": "",
      "choices": ["sine", "triangle", "saw", "pulse", "sample"],
      "help": "The shape of the wave, or a loaded sample."}
+  ],
+  "voice_presets": [
+    {"name": "chipmunk", "help": "Small and squeaky: everything seven semitones higher.",
+     "values": {"fx.pitch": 7}}
   ]
 }
 ```
@@ -760,8 +870,10 @@ editor can be made from it rather than typed in again:
 `scope` is `part` or `engine`. `kind` is `float`, `int`, `bool` or `choice`.
 `choices` is there only for a `choice`, and lists the names for the values 0,
 1, 2 and so on. A name with a dot belongs to a group (`osc1`, `filter`,
-`lfo2`): the part before the dot is the group. The text has no spaces or line
-breaks; it is laid out here to be read.
+`lfo2`): the part before the dot is the group. `voice_presets` are the
+[voice changers](#voice-changers): for each, parameter names and the values
+to give them. The text has no spaces or line breaks; it is laid out here to
+be read.
 
 ## Samples
 
@@ -1140,6 +1252,296 @@ OpenMPT player tests. The sound of the voices is this engine's:
   part's own filter, as a low-pass at 3300 Hz.
 - ProTracker's invert loop (`EFx`) is not played.
 
+## The live input
+
+A host can hand the engine sound as it renders: a microphone, a line in.
+It renders with `synths_render_io` or `synths_render_io_into`, giving each
+block the frames that came in, mono or stereo, and the engine does the
+rest.
+
+The input plays through one part, the one `input.part` names (31 to begin
+with, the last of the parts a song never takes). It enters that part as if
+it were the part's one voice, so everything a part does to its voices it
+does to the input:
+
+- the part's **filter** is the input's tone control: `filter.type`,
+  `filter.slope`, `filter.cutoff` and `filter.resonance`, with the cutoff
+  as it is set (there is no note, envelope or LFO to move it). A band-pass
+  is a telephone;
+- the part's **`pan`** (and `pan.law`): a mono input is placed like a mono
+  voice, 0.7071 of it on each side in the middle, and a stereo input like
+  a stereo sample, both sides at full in the middle;
+- the part's **[voice effects](#voice-effects)**, **`fx.drive`** and the
+  **bit crusher**, its **`volume`** and its **sends** to the echo, the
+  reverb and the chorus;
+- the part's **scope and meter** show it, the limiter holds it, and it can
+  be [recorded](#recording).
+
+Notes can be played on the same part at the same time; they share its
+effects. The input does not use a voice.
+
+Before the part, three things happen to the input, in this order:
+
+1. **Cleaning.** A number that is infinite or not a number is taken as 0.
+   The input is multiplied by `input.gain` and then kept within -4..4.
+   Anything smaller than 0.000 000 000 1 (200 dB down) is taken as exactly
+   0.
+2. **The gate**, if `input.gate` is above -100: see below.
+3. **`input.monitor`.** Off, the input goes no further: it is not heard,
+   and can still be recorded. On (as it is to begin with), it goes into its
+   part.
+
+With every default, then, a mono input comes out of both sides at
+`0.7071 * 0.35 = 0.25` of its level, and nothing else is done to it: each
+number that comes out is the number that went in, times the pan's gain,
+times `master.volume`. A stereo input, with `master.volume` 1 and the pan
+in the middle, comes out number for number.
+
+`input.part` and `input.monitor` change on the exact frame of their event.
+A change to the part's filter or pan is taken up at the start of the next
+control period, within 16 frames, and the cutoff and the pan slide to
+their new values over that period.
+
+### The gate
+
+A microphone hisses when nobody is speaking. The gate lets the input
+through only while it is louder than `input.gate`, a level in dB below
+full scale (-45 is a good place to start; -100, the default, is no gate,
+and the input is then never touched).
+
+- The gate measures loudness as the largest sample lately seen: it jumps
+  up to each new peak at once and falls back to 37% of it in 30
+  milliseconds, so it rides over the gaps between the cycles of a voice.
+- It **opens** on the first frame whose sample reaches the level, and
+  takes 2 milliseconds to open, in a straight line, so the start of a word
+  does not click.
+- It **closes** when the measured loudness has fallen to half the level (6
+  dB under it, so that a sound hovering at the level does not make it
+  flutter), and takes `input.gate_release` seconds to close, in a straight
+  line. If the sound comes back before it has closed, it opens again from
+  where it had got to.
+- Closed, the input is exactly nothing: its part makes no sound and does no
+  work, and the engine can sleep.
+
+### What it costs
+
+Silence coming in costs almost nothing: one look at each frame, about 20
+microseconds for each second of sound. Sound coming in costs what one
+voice's share of the mix does. The input, and anything it wakes, start on
+the exact frame the sound does, and the result does not depend on the
+block size, as with everything else.
+
+## Voice effects
+
+Every part has three effects that come before its distortion: a **pitch
+shifter**, a **ring modulator** and a **comb**. They are there to change a
+voice (a chipmunk, a monster, a robot) but they belong to the part, not to
+the input: a synth or a sample on any part can use them.
+
+They always come in this order, and then the rest of the part follows:
+
+```
+pitch shifter ─ ring modulator ─ comb ─ drive ─ bit crusher ─ volume ─ sends
+```
+
+So a shifted voice is what the ring modulator multiplies, the comb rings
+with what comes out of that, the distortion and the bit crusher roughen the
+result, and the echo, reverb and chorus are fed with the whole of it. Each
+is off until its parameter is moved from its default, and one that is off
+is not there at all: it adds no delay and changes no number.
+
+### The pitch shifter
+
+`fx.pitch` moves everything on the part up or down by that many semitones,
+-12 to 12, without making it faster or slower. It moves the whole sound,
+resonances and all, as speeding a tape up does: up is small and squeaky,
+down is big and slow-sounding.
+
+- **How it works.** It keeps the last few hundredths of a second of the
+  part's sound and reads them back faster or slower than they came in.
+  Reading faster catches up with the present and reading slower falls
+  behind, so every so often the reader jumps: back, to go over a stretch
+  again, or forward, to skip one. Before each jump it compares what it is
+  playing with every place it could jump to, between 2.5 and 14
+  milliseconds away, and picks the one that looks most alike: for a voice
+  or a single note, that is a whole number of cycles of the wave. It then
+  crossfades to it over at most 4 milliseconds. Because the two sides of a
+  jump match, there is none of the warble of a shifter that jumps blindly.
+- **Delay.** There is no fixed delay. The shifted sound is between 1 frame
+  and `0.4 + 14 + 4 * |r - 1|` milliseconds late, where `r` is the speed
+  (2 an octave up, 0.5 an octave down): at most 18.4 ms an octave up and
+  16.4 ms an octave down, at 48 kHz, and on average about half that. After
+  a silence it starts again at the least delay it can.
+- **How good it is.** On a steady sine, at every semitone from -12 to 12,
+  the pitch is within 0.02 of a cent of what was asked for, the level
+  within 0.01 dB, and everything that is not the tone is at least 49 dB
+  below it (usually 80). On a voice-like sound at 120 Hz the pitch is
+  within 0.02 of a cent, the level within 0.02 dB, and each cycle is 99.8%
+  like the one before it. `cargo test` measures these.
+- **What it is not good at.** It follows one pitch at a time, between
+  about 71 and 400 Hz (and whole multiples of a cycle above that). Chords,
+  and notes below 71 Hz, have no single cycle to jump by, and come out
+  with a slight roughness. A sharp click can be heard twice, a few
+  milliseconds apart, when a jump goes back over it. Shifting up by `r`
+  folds over anything above `1 / (2 r)` of the sample rate, which for a
+  voice is nothing that matters.
+- A glide of `fx.pitch` (a `param` event with a time) slides the pitch
+  smoothly. 0 is off: moving to or from exactly 0 while sound is passing
+  can click, so slide to 0.01 if the shifter must stay in.
+
+### The ring modulator
+
+`fx.ring` multiplies the part's sound by a wave: 0 is off, 1 is the product
+alone, and in between is a mix of the two. `fx.ring_freq` is how fast the
+wave goes, and `fx.ring_wave` what it is:
+
+- **sine** (0). A tone at `f` Hz times a sine at `fx.ring_freq` becomes two
+  tones, at `f + fx.ring_freq` and `f - fx.ring_freq`, each at half the
+  level, and the tone itself is gone. At a few Hz that is a tremolo; at 30
+  to 80 Hz it is the voice of a film robot; at hundreds of Hz it is
+  bell-like and strange, because the new tones are no longer in tune with
+  each other.
+- **noise** (1). The wave is noise with everything above `fx.ring_freq`
+  taken off: a random rumble. It smears each harmonic of a voice into a
+  band of noise that wide, which leaves the vowels where they were and
+  takes the pitch away: a hoarse whisper. It is as loud as the sine's
+  product. Around 300 Hz suits a voice.
+
+### The comb
+
+`fx.comb` adds a copy of the sound from a moment ago, fed back round and
+round, so the part rings at one note: `fx.comb_freq`, 50 to 5000 Hz, and
+every whole multiple of it. 0 is off, 1 is the ringing copy alone.
+
+- `fx.comb_feedback` is how long it rings: at 0.7 a few cycles, at 0.97 a
+  long metallic drone. Below 0 it rings at the odd multiples of half
+  `fx.comb_freq`: an octave lower and hollow.
+- `fx.comb_depth` above 0 sweeps the note up and down by up to 90%,
+  `fx.comb_rate` times a second: a flanger.
+- The ringing copy is turned down as the feedback goes up, so that the
+  part stays about as loud as it was.
+- A low note with long feedback is a voice in a pipe, and every word comes
+  out on the pipe's note; that and the ring modulator are the two halves
+  of a robot.
+
+### How many parts at once
+
+The ring modulator is there for all 64 parts. The pitch shifter and the
+comb each remember a stretch of sound, so the engine makes 8 of them when
+it is created, and a part takes one for as long as its `fx.pitch` is not 0
+or its `fx.comb` is above 0. If more than 8 parts ask at once, the ninth
+goes without until another lets go: its sound passes unshifted and
+uncombed.
+
+After a part's last voice has ended, its shifter and comb go on until
+what they still hold has come out and they have been silent for 60
+milliseconds; then they stop, and cost nothing until the part sounds again.
+
+### Voice changers
+
+Seven voices to begin with. Each is a list of parameter values: those of a
+part are for the input's part, and those of the echo and the reverb are
+the engine's. To put one on, first give every parameter named anywhere in
+this table its default, then set the ones in its row; the plain voice is
+the first half alone. The same list is in the
+[parameter table as JSON](#the-table-as-json), as `voice_presets`, so a
+host need not copy it from here.
+
+| name | values | what it is |
+|---|---|---|
+| `robot` | `fx.ring` 1, `fx.ring_freq` 50, `fx.comb` 0.45, `fx.comb_freq` 110, `fx.comb_feedback` 0.8, `fx.bits` 10 | A machine: the voice multiplied by a 50 Hz wave, ringing in a metal pipe. |
+| `chipmunk` | `fx.pitch` 7 | Small and squeaky: everything seven semitones higher. |
+| `monster` | `fx.pitch` -7, `fx.drive` 0.25, `send.reverb` 0.25, `reverb.size` 0.7, `reverb.damping` 0.6 | Huge and deep: seven semitones lower, with a growl and a little room. |
+| `cave` | `send.delay` 0.5, `send.reverb` 0.7, `delay.time` 0.38, `delay.feedback` 0.55, `delay.tone` 2500, `reverb.size` 0.92, `reverb.damping` 0.3 | Far inside a cave: long echoes and a very big room. |
+| `telephone` | `filter.type` 3, `filter.slope` 1, `filter.cutoff` 1200, `filter.resonance` 0.2, `fx.drive` 0.2, `fx.bits` 8, `fx.downsample` 6 | Down an old phone line: only the middle of the voice, coarse and a little crushed. |
+| `alien` | `fx.pitch` 4, `fx.ring` 0.8, `fx.ring_freq` 180, `fx.comb` 0.4, `fx.comb_freq` 600, `fx.comb_feedback` 0.75, `fx.comb_rate` 0.4, `fx.comb_depth` 0.5, `send.chorus` 0.4 | Not from here: higher, multiplied by a 180 Hz wave, with a slow metallic sweep. |
+| `whisper` | `filter.type` 2, `filter.cutoff` 500, `filter.resonance` 0, `fx.ring` 1, `fx.ring_wave` 1, `fx.ring_freq` 350 | Hoarse and breathy: the voice's pitch blurred into noise, with its low end taken off. |
+
+With a real microphone, set `input.gate` to about -45 as well.
+`cargo run --release --example voice` renders a made-up voice through each
+to `target/demo/voice-dry.wav`, `voice-robot.wav` and so on.
+
+### What is not here
+
+- **Moving the resonances of a voice without its pitch** (a formant
+  shift: a child's voice at a man's pitch). The shifter moves both
+  together, which is what a chipmunk and a monster are. Moving them apart
+  needs the voice cut into single cycles at the right instants, and a way
+  of knowing when there are no cycles to cut; done cheaply it warbles on
+  exactly the sounds a microphone picks up, so it has been left out rather
+  than done badly.
+- **A vocoder** (a synth that speaks with the input's vowels). It needs
+  about 16 bands, each with a filter on the voice, a filter on the synth
+  and a measure of loudness between them: roughly the cost of ten voices
+  for the one part, and one part's sound would have to be made before
+  another's, which the engine does not arrange yet.
+
+## Recording
+
+The engine can record into a sample slot, and what it records is from
+then on a sample like any other: playable at any pitch, forwards or
+backwards, looped, on any part.
+
+1. **Make somewhere to record**, before the recording:
+   `synths_record_buffer(engine, slot, frames, channels)`. `frames` is the
+   longest the recording can be.
+2. **Start**, with a `record` event (type 16) whose `a` is 1, `x` the slot
+   and `y` what to record:
+
+   | `y` | what is recorded |
+   |---|---|
+   | 0 | The live input, after `input.gain` and the gate and before its part: the plain voice, whether or not `input.monitor` lets it be heard. |
+   | 1 | A part, `part`: after its voice effects, distortion, bit crusher and volume, before its sends. For the input's part, the changed voice. Any part can be recorded, not only the input's. |
+   | 2 | The whole output, exactly as the render gives it: every part, the echo, the reverb and the chorus, after the limiter. This is "save what I just played". |
+
+3. **Stop**, with a `record` event whose `a` is 0. A recording also stops
+   by itself when the slot is full, and `synths_reset` stops one.
+4. **Use it.** `synths_sample_frames` says how long it is,
+   `synths_sample_read` copies it out to be saved, `synths_sample_config`
+   gives it a loop or another base note, and a part plays it with
+   `osc1.wave` 4 and `osc1.sample`.
+
+In JavaScript, with the `event` function of [A host loop](#a-host-loop),
+to record three seconds of the changed voice into slot 9:
+
+```js
+x.synths_record_buffer(engine, 9, 3 * sampleRate, 1);           // once, beforehand
+event(now,                  16 /* record */, 31, 1 /* start */, 9, 1 /* a part: 31 */);
+event(now + 3 * sampleRate, 16 /* record */, 0,  0 /* stop  */, 0, 0);
+```
+
+How it behaves:
+
+- **Exact.** The recording holds exactly the frames from the start
+  event's frame up to, not including, the stop event's: an event at time
+  1000 and one at 5000 record 4000 frames, whatever the block size, and
+  the same events and input always record the same numbers. The first
+  frame recorded is frame 0 of the sample.
+- **One at a time.** A start while another recording is running moves the
+  recorder to the new slot and source on that frame; the first recording
+  keeps what it had. A start into the slot being recorded begins it again.
+- **Starting empties the slot's sample** (its memory stays): the sample has
+  no frames, no loop, and grows as the recording goes. A voice may play the
+  slot while it is being recorded into, and plays what has been recorded
+  so far.
+- **Channels.** Into a slot with two channels go left and right. Into a
+  slot with one goes their average, which for a mono input (source 0) is
+  the input itself, exactly. A mono input recorded from its part in the
+  middle (source 1) is 0.7071 of its level on each side, as it is heard.
+- **Silence is recorded as silence.** A part that is making no sound, an
+  input with its gate shut, a render with no input, and an engine that has
+  gone to sleep all record zeros; the length is always the time between
+  the two events.
+- **Nothing to record into.** A start is ignored if the slot is empty or
+  does not exist, or `y` is not 0, 1 or 2, or (for `y` 1) the part does
+  not exist. (A slot holding a loaded sample can be recorded over as well,
+  for as many frames as that sample has.) If the slot is freed or loaded with another sample while it
+  is being recorded into, the recording stops.
+- The recording is at the engine's sample rate and its base note is 60, so
+  played at note 60 it comes back exactly as it went in.
+- `synths_record_read` gives a display the state of the recorder at any
+  time: see [its description](#the-live-input-and-recording).
+
 ## Scope, meters and notes
 
 Three things a host can read at any time, to draw with. The engine keeps
@@ -1243,21 +1645,30 @@ change that.
 voice:   oscillator 1 ─┐
          oscillator 2 ─┼─ filter ─ amplifier (envelope, velocity, voice volume, tremolo) ─ pan ─┐
          sub, noise   ─┘                                                                        │
-part:    all its voices ─ drive ─ bit crusher ─ volume ─┬───────────────────────────────────────┼─ mix
-                                                         ├─ send.delay  ─ echo   ───────────────┤
-                                                         ├─ send.reverb ─ reverb ───────────────┤
-                                                         └─ send.chorus ─ chorus ───────────────┘
+input:   gain ─ gate ─ monitor ─ the filter of its part ─ the pan of its part ─────────────────┤
+                                                                                                │
+part:    all its voices, and the input if it is this part's ────────────────────────────────────┘
+           └─ pitch shifter ─ ring modulator ─ comb ─ drive ─ bit crusher ─ volume ─┬─────────── mix
+                                                                                    ├─ send.delay  ─ echo   ─ mix
+                                                                                    ├─ send.reverb ─ reverb ─ mix
+                                                                                    └─ send.chorus ─ chorus ─ mix
 engine:  mix ─ master.volume ─ limiter ─ out
 ```
 
 - Levels multiply straight through. A single voice at full velocity with
   every default, on a part panned to the middle, peaks at about
   `0.7071 * 0.35 = 0.25` on each side.
+- The effects of a part always come in the order shown; each is skipped
+  while it is off. The first three are the [voice effects](#voice-effects).
 - The sends are taken after the part's volume. The effects add their sound
   to the mix; there is no dry/wet control, the send level is it.
-- When no voice has sounded and no echo or reverb has rung for 2.5 seconds,
-  the engine goes to sleep: it writes exact zeros and does almost no work,
-  until the next event wakes it.
+- The part's scope and meter, and a recording of a part, are taken after
+  its volume and before its sends. A recording of the input is taken after
+  its gate and before `input.monitor`; a recording of the output is taken
+  at `out`.
+- When no voice or input has sounded and no echo or reverb has rung for 2.5
+  seconds, the engine goes to sleep: it writes exact zeros and does almost
+  no work, until the next event, or the next sound coming in, wakes it.
 
 ## Threads
 
@@ -1267,22 +1678,32 @@ as another on the same engine. In practice:
 - **In a browser** the module lives in the `AudioWorkletProcessor`, so every
   call is on the audio thread and the rule keeps itself. Messages from the
   page (events to push, samples to load) arrive between calls to `process`.
-- **In a native app** call `synths_render` or `synths_render_into` and
+- **In a native app** call `synths_render` or `synths_render_into` (or
+  `synths_render_io`, `synths_render_io_into`) and
   `synths_push_events` from the audio callback only. To send events from
   another thread, put the 32-byte records in a lock-free queue of your own
   and, at the top of the audio callback, copy them into the event buffer and
   push them.
 - `synths_sample_load`, `synths_sample_config`, `synths_sample_free`,
-  `synths_reset`, `synths_create` and `synths_destroy` allocate or free
+  `synths_record_buffer`, `synths_reset`, `synths_create` and
+  `synths_destroy` allocate or free
   memory or take a while. They must not overlap a render either. Call them
   before audio starts, or while the audio callback is known not to be
   running; a native host that must load a sample while sound plays should
   stop calling render for that moment and put out silence.
 - `synths_alloc` and `synths_free` touch only the memory allocator and are
   safe from any thread in a native build.
-- `synths_scope_read`, `synths_levels_read` and `synths_notes_read` are the
+- `synths_scope_read`, `synths_levels_read`, `synths_notes_read` and
+  `synths_record_read` are the
   exception to the rule: they may be called from any one thread at any time,
   even during a render. (Not during `synths_destroy`.)
+- `synths_sample_frames` and `synths_sample_read` only read, but they read
+  what a render may be writing: call them from the audio callback, or when
+  the recording has stopped and no render is running. A host that wants to
+  show a recording's length as it grows uses `synths_record_read`.
+- A native host's microphone often arrives on a different callback from the
+  one that asks for output. Carry the input across in a lock-free ring of
+  your own, and give `synths_render_io_into` the frames that match.
 - `synths_macro_set` allocates nothing and is quick, but it changes the
   engine, so it must not overlap a render: in a native app call it from the
   audio callback, between renders, like `synths_push_events`.
@@ -1290,20 +1711,24 @@ as another on the same engine. In practice:
   `synths_param_table_len`, `synths_output_capacity` and
   `synths_event_capacity` need no engine and are safe from any thread.
 
-Inside `synths_render`, `synths_render_into` and `synths_push_events` the
+Inside `synths_render`, `synths_render_into`, `synths_render_io`,
+`synths_render_io_into` and `synths_push_events` the
 engine does not allocate, lock, wait, make a system call or loop without
-bound.
+bound. (A test counts the calls to the allocator while everything is going,
+and there are none.)
 
 ## WebAssembly
 
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
-plays a note through it, reads the taps, sets a macro and times it. The
-module is about 308 KB (124 KB gzipped), of which the song loaders and
-player are about 135 KB, the JSON song reader 35 KB of that. Two smaller
+plays a note through it, reads the taps, sets a macro, feeds it a live
+input and times it. The
+module is about 337 KB (135 KB gzipped), of which the song loaders and
+player are about 135 KB, the JSON song reader 35 KB of that, and the live
+input, voice effects and recorder 29 KB. Two smaller
 modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
-reader (273 KB, 110 KB gzipped), and `--no-songs` the whole song player
-(175 KB, 69 KB gzipped). See
+reader (302 KB, 122 KB gzipped), and `--no-songs` the whole song player
+(204 KB, 80 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
@@ -1343,8 +1768,10 @@ which instantiates the module synchronously as above.
 **Memory growth.** `memory.buffer` is replaced by a new `ArrayBuffer`
 whenever the module's memory grows, and typed arrays made over the old one
 become empty. Memory can grow in `synths_create`, `synths_alloc`,
-`synths_sample_load` and the first `synths_param_table`; it never grows in
-`synths_render` or `synths_push_events`. So make the views over the output
+`synths_sample_load`, `synths_record_buffer` and the first
+`synths_param_table`; it never grows in
+`synths_render`, `synths_render_io` or `synths_push_events`. So make the
+views over the output, input
 and event buffers after creating the engine, and make them again after any
 of those calls (or whenever `view.buffer !== memory.buffer`).
 
@@ -1405,6 +1832,40 @@ class SynthsProcessor extends AudioWorkletProcessor {
 }
 ```
 
+To feed a microphone in, the page gets one with `getUserMedia`, connects it
+to the node (made with `numberOfInputs: 1`), and step 2 becomes:
+
+```js
+    // 2. Copy in what the microphone delivered, render one block, copy it out.
+    const mic = inputs[0];                                 // [] until the microphone is connected
+    const channels = Math.min(mic.length, 2);
+    const out = outputs[0];
+    const frames = out[0].length;
+    if (channels > 0) new Float32Array(x.memory.buffer, x.synths_input_left(engine), frames).set(mic[0]);
+    if (channels > 1) new Float32Array(x.memory.buffer, x.synths_input_right(engine), frames).set(mic[1]);
+    const n = x.synths_render_io(engine, frames, channels);
+    out[0].set(new Float32Array(x.memory.buffer, x.synths_output_left(engine), n));
+    if (out[1]) out[1].set(new Float32Array(x.memory.buffer, x.synths_output_right(engine), n));
+    return true;
+```
+
+That is all a host does each block: the input's frames in, the same number
+of frames out. Everything else is parameters and events, sent as ever:
+`input.part`, `input.gain`, `input.gate` and `input.monitor`, the voice
+effects of the input's part, and `record` events. On the page:
+
+```js
+const stream = await navigator.mediaDevices.getUserMedia({
+  audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+});
+audioContext.createMediaStreamSource(stream).connect(synthsNode);
+```
+
+(With loudspeakers and no echo cancellation the microphone hears the
+engine and howls: use headphones, or leave `echoCancellation` on, or keep
+`input.monitor` off and only record. A browser gives the microphone at the
+context's sample rate, which is the engine's, so nothing needs converting.)
+
 (A real processor keeps its typed arrays instead of making new ones every
 block, and remakes them when `memory.buffer` changes. It also tells the page
 the engine's time now and then, so the page can stamp events:
@@ -1428,6 +1889,24 @@ void audio_callback(float *left, float *right, uint32_t frames) {
     synths_render_into(engine, left, right, frames);
 }
 ```
+
+With a microphone, a native host renders with `synths_render_io_into`. If
+the system delivers input and asks for output in one callback (a duplex
+stream), pass its buffers straight in; `in_right` is `NULL` for a mono
+microphone:
+
+```c
+void duplex_callback(const float *mic, float *left, float *right, uint32_t frames) {
+    /* 1. events, as above */
+    synths_render_io_into(engine, mic, NULL, left, right, frames);
+}
+```
+
+If input and output come on separate callbacks, the input callback writes
+into a lock-free ring and the output callback reads `frames` frames from it
+(silence if it has run dry) before rendering. The input must be at the
+engine's sample rate: open the microphone at that rate, or convert before
+handing it over.
 
 To play middle C for half a second, starting now, on part 0:
 
@@ -1461,8 +1940,15 @@ engine.render(&mut left, &mut right);
   `param`, `set_param`, `time`, `active_voices`, `reset` are the functions
   above without the pointers, and `Engine::taps()` gives `read_scope`,
   `read_levels` and `read_notes`.
+- `Engine::render_io(in_left, in_right, left, right)` is `render` with a
+  live input (`in_right` is `None` for a mono one). `record_buffer`,
+  `recording`, `sample_frames`, `sample_channels` and `read_sample` are the
+  recording functions above, and `Event::record_start` and
+  `Event::record_stop` make its events.
 - `synths_core::params` has a constant for every parameter id (`CUTOFF`,
   `OSC1_WAVE`, ...) and the table itself (`PARAMS`).
+- `synths_core::presets` has the voice changers (`VOICE_PRESETS`) and
+  `apply_voice_preset(&mut engine, part, Some(preset))`.
 
 ### A sequencer inside the engine
 
