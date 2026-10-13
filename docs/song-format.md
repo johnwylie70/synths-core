@@ -61,9 +61,60 @@ That is a complete, playable song with no other files: the one sample is eight n
 | `pan` | Each channel's panning to begin with: a list of numbers, 0 (left) to 255 (right), 128 the middle. May be shorter than `channels`. | all 128 |
 | `order` | The patterns to play, in order. A pattern can appear many times. | `[0]` |
 | `restart` | The place in `order` to go back to when the song runs off its end. | 0 |
+| `mixer` | [The mix](#the-mix): the song's volume and each channel's volume and sends. | everything as written |
+| `effects` | The reverb and the echo the channels send to. | the player's own, as they are |
+| `loop` | Where the song goes round: `{"start": [order, row], "end": [order, row]}`. | none |
 | `patterns` | The patterns. | none |
 | `instruments` | The instruments. | none |
 | `samples` | The samples. | none |
+
+## The mix
+
+A song can keep its own mix, so that it sounds the same wherever it is opened. All of it is optional, and a song with none of these keys plays exactly as it did before there were any.
+
+```json
+"pan": [77, 128, 179],
+"mixer": {"volume": 0.9, "channels": [{"volume": 0.8, "echo": 0.35}, {}, {"volume": 0.6, "reverb": 0.5}]},
+"effects": {"reverbType": "hall", "reverbDecay": 2.5, "reverbLevel": 0.8, "echoTime": "1/8.", "echoFeedback": 0.45, "echoLevel": 0.7},
+"loop": {"start": [1, 0], "end": [5, 0]}
+```
+
+**A channel's pan** is the top-level `pan` list the format has always had (0 left, 128 the middle, 255 right): there is no second pan. It is where the channel sits until the song's own panning effects move it, and a player can move it while the song plays.
+
+**`mixer`** has the song's `volume` (0 to 2; 1 if left out) and `channels`: a list with an entry for each channel from the first, which may be shorter than the song's channels. An entry is `{}` for a channel left as it is, or any of:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `volume` | The channel's fader, 0 to 2. | 1 |
+| `reverb` | How much of the channel is sent to the reverb, 0 to 1. | 0 |
+| `echo` | How much of the channel is sent to the echo, 0 to 1. | 0 |
+
+(The list is inside `mixer`, and not at the top level beside `pan`, because the top-level `channels` is already a number, how many channels there are, in every song so far; and one entry a channel is easier to read and to change by hand than three more lists in step with `pan`. Every song written before is still valid as it stands.)
+
+A channel's sends reach an instrument that is samples. A synth patch plays through a part of the host's, and has that part's sends; the channel's volume and pan apply to it all the same.
+
+**`effects`** sets the reverb and the echo the sends go to, by the names the libraries give those settings. A song gives as many as it wants; what it does not mention is left as the player has it.
+
+| Key | Meaning |
+|---|---|
+| `reverbType` | `"room"`, `"hall"`, `"plate"`, `"cathedral"` or `"spring"`. |
+| `reverbDecay` | How long the tail lasts, in seconds, 0 to 30; 0 leaves it to the type and the size. |
+| `reverbSize` | 0 to 1. |
+| `reverbDamping` | How quickly the reverb's treble dies away, 0 to 1. |
+| `reverbPredelay` | A gap before the reverb begins, in seconds, 0 to 0.2. |
+| `reverbLowCut` | Bass below this, in Hz (20 to 1000), is kept out of the reverb. |
+| `reverbLevel` | How loud the reverb comes back, 0 to 2; 1 is as it is. |
+| `echoTime` | The time between echoes: seconds as a number (0.001 to 2), or a time in the song's own measure, as a glide's is: `"1/8"`, `"1/8."`, `{"rows": 3}`. A time in the song's measure follows the song's tempo. |
+| `echoFeedback` | How much of each echo makes the next, 0 to 0.95. |
+| `echoTone` | How much treble each echo keeps, in Hz, 200 to 20000. |
+| `echoBounce` | `true`: the echoes go from side to side. |
+| `echoLevel` | How loud the echoes come back, 0 to 2; 1 is as it is. |
+
+**`loop`** has a `start` and an `end`, each `[place in the order, row]` counted from 0. When the song reaches the end it goes back to the start: the row at the end is not played, so `"end": [5, 0]` plays to the last row of the fifth place and goes round. With no `end` the song plays to its last pattern and goes back to `start` (in place of the top of the `restart` pattern); with no `start` it goes back from `end` to the top of the `restart` pattern. Played without repeat, the loop's end is where the song stops.
+
+A writer leaves out whatever is at its default, and the whole key when nothing under it is set.
+
+**Versions.** `mixer`, `effects` and `loop` were added to version 2 without a new number. A reader from before them passes them over, as it does any key it does not know, and plays the song with every fader at 1, no sends and no loop: the notes are right and the balance is not the author's. That is a song played plainly, not played wrongly, so it does not raise `version`; a writer does write 2 for a song that has any of them.
 
 ## Patterns
 
@@ -489,7 +540,9 @@ A gate is `u8` how many levels (1 to 32), `u8` flags (bit 0 the sends are gated,
 
 `IGAT`, the instruments' gates: for each instrument in turn a `u8`, 1 if it has a gate, and then the gate.
 
-A song with any of this is version 2.
+`MIXR`, the mix, last of all: an `f32` the song's volume; a `u8` how many channels are listed, and for each three `f32`: volume, reverb send, echo send. Then a `u16` saying which of the effects' settings follow, a bit each from bit 0: `reverbType` (0 room, 1 hall, 2 plate, 3 cathedral, 4 spring), `reverbDecay`, `reverbSize`, `reverbDamping`, `reverbPredelay`, `reverbLowCut`, `reverbLevel`, `echoFeedback`, `echoTone`, `echoBounce` (0 or 1), `echoLevel`, and bit 11 `echoTime`; then an `f32` for each of the first eleven that is given, in that order, and `echoTime` as a time (8 bytes, as above; seconds are kind 3). Then a `u8` (1 a loop start, 2 a loop end) and each of those as two `u16`, the place in the order and the row. A reader that does not know `MIXR` stops there and has the whole song but its mix, so the mix alone does not raise the packed version.
+
+A song with any of the first three lists is version 2.
 
 A reader takes a file that ends early as far as it goes, treats counts and lengths that the bytes cannot back up as smaller, and never fails on a damaged one: what does not make sense is left out.
 

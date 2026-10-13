@@ -374,7 +374,7 @@ fn the_document_describes_every_song_function_and_the_song_event() {
     }
     assert_eq!(count, 11);
     for text in [
-        "| 7 | mute |", "| 8 | solo |", "| 9 | loop this pattern |", "what to do, 0 to 9",
+        "| 7 | mute |", "| 8 | solo |", "| 9 | loop this pattern |", "what to do, 0 to 15",
         "SONG_OK 0", "SONG_NULL -1", "SONG_BAD -2", "SONG_MISSING_FILE -3", "SONG_NO_PARTS -4", "SONG_NO_SLOTS -5",
         "| 0 | stop |", "| 1 | play |", "| 2 | pause |", "| 3 | seek |", "| 4 | repeat |", "| 5 | volume |", "| 6 | patch part |",
         "fn event(&mut self, event: &Event, voices: &mut Voices<'_>) -> bool",

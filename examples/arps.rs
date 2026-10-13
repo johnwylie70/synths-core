@@ -15,6 +15,8 @@
 //! with the echo and the reverb ringing through the gaps.
 //! `arp-pattern-and-gate.wav`: the two together. `bends.wav`: a lead line
 //! from a song with a glide, a scoop, a fall, a delayed vibrato and a siren.
+//! `song-mix.wav`: `examples/songs/mix.json`, a song with its own faders,
+//! pans, sends, reverb, echo and loop, with two faders moved as it plays.
 
 use std::fs;
 use synths_core::arp::*;
@@ -330,5 +332,25 @@ fn main() {
         e.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
         e.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
         save("bends", &mut e, 9.0);
+
+        // A song with a mix of its own: faders, pans, sends, a hall and a
+        // dotted-eighth echo, going round its loop.
+        let text = fs::read_to_string("examples/songs/mix.json").unwrap();
+        let song = native::load(&text, &|_| None).unwrap();
+        let mut e = Engine::new(SR);
+        set(
+            &mut e,
+            0,
+            &[(OSC1_WAVE, 2.0), (FILTER_TYPE, 1.0), (CUTOFF, 700.0), (RESONANCE, 0.3), (FILTER_ENV, 40.0), (FENV_DECAY, 0.12), (FENV_SUSTAIN, 0.1), (AMP_ATTACK, 0.001), (AMP_SUSTAIN, 0.7), (AMP_RELEASE, 0.12), (VOLUME, 0.5)],
+        );
+        set(&mut e, 1, &[(OSC1_WAVE, 2.0), (FILTER_TYPE, 1.0), (CUTOFF, 1500.0), (AMP_ATTACK, 0.05), (AMP_SUSTAIN, 0.8), (AMP_RELEASE, 0.4), (VOLUME, 0.3)]);
+        song_player::install(&mut e, song, song_player::FIRST_PART, 0, false).unwrap();
+        e.push(Event::song(0.0, SONG_PATCH_PART, 1.0, 0.0));
+        e.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 1.0));
+        e.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        // Half way through, the pad's fader comes down and the lead's echo goes up.
+        e.push(Event::song((5.0 * SR) as f64, SONG_CHANNEL_VOLUME, 1.0, 0.2));
+        e.push(Event::song((5.0 * SR) as f64, SONG_CHANNEL_DELAY, 0.0, 0.8));
+        save("song-mix", &mut e, 10.0);
     }
 }

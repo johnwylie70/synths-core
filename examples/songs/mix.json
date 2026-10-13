@@ -1,0 +1,33 @@
+{
+  "format": "synths-song",
+  "version": 2,
+  "title": "A Mix",
+  "speed": 6,
+  "tempo": 125,
+  "channels": 3,
+  "order": [0],
+  "pan": [77, 179, 128],
+  "mixer": {"volume": 0.9, "channels": [{"volume": 0.8, "echo": 0.35}, {"volume": 0.6, "reverb": 0.5}, {"volume": 0.9, "reverb": 0.15}]},
+  "effects": {"reverbType": "hall", "reverbDecay": 2.5, "reverbLevel": 0.8, "echoTime": "1/8.", "echoFeedback": 0.45, "echoLevel": 0.7},
+  "loop": {"start": [0, 16], "end": [0, 32]},
+  "patterns": [
+    {"rows": 32, "events": [
+      {"row": 0, "ch": 0, "note": "A-3", "ins": 1, "arp": {"chord": "m7", "pattern": "trance"}},
+      {"row": 0, "ch": 1, "note": "A-3", "ins": 2, "chord": "min"},
+      {"row": 0, "ch": 2, "note": "A-1", "ins": 3, "vol": 40},
+      {"row": 8, "ch": 2, "note": "A-1", "ins": 3, "vol": 40},
+      {"row": 16, "ch": 0, "note": "F-3", "ins": 1, "arp": {"chord": "maj7", "pattern": "trance"}},
+      {"row": 16, "ch": 1, "note": "F-3", "ins": 2, "chord": "maj"},
+      {"row": 16, "ch": 2, "note": "F-1", "ins": 3, "vol": 40},
+      {"row": 24, "ch": 2, "note": "F-1", "ins": 3, "vol": 40}
+    ]}
+  ],
+  "instruments": [
+    {"name": "lead", "patch": "lead"},
+    {"name": "pad", "patch": "pad"},
+    {"name": "bass", "sample": 0}
+  ],
+  "samples": [
+    {"name": "square", "wave": [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100], "loop": {"start": 0, "length": 32}}
+  ]
+}

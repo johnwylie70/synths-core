@@ -34,6 +34,7 @@ const ORDER_PATTERN: u8 = 7;
 const ARP_PATTERNS: &[u8; 4] = b"ARPP";
 const EXTRAS: &[u8; 4] = b"XTRA";
 const GATES: &[u8; 4] = b"IGAT";
+const MIXER: &[u8; 4] = b"MIXR";
 
 fn put_f32(out: &mut Vec<u8>, x: f32) {
     out.extend_from_slice(&x.to_le_bytes());
@@ -262,6 +263,32 @@ pub fn save(song: &Song) -> Vec<u8> {
             if let Some(gate) = &i.gate {
                 put_gate(o, gate);
             }
+        }
+    }
+    // The mix, the effects and the loop: last, and passed over by a reader that does not know them.
+    if song.has_mix() {
+        o.extend_from_slice(MIXER);
+        put_f32(o, song.volume);
+        o.push(song.mix.len().min(MAX_CHANNELS) as u8);
+        for m in song.mix.iter().take(MAX_CHANNELS) {
+            for x in [m.volume, m.reverb, m.echo] {
+                put_f32(o, x);
+            }
+        }
+        // Which of the effects' settings the song gives (bit 11: the echo's time), then each.
+        let fx = &song.effects;
+        let given = fx.values.iter().enumerate().fold((fx.echo_time.is_some() as u16) << 11, |bits, (i, v)| bits | (v.is_some() as u16) << i);
+        put_u16(o, given);
+        for v in fx.values.iter().flatten() {
+            put_f32(o, *v);
+        }
+        if let Some(time) = &fx.echo_time {
+            put_time(o, time);
+        }
+        o.push(song.loop_start.is_some() as u8 | (song.loop_end.is_some() as u8) << 1);
+        for (order, row) in [song.loop_start, song.loop_end].into_iter().flatten() {
+            put_u16(o, order);
+            put_u16(o, row);
         }
     }
     out
@@ -519,6 +546,30 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
                 if r.u8() != 0 {
                     ins.gate = Some(get_gate(&mut r));
                 }
+            }
+        } else if tag == MIXER {
+            song.volume = within(get_f32(&mut r), 0.0, 2.0, 1.0);
+            for _ in 0..(r.u8() as usize).min(r.left() / 12) {
+                let [volume, reverb, echo] = [get_f32(&mut r), get_f32(&mut r), get_f32(&mut r)];
+                song.mix.push(ChannelMix { volume: within(volume, 0.0, 2.0, 1.0), reverb: within(reverb, 0.0, 1.0, 0.0), echo: within(echo, 0.0, 1.0, 0.0) });
+            }
+            let given = r.u16_le();
+            for (i, (_, id)) in EFFECT_KEYS.iter().enumerate() {
+                if given & (1 << i) != 0 {
+                    let x = get_f32(&mut r);
+                    // (Kept only if it is a number: the parameter's own range does the rest.)
+                    song.effects.values[i] = crate::params::info(*id).filter(|_| x.is_finite()).map(|info| info.clean(x));
+                }
+            }
+            if given & (1 << 11) != 0 {
+                song.effects.echo_time = Some(get_time(&mut r));
+            }
+            let has = r.u8();
+            if has & 1 != 0 {
+                song.loop_start = Some((r.u16_le(), r.u16_le()));
+            }
+            if has & 2 != 0 {
+                song.loop_end = Some((r.u16_le(), r.u16_le()));
             }
         } else {
             break;

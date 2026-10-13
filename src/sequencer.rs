@@ -263,6 +263,15 @@ impl<'a> Voices<'a> {
         self.engine.voice_fade(part, handle, seconds);
     }
 
+    /// Have the level meter of part `meter` show the handle's voices as
+    /// well as the meter of the part they are on (after that part's
+    /// `volume`, before its effects): a song's channel shows the level of
+    /// its note this way when the note is a synth patch's, on another part.
+    /// A part number that does not exist stops it.
+    pub fn meter_on(&mut self, part: u16, handle: u32, meter: u16) {
+        self.engine.voice_meter(part, handle, meter);
+    }
+
     /// Is any voice with this handle still sounding on the part?
     pub fn sounding(&self, part: u16, handle: u32) -> bool {
         self.engine.voice_sounding(part, handle)

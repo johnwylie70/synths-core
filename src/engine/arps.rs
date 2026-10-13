@@ -59,6 +59,8 @@ pub(super) struct Arpeggiator {
     /// in it, for a song's channel; below 0 for the part's own patch.
     sample: i32,
     position: f64,
+    /// A part whose meter is to show its notes as well as their own part's.
+    meter: u16,
     rng: Rng,
     /// The pattern of steps it follows, if it has one (`len` above 0).
     pattern: Pattern,
@@ -86,6 +88,7 @@ impl Arpeggiator {
         begun: false,
         sample: -1,
         position: 0.0,
+        meter: crate::voice::NO_METER,
         rng: Rng(1),
         pattern: Pattern::NONE,
     };
@@ -340,6 +343,7 @@ impl Engine {
                 }
                 v.slide_volume(a.volume, 0.0);
                 v.slide_pan(a.pan, 0.0);
+                v.meter = a.meter;
             } else if !mono {
                 continue;
             }
@@ -561,6 +565,13 @@ impl Engine {
         }
     }
 
+    /// The handle's notes are to show on another part's meter: so are those to come.
+    pub(super) fn arp_meter(&mut self, part: u16, handle: u32, meter: u16) {
+        for a in self.arps.iter_mut().filter(|a| a.is(part, handle)) {
+            a.meter = meter;
+        }
+    }
+
     /// The handle's notes have been given a volume (or, with `pan`, a pan):
     /// the notes still to come have it too.
     pub(super) fn arp_level(&mut self, part: u16, handle: u32, pan: bool, value: f32) {
@@ -673,6 +684,7 @@ impl Engine {
             let a = &mut self.arps[i];
             a.volume = v.volume;
             a.pan = v.pan;
+            a.meter = v.meter;
             let id = a.id;
             // A voice that was stepping by itself hands its place over.
             let (step, due) = if v.arp.active() && e.kind != EV_ARP { self.voices[vi].arp.hand_over() } else { (0, 0.0) };

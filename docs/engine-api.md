@@ -624,7 +624,7 @@ millisecond at 48 kHz.
 | 12 | `macro_tick` | one part or all | | | |
 | 13 | `arp` | one part or all | handle, or 0 for the part's next note | steps a second | order |
 | 14 | `arp_more` | one part or all | handle, or 0 for the part's next note | | |
-| 15 | `song` | | what to do, 0 to 9 | its first number | its second number |
+| 15 | `song` | | what to do, 0 to 15 | its first number | its second number |
 | 16 | `record` | the part to record, when `y` is 1 | 0: stop, 1: start | sample slot | what to record: 0, 1 or 2 |
 | 17 | `arp_style` | one part or all | handle, or 0 for the part's next note | gate, 0..1 | octaves, 1..4 |
 | 18 | `arp_beat` | one part or all | handle, or 0 for the part's next note | steps to a beat | |
@@ -913,6 +913,8 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 222 | `reverb.predelay` | float | 0 | 0.2 | 0 | seconds | A gap before the reverb starts, on top of the type's own: it keeps a sound clear of its own reverb. |
 | 223 | `reverb.low_cut` | float | 20 | 1000 | 120 | hz | Bass below this is kept out of the reverb, so that it does not turn to mud. |
 | 224 | `tempo` | float | 20 | 999 | 120 | bpm | Beats a minute, for arpeggios that count their steps in beats. A change is taken up at each arpeggio's next step. |
+| 225 | `reverb.level` | float | 0 | 2 | 1 | gain | How loud the reverb comes back into the mix (1 is unchanged). |
+| 226 | `delay.level` | float | 0 | 2 | 1 | gain | How loud the echoes come back into the mix (1 is unchanged). |
 
 Kinds: a `float` takes any value in its range; an `int` is rounded to a whole
 number; a `bool` is 0 or 1; a `choice` is a whole number that picks from the
@@ -1880,7 +1882,7 @@ quirks included. Our own songs say which they want.
 | our own format, packed | every build with the `songs` feature |
 | our own format, as JSON | builds with the `json` feature, which is on unless a build turns it off |
 
-The JSON reader is about 62 KB of a WebAssembly module. `scripts/build-wasm.sh`
+The JSON reader is about 66 KB of a WebAssembly module. `scripts/build-wasm.sh`
 leaves it in, so that one reader decides what a song's JSON means for a page,
 for Python and for a native app alike; a module built with
 `scripts/build-wasm.sh --no-json` is that much smaller and reads MOD, XM and
@@ -1942,6 +1944,12 @@ frame. `a` says what; `x` and `y` are its numbers.
 | 7 | mute | channel, from 0; below 0 for every channel | 0 off, 1 on | Silence a channel of the song, or let it be heard again. The song goes on playing it, so it comes back in the right place. |
 | 8 | solo | channel, from 0; below 0 for every channel | 0 off, 1 on | While any channel is soloed, only the soloed channels are heard (and of those, only the ones not muted). |
 | 9 | loop this pattern | 0 off, 1 on | | On, the song stays in the place of the order it is in and plays that pattern round and round; a jump or the pattern's end brings it back to the pattern's top (a pattern break to its row). That is not the song ending, whatever `repeat` says. Off, it carries on through the song from where it is. A `seek` while it is on moves the loop to the place sought. |
+| 10 | a channel's volume | channel, from 0 | 0 to 2 | The channel's fader in the song's mix; 1 is as written. It slides there over 20 milliseconds, so a fader can be moved while the song plays. |
+| 11 | a channel's pan | channel, from 0 | -1 to 1 | Where the channel sits, in place of the song's `pan` for it (which is 0 to 255 there: `pan / 127.5 - 1`). The song's own panning effects still move it from there. |
+| 12 | a channel's reverb send | channel, from 0 | 0 to 1 | How much of the channel goes to the reverb. |
+| 13 | a channel's echo send | channel, from 0 | 0 to 1 | How much of the channel goes to the echo (the delay). |
+| 14 | the loop's start | place in the order; below 0 for none | row | Where the song goes back to from its loop's end, and (in place of the top of the restart pattern) when it runs off its last pattern. |
+| 15 | the loop's end | place in the order; below 0 for none | row | The place the song goes back from: on reaching it the song is at the loop's start instead, on that frame, and the row at the end is not played. With no start, it goes back to the top of the restart pattern. |
 
 In JavaScript, with the `event` function of [A host loop](#a-host-loop):
 
@@ -1956,6 +1964,61 @@ caught). A song can also be written never to end.
 
 `synths_reset` stops the song and takes it back to the start; it stays
 loaded.
+
+### The song's mix
+
+A song can carry a mix ([the song format](song-format.md#the-mix) has its
+keys), and a host can move every part of it while the song plays.
+
+- **Each channel** has a volume (0 to 2), a pan (-1 to 1) and a send to
+  the reverb and to the echo (0 to 1 each): commands 10 to 13 above. On
+  the channel's own part these are that part's `volume` (times the song's
+  volume, times a half), `pan`, `send.reverb` and `send.delay`, glided
+  over 20 milliseconds: nothing jumps and nothing clicks. A note of a
+  synth patch is on a part of the host's, so the channel's volume and pan
+  are carried by the note itself (its `voice_volume` and `voice_pan`,
+  ramped the same), and its sends are that part's own, which the song
+  does not touch.
+- **The pan** is the song's one pan for the channel, the `pan` list of
+  the format, made live: command 11 moves the channel from where the song
+  first put it to where it is told, by way of the part's `pan` (and for a
+  synth patch the note's), and everything the song does to the channel's
+  panning afterwards is moved with it.
+- **The song's volume** is command 5, as before; a song can now say what
+  it is to begin with.
+- **The effects** are the engine's own reverb and delay. A song sets the
+  ones it mentions when it is loaded, and leaves the rest alone; a song
+  that mentions none changes none. Its names are the libraries':
+  `reverbType`, `reverbDecay`, `reverbSize`, `reverbDamping`,
+  `reverbPredelay`, `reverbLowCut`, `reverbLevel`, `echoTime`,
+  `echoFeedback`, `echoTone`, `echoBounce` and `echoLevel`, which are the
+  parameters `reverb.type`, `reverb.decay`, `reverb.size`,
+  `reverb.damping`, `reverb.predelay`, `reverb.low_cut`, `reverb.level`,
+  `delay.time`, `delay.feedback`, `delay.tone`, `delay.pingpong` and
+  `delay.level`. A host changes them while the song plays with ordinary
+  `param` events. An echo whose time the song gives as a note length is
+  kept to the song's tempo: `delay.time` is set again when the tempo or
+  the speed changes.
+- **`reverb.level`** and **`delay.level`** (parameters 225 and 226) say
+  how loud each effect comes back into the mix, for every part's sends at
+  once. At 0 a send is not heard at all: what a send adds is only ever
+  what the effect gives back.
+- **The loop** is commands 14 and 15. Going back from the loop's end
+  counts as the song coming round (the eighth number of
+  `synths_song_position`), and with repeat off it is where the song stops.
+- **`synths_song_replace`** with an edited song moves the faders, sends,
+  effects and loop that the edit changed to where the new song has them
+  (smoothly), and leaves the ones it did not change where the host last
+  put them.
+
+**Meters.** A channel's level is its own part's: `synths_levels_read`
+with part `32 + channel` (peak and RMS, left and right, after the fader).
+That part's meter also shows a note of the channel that is a synth
+patch's, although the sound itself is on the patch's part: it reads the
+note's level after that part's `volume` and before its effects. So a
+channel's meter moves whatever kind of instrument it is playing. (Until
+this was so, the meter of a channel playing a synth patch read 0: its
+own part had nothing on it.) The master's meter is source 65535, as ever.
 
 ### Where the song is
 
@@ -2706,13 +2769,13 @@ and there are none.)
 plays a note through it, reads the taps, sets a macro, plays a chord and
 an arpeggio, sets patterns and a gate, feeds it a live input, plays a
 sample map and times it. The
-module is about 460 KB (183 KB gzipped), of which the song loaders and
-player are about 189 KB, the JSON song reader 62 KB of that, the live
+module is about 479 KB (190 KB gzipped), of which the song loaders and
+player are about 205 KB, the JSON song reader 66 KB of that, the live
 input, voice effects and recorder 29 KB, the arpeggiators, their patterns
 and the trance gate 37 KB and the sample maps 12 KB. Two smaller
 modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
-reader (399 KB, 161 KB gzipped), and `--no-songs` the whole song player
-(272 KB, 108 KB gzipped). See
+reader (413 KB, 167 KB gzipped), and `--no-songs` the whole song player
+(274 KB, 108 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
@@ -3008,6 +3071,7 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 | `clock(beat)`, `set_tempo(beats_a_minute)` | [The beat](#the-beat): `clock` is the `clock` event; `set_tempo` says what tempo the music this sequencer is playing has, which the beat then goes by in place of the `tempo` parameter, until it is given 0. |
 | `set_vibrato(part, handle, depth, rate, delay)` | The `voice_vibrato` event. |
 | `chord(part, handle, note, velocity, offsets)` | Start a chord: a note for each of the `offsets` (semitones from `note`; at most 8), all on this frame, under one handle. It is the `arp` event with no clock and order 6, and a `note_on`. The handle then means the whole chord. |
+| `meter_on(part, handle, meter)` | Have the level meter of part `meter` show the handle's voices as well as their own part's does (after that part's `volume`, before its effects). The song player gives a channel's meter its synth patch notes this way. A part number that does not exist stops it. |
 | `sounding(part, handle) -> bool` | Whether any voice with that handle is still sounding on the part. |
 | `note_on(part, handle, note, velocity)`, `note_off(part, handle)` | The `note_on` and `note_off` events, for parts that play synth patches. |
 | `set_param(part, id, value, glide)` | The `param` event. |

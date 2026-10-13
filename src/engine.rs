@@ -1170,6 +1170,17 @@ impl Engine {
         }
     }
 
+    /// Have the level meter of part `meter` show the handle's voices as
+    /// well as its own part's. See `Voices::meter_on`.
+    pub(crate) fn voice_meter(&mut self, part: u16, handle: u32, meter: u16) {
+        self.arp_meter(part, handle, meter);
+        for v in self.voices.iter_mut() {
+            if v.active() && v.handle == handle && handle != 0 && (part == ALL_PARTS || v.part == part) {
+                v.meter = meter;
+            }
+        }
+    }
+
     /// Is any voice with this handle still sounding on the part?
     pub(crate) fn voice_sounding(&self, part: u16, handle: u32) -> bool {
         handle != 0 && self.voices.iter().any(|v| v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part))
@@ -1348,6 +1359,9 @@ impl Engine {
         self.dirty = false;
         let to_tick = CONTROL - self.tick_pos;
         let mut sounding = 0;
+        // Levels to show on the meters of parts other than the voices' own.
+        let mut also = [[0.0f32; 4]; NUM_PARTS];
+        let mut any_also = false;
         for v in self.voices.iter_mut() {
             if !v.active() {
                 continue;
@@ -1370,12 +1384,41 @@ impl Engine {
             // A voice that has finished is let go at the end of the control
             // period, not part way through, so that the moment does not
             // depend on how a host slices time.
-            if v.render(&mut part.bus_l[..n], &mut part.bus_r[..n], &self.samples) || n != to_tick {
+            let alive = if (v.meter as usize) < NUM_PARTS {
+                // Its level is wanted on another part's meter too: it is
+                // made by itself, measured, and added to its part.
+                let (mut l, mut r) = ([0.0f32; CONTROL], [0.0f32; CONTROL]);
+                let alive = v.render(&mut l[..n], &mut r[..n], &self.samples);
+                let m = &mut also[v.meter as usize];
+                let volume = part.p[VOLUME];
+                for i in 0..n {
+                    part.bus_l[i] += l[i];
+                    part.bus_r[i] += r[i];
+                    let (a, b) = (l[i] * volume, r[i] * volume);
+                    m[0] = m[0].max(a.abs());
+                    m[1] = m[1].max(b.abs());
+                    m[2] += a * a * self.rms_take;
+                    m[3] += b * b * self.rms_take;
+                }
+                any_also = true;
+                alive
+            } else {
+                v.render(&mut part.bus_l[..n], &mut part.bus_r[..n], &self.samples)
+            };
+            if alive || n != to_tick {
                 sounding += 1;
             } else {
                 part.ended[0] += v.last[0];
                 part.ended[1] += v.last[1];
                 v.state = VoiceState::Free;
+            }
+        }
+
+        if any_also {
+            for (part, m) in self.parts.iter_mut().zip(also.iter()) {
+                if m[0] > 0.0 || m[1] > 0.0 {
+                    part.meter = [part.meter[0].max(m[0]), part.meter[1].max(m[1]), part.meter[2] + m[2], part.meter[3] + m[3]];
+                }
             }
         }
 
@@ -1510,6 +1553,17 @@ impl Engine {
             let tone_hz = gp(DELAY_TONE);
             if self.delay_tone.0 != tone_hz {
                 self.delay_tone = (tone_hz, 1.0 - (-crate::math::TAU * tone_hz * inv_sr).exp());
+            }
+            // How loud each comes back: the same as how loud it is sent, for these.
+            for (level, pair) in [(gp(DELAY_LEVEL), 0), (gp(REVERB_LEVEL), 2)] {
+                if level != 1.0 {
+                    for x in sends[pair][..n].iter_mut() {
+                        *x *= level;
+                    }
+                    for x in sends[pair + 1][..n].iter_mut() {
+                        *x *= level;
+                    }
+                }
             }
             self.delay.process(
                 &sends[0][..n],

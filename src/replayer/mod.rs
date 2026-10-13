@@ -196,19 +196,23 @@ pub(crate) struct Visited {
     pub wrapped: bool,
     /// A place in the order to stay in, playing its pattern round and round.
     pub hold: Option<usize>,
+    /// The song's loop: where it goes back to (order, row), and the place
+    /// it goes back from on reaching it.
+    pub loop_start: Option<(usize, usize)>,
+    pub loop_end: Option<(usize, usize)>,
 }
 
 impl Visited {
     const ROWS: usize = crate::song::MAX_ROWS;
 
     pub fn new(orders: usize) -> Visited {
-        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false, wrapped: false, hold: None }
+        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false, wrapped: false, hold: None, loop_start: None, loop_end: None }
     }
 
     /// The same record for a song that has replaced the one being played:
     /// nothing of the new song has been played yet.
     pub fn renewed(&self, orders: usize) -> Visited {
-        Visited { loops: self.loops, repeat: self.repeat, stopped: self.stopped, hold: self.hold.map(|h| h.min(orders.max(1) - 1)), ..Visited::new(orders) }
+        Visited { loops: self.loops, repeat: self.repeat, stopped: self.stopped, hold: self.hold.map(|h| h.min(orders.max(1) - 1)), loop_start: self.loop_start, loop_end: self.loop_end, ..Visited::new(orders) }
     }
 
     /// Called with the place the next row is at, before it is played. If
@@ -218,7 +222,17 @@ impl Visited {
     /// true while a place is being held: its rows come round again without
     /// the song having ended.
     pub fn keep(&mut self, order: &mut usize, row: &mut usize, song: &Song) -> bool {
-        let Some(hold) = self.hold else { return false };
+        let Some(hold) = self.hold else {
+            // The song's loop: back from its end, and back to its start
+            // (and not the top of the restart pattern) when the song runs out.
+            let back = self.loop_start.unwrap_or((song.restart as usize, 0));
+            if self.loop_end == Some((*order, *row)) || (self.wrapped && self.loop_start.is_some()) {
+                *order = back.0.min(song.orders.len().saturating_sub(1));
+                *row = if back.1 < song.rows_at(*order) as usize { back.1 } else { 0 };
+                self.wrapped = true;
+            }
+            return false;
+        };
         if *order != hold {
             *order = hold.min(song.orders.len().saturating_sub(1));
             if *row >= song.rows_at(*order) as usize {
@@ -290,7 +304,10 @@ impl Player {
             Rules::ProTracker => Core::Pt(pt::Replayer::new(song)),
             Rules::FastTracker2 => Core::Ft2(Box::new(ft2::Replayer::new(song))),
         };
-        Player { core, sample_rate: sample_rate.max(1.0), until_tick: 0.0 }
+        let mut player = Player { core, sample_rate: sample_rate.max(1.0), until_tick: 0.0 };
+        let place = |p: (u16, u16)| (p.0 as usize, p.1 as usize);
+        player.set_loop(song.loop_start.map(place), song.loop_end.map(place));
+        player
     }
 
     /// Plays the next `frames` frames of the song: every tick that falls in
@@ -382,6 +399,16 @@ impl Player {
             Core::Pt(r) => r.retarget(song),
             Core::Ft2(r) => r.retarget(song),
         }
+    }
+
+    /// Sets the song's loop: where it goes back to, and the place it goes
+    /// back from on reaching it (each an order and a row, or `None`).
+    pub fn set_loop(&mut self, start: Option<(usize, usize)>, end: Option<(usize, usize)>) {
+        let visited = match &mut self.core {
+            Core::Pt(r) => &mut r.visited,
+            Core::Ft2(r) => &mut r.visited,
+        };
+        (visited.loop_start, visited.loop_end) = (start, end);
     }
 
     /// Chooses what happens at the song's end: carry on round (the default),

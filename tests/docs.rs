@@ -187,7 +187,7 @@ fn the_document_lists_everything_a_sequencer_can_do() {
             assert!(DOC.contains(&format!("`{name}(")), "Voices::{name} is not in the document");
         }
     }
-    assert_eq!(count, 32);
+    assert_eq!(count, 33);
     for text in ["fn advance(&mut self, voices: &mut Voices<'_>) -> u32", "`Sequencer::reset`", "`Engine::set_sequencer("] {
         assert!(DOC.contains(text), "the document no longer says: {text}");
     }

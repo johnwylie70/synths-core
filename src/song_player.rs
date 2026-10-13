@@ -22,7 +22,8 @@ use crate::params::*;
 use crate::replayer::{note_of_rate, Arpeggio, Player, Source, Start, Voices as Channels};
 use crate::sample::{LOOP_FORWARD, LOOP_OFF, LOOP_PINGPONG};
 use crate::sequencer::{Sequencer, Trigger, Voices};
-use crate::song::{ArpOrder, ArpRate, ArpStyle, BendShape, GateChange, LoopKind, Rules, Song, Time, C4_RATE};
+use crate::replayer::pan_of;
+use crate::song::{ArpOrder, ArpRate, ArpStyle, BendShape, GateChange, LoopKind, Rules, Song, Time, C4_RATE, EFFECT_KEYS};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::Arc;
 
@@ -105,6 +106,22 @@ impl Shared {
     }
 }
 
+/// A channel's place in the mix as the player has it: its volume, how far
+/// its pan has been moved from where the song first had it, and its sends.
+#[derive(Clone, Copy, PartialEq)]
+struct Fader {
+    volume: f32,
+    pan: f32,
+    reverb: f32,
+    delay: f32,
+}
+
+impl Default for Fader {
+    fn default() -> Fader {
+        Fader { volume: 1.0, pan: 0.0, reverb: 0.0, delay: 0.0 }
+    }
+}
+
 /// What one channel of the song has sounding.
 #[derive(Clone, Copy)]
 struct Channel {
@@ -142,6 +159,10 @@ struct Channel {
     /// The gate has to be set again, and the part it was last set on.
     gate_due: bool,
     gated: u16,
+    /// The channel's fader and pan in the song's mix, for a note on a synth
+    /// patch's part, which carries them itself.
+    gain: f32,
+    turn: f32,
 }
 
 /// A bend in the song's time: where the pitch goes next and how long each leg takes.
@@ -171,6 +192,22 @@ struct Stepper {
 const ON_THE_TICK: f64 = 1.0e-4;
 
 impl Channel {
+    /// How loud a synth patch's note on the channel is, of what the song
+    /// asks for: the song's volume and the channel's fader, or nothing if
+    /// the channel is not to be heard.
+    fn level(&self, song_volume: f32) -> f32 {
+        if self.heard {
+            song_volume * self.gain
+        } else {
+            0.0
+        }
+    }
+
+    /// Where a synth patch's note on the channel is panned, the channel's pan in the mix added.
+    fn panned(&self, pan: f32) -> f32 {
+        (pan + self.turn).clamp(-1.0, 1.0)
+    }
+
     fn new(part: u16) -> Channel {
         Channel {
             part,
@@ -192,6 +229,8 @@ impl Channel {
             gate_off: false,
             gate_due: false,
             gated: NO_PART,
+            gain: 1.0,
+            turn: 0.0,
         }
     }
 }
@@ -276,12 +315,13 @@ impl Channels for Adapter<'_, '_> {
             if same && self.voices.sounding(was.part, handle) {
                 if was.patch {
                     self.voices.set_pitch(was.part, handle, note_of_rate(start.rate) as f32, seconds);
-                    self.voices.set_volume(was.part, handle, start.volume * if was.heard { self.volume } else { 0.0 });
+                    self.voices.set_volume(was.part, handle, start.volume * was.level(self.volume));
+                    self.voices.set_pan(was.part, handle, was.panned(start.pan));
                 } else {
                     self.voices.set_rate(was.part, handle, start.rate as f32, seconds);
                     self.voices.set_volume(was.part, handle, start.volume);
+                    self.voices.set_pan(was.part, handle, start.pan);
                 }
-                self.voices.set_pan(was.part, handle, start.pan);
                 self.channels[channel] = Channel { rate: start.rate, volume: start.volume, pan: start.pan, bend: 0.0, bending: None, instrument, gate_due: true, ..was };
                 return;
             }
@@ -302,6 +342,8 @@ impl Channels for Adapter<'_, '_> {
             gate_off: was.gate_off,
             gate_due: true,
             gated: was.gated,
+            gain: was.gain,
+            turn: was.turn,
             ..Channel::new(own)
         };
         match start.source {
@@ -319,8 +361,10 @@ impl Channels for Adapter<'_, '_> {
                 if (part as usize) < NUM_PARTS {
                     self.voices.kill(part, handle);
                     self.voices.note_on(part, handle, note_of_rate(start.rate) as f32, 1.0);
-                    self.voices.set_volume(part, handle, start.volume * if was.heard { self.volume } else { 0.0 });
-                    self.voices.set_pan(part, handle, start.pan);
+                    self.voices.set_volume(part, handle, start.volume * was.level(self.volume));
+                    self.voices.set_pan(part, handle, was.panned(start.pan));
+                    // The channel's own meter shows the note, though it is on another part.
+                    self.voices.meter_on(part, handle, own);
                     now.part = part;
                     now.patch = true;
                 }
@@ -343,13 +387,14 @@ impl Channels for Adapter<'_, '_> {
     fn set_volume(&mut self, _frame: u32, channel: usize, volume: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.volume = volume;
-        let volume = if ch.patch { volume * if ch.heard { self.volume } else { 0.0 } } else { volume };
+        let volume = if ch.patch { volume * ch.level(self.volume) } else { volume };
         self.voices.ramp_volume(ch.part, channel as u32 + 1, volume, ramp);
     }
 
     fn set_pan(&mut self, _frame: u32, channel: usize, pan: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.pan = pan;
+        let pan = if ch.patch { ch.panned(pan) } else { pan };
         self.voices.ramp_pan(ch.part, channel as u32 + 1, pan, ramp);
     }
 
@@ -512,6 +557,14 @@ pub struct SongPlayer {
     told: f32,
     /// For each sample, the first instrument that plays it.
     owners: Vec<u16>,
+    /// Each channel's place in the mix as it is now, and as the engine was last told.
+    mix: Vec<Fader>,
+    mixed: Vec<Fader>,
+    /// Where the song panned each channel to begin with, -1 to 1: a pan
+    /// set while it plays is so far from this.
+    base_pan: Vec<f32>,
+    /// The song's loop as it is now: its start and its end, each an order and a row.
+    loop_points: (Option<(usize, usize)>, Option<(usize, usize)>),
 }
 
 impl SongPlayer {
@@ -557,9 +610,27 @@ impl SongPlayer {
             speed: 0,
             told: 0.0,
             owners: Vec::new(),
+            mix: Vec::new(),
+            mixed: Vec::new(),
+            base_pan: Vec::new(),
+            loop_points: (None, None),
         };
         let mut s = s;
         s.find_owners();
+        s.volume = s.song.volume;
+        s.mix = (0..s.song.channels())
+            .map(|c| {
+                let m = s.song.channel_mix(c);
+                Fader { volume: m.volume, pan: 0.0, reverb: m.reverb, delay: m.echo }
+            })
+            .collect();
+        s.base_pan = s.song.channel_pan.iter().map(|&p| pan_of(p)).collect();
+        s.mixed = vec![Fader::default(); s.song.channels()];
+        for (ch, m) in s.channels.iter_mut().zip(&s.mix) {
+            (ch.gain, ch.turn) = (m.volume, m.pan);
+        }
+        let place = |p: (u16, u16)| (p.0 as usize, p.1 as usize);
+        s.loop_points = (s.song.loop_start.map(place), s.song.loop_end.map(place));
         s.publish();
         s
     }
@@ -707,6 +778,10 @@ impl SongPlayer {
         let beats = 6.0 * p.tempo as f32 / p.speed.max(1) as f32;
         if beats != self.told {
             self.told = beats;
+            // A delay timed in the song's measure keeps to it.
+            if let Some(seconds) = self.delay_seconds(p.speed, p.tempo) {
+                voices.set_param(0, DELAY_TIME, seconds, 0.0);
+            }
             voices.set_tempo(beats);
         }
         if p.tick == 0 {
@@ -772,11 +847,73 @@ impl SongPlayer {
         let frames = (0.02 * voices.sample_rate()) as u32;
         for (c, ch) in self.channels.iter_mut().enumerate() {
             ch.heard = !self.muted[c] && (!any_solo || self.solo[c]);
+            let (m, was) = (self.mix[c], self.mixed[c]);
+            (ch.gain, ch.turn) = (m.volume, m.pan);
             let level = if ch.heard { self.volume } else { 0.0 };
-            voices.set_param(self.first_part + c as u16, VOLUME, level * CHANNEL_GAIN, 0.02);
+            let own = self.first_part + c as u16;
+            voices.set_param(own, VOLUME, level * CHANNEL_GAIN * m.volume, 0.02);
+            // The rest of the channel's place in the mix, where it has moved.
+            for (id, now, then) in [(PAN, m.pan, was.pan), (SEND_REVERB, m.reverb, was.reverb), (SEND_DELAY, m.delay, was.delay)] {
+                if now != then {
+                    voices.set_param(own, id, now, 0.02);
+                }
+            }
             // (While paused, the notes are held at nothing.)
             if ch.patch && self.state != STATE_PAUSED {
-                voices.ramp_volume(ch.part, c as u32 + 1, ch.volume * level, frames);
+                voices.ramp_volume(ch.part, c as u32 + 1, ch.volume * ch.level(self.volume), frames);
+                if m.pan != was.pan {
+                    voices.ramp_pan(ch.part, c as u32 + 1, ch.panned(ch.pan), frames);
+                }
+            }
+            self.mixed[c] = m;
+        }
+    }
+
+    /// The seconds between the echoes of the song's delay, when the song
+    /// gives the time in its own measure: `None` if it sets no delay, or
+    /// gives it in seconds.
+    fn delay_seconds(&self, speed: u16, tempo: u16) -> Option<f32> {
+        match self.song.effects.echo_time? {
+            Time::Seconds(_) => None,
+            time => Some((time.ticks(speed, tempo) * 2.5 / tempo.max(1) as f64).clamp(0.001, 2.0) as f32),
+        }
+    }
+
+    /// Put the song's own mix and effects into a newly loaded engine: at
+    /// once, with nothing sounding to hear it move. A song that sets none
+    /// of it changes nothing here.
+    fn setup(&mut self, engine: &mut Engine) {
+        for (c, m) in self.mix.iter().enumerate() {
+            let own = self.first_part + c as u16;
+            for (id, now, usual) in [(VOLUME, CHANNEL_GAIN * self.volume * m.volume, CHANNEL_GAIN), (PAN, m.pan, 0.0), (SEND_REVERB, m.reverb, 0.0), (SEND_DELAY, m.delay, 0.0)] {
+                if now != usual {
+                    engine.set_param(own, id, now);
+                }
+            }
+            self.mixed[c] = *m;
+        }
+        self.set_effects(engine, true, true);
+    }
+
+    /// Give the engine the settings of the reverb and the echo that the
+    /// song gives (`all`), or only the ones named in `which` of `EFFECT_KEYS`.
+    fn set_effects(&self, engine: &mut Engine, all: bool, time: bool) {
+        let fx = &self.song.effects;
+        if all {
+            for ((_, id), value) in EFFECT_KEYS.iter().zip(fx.values) {
+                if let Some(value) = value {
+                    engine.set_param(0, *id, value);
+                }
+            }
+        }
+        if time {
+            let seconds = match fx.echo_time {
+                Some(Time::Seconds(n)) => Some(n),
+                Some(_) => self.delay_seconds(self.song.speed as u16, self.song.tempo),
+                None => None,
+            };
+            if let Some(seconds) = seconds {
+                engine.set_param(0, DELAY_TIME, seconds);
             }
         }
     }
@@ -919,6 +1056,27 @@ impl Sequencer for SongPlayer {
                 self.loop_pattern = event.x != 0.0;
                 self.player.hold_order(self.loop_pattern);
             }
+            SONG_CHANNEL_VOLUME | SONG_CHANNEL_PAN | SONG_CHANNEL_REVERB | SONG_CHANNEL_DELAY => {
+                let channel = if event.x.is_finite() && event.x >= 0.0 { event.x as usize } else { usize::MAX };
+                if let (Some(m), true) = (self.mix.get_mut(channel), event.y.is_finite()) {
+                    match event.a {
+                        SONG_CHANNEL_VOLUME => m.volume = event.y.clamp(0.0, 2.0),
+                        SONG_CHANNEL_PAN => m.pan = event.y.clamp(-1.0, 1.0) - self.base_pan.get(channel).copied().unwrap_or(0.0),
+                        SONG_CHANNEL_REVERB => m.reverb = event.y.clamp(0.0, 1.0),
+                        _ => m.delay = event.y.clamp(0.0, 1.0),
+                    }
+                    self.set_levels(voices);
+                }
+            }
+            SONG_LOOP_START | SONG_LOOP_END => {
+                let place = (event.x.is_finite() && event.x >= 0.0).then(|| (event.x as usize, whole(event.y)));
+                if event.a == SONG_LOOP_START {
+                    self.loop_points.0 = place;
+                } else {
+                    self.loop_points.1 = place;
+                }
+                self.player.set_loop(self.loop_points.0, self.loop_points.1);
+            }
             SONG_PATCH_PART => {
                 let part = if event.y.is_finite() && event.y >= 0.0 && (event.y as usize) < NUM_PARTS { event.y as u16 } else { NO_PART };
                 if let Some(slot) = whole(event.x).checked_sub(1).and_then(|i| self.patch_parts.get_mut(i)) {
@@ -1030,6 +1188,7 @@ pub fn install(engine: &mut Engine, song: Song, first_part: u16, first_slot: u16
 
     let mut player = SongPlayer::new(song, engine.sample_rate(), first_part, first_slot);
     player.raw = raw;
+    player.setup(engine);
     let shared = player.shared.clone();
     engine.song = Some(shared.clone());
     engine.set_sequencer(Some(Box::new(player)));
@@ -1088,6 +1247,8 @@ pub fn replace(engine: &mut Engine, song: Song, first_slot: u16, raw: bool) -> R
         patch_parts: Vec<u16>,
     }
     let mut song = Some(song);
+    // What of the mix the new song changes, to be moved to (smoothly) once it is in place.
+    let mut moves: Vec<(u32, f32, f32)> = Vec::new();
     let outcome = engine.with_sequencer(|engine, sequencer| {
         let player = sequencer.as_any()?.downcast_mut::<SongPlayer>()?;
         let new = song.as_ref()?;
@@ -1109,6 +1270,27 @@ pub fn replace(engine: &mut Engine, song: Song, first_slot: u16, raw: bool) -> R
             }));
         }
         let new = song.take()?;
+        // A fader the edit moved goes where the new song has it; one it did
+        // not is left where the host last put it.
+        let old = &player.song;
+        if old.volume != new.volume {
+            moves.push((SONG_VOLUME, new.volume, 0.0));
+        }
+        for c in 0..new.channels() {
+            let (was, now) = (old.channel_mix(c), new.channel_mix(c));
+            let pans = (old.channel_pan.get(c).map(|&p| pan_of(p)).unwrap_or(0.0), new.channel_pan.get(c).map(|&p| pan_of(p)).unwrap_or(0.0));
+            for (command, a, b) in [(SONG_CHANNEL_VOLUME, was.volume, now.volume), (SONG_CHANNEL_PAN, pans.0, pans.1), (SONG_CHANNEL_REVERB, was.reverb, now.reverb), (SONG_CHANNEL_DELAY, was.echo, now.echo)] {
+                if a != b {
+                    moves.push((command, c as f32, b));
+                }
+            }
+        }
+        for (command, a, b) in [(SONG_LOOP_START, old.loop_start, new.loop_start), (SONG_LOOP_END, old.loop_end, new.loop_end)] {
+            if a != b {
+                moves.push((command, b.map_or(-1.0, |p| p.0 as f32), b.map_or(0.0, |p| p.1 as f32)));
+            }
+        }
+        let effects = (old.effects.values != new.effects.values, old.effects.echo_time != new.effects.echo_time);
         for (i, s) in new.samples.iter().enumerate() {
             if player.song.samples.get(i) != Some(s) {
                 load_slot(engine, first_slot as usize + i, s);
@@ -1124,12 +1306,18 @@ pub fn replace(engine: &mut Engine, song: Song, first_slot: u16, raw: bool) -> R
         }
         player.patch_parts.resize(player.song.instruments.len(), NO_PART);
         player.player.retarget(&player.song);
+        // The effects the edit changed, and a delay in the song's measure worked out again.
+        player.set_effects(engine, effects.0, effects.1);
+        player.told = 0.0;
         player.publish();
         Some(Ok(player.shared.clone()))
     });
     match outcome.flatten() {
         Some(Ok(shared)) => {
             engine.song = Some(shared);
+            for (command, x, y) in moves {
+                engine.apply(&Event::song(0.0, command, x, y));
+            }
             Ok(true)
         }
         kept => {

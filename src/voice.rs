@@ -22,6 +22,9 @@ const QUEUE_NONE: i32 = -2;
 /// Silence is waiting to take over from the sample playing.
 const QUEUE_SILENCE: i32 = -1;
 
+/// No part's meter shows this voice but its own part's.
+pub const NO_METER: u16 = 0xFFFF;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VoiceState {
     Free,
@@ -126,6 +129,10 @@ pub struct Voice {
     pub arp: Arp,
     /// The arpeggio has just stepped: the pitch jumps instead of sliding.
     pub pitch_jump: bool,
+    /// A part whose level meter is to show this voice as well as its own
+    /// part's (a song's channel, for a note on a synth patch's part), or
+    /// `NO_METER`.
+    pub meter: u16,
     pub rng: Rng,
 
     // Worked out by `control`, used by `render`.
@@ -218,6 +225,7 @@ impl Voice {
             macro_player: MacroPlayer::default(),
             arp: Arp::default(),
             pitch_jump: false,
+            meter: NO_METER,
             rng: Rng::new(1),
             amp_shape: EnvShape::default(),
             filter_shape: EnvShape::default(),

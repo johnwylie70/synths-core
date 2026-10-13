@@ -47,6 +47,12 @@ pub const SONG_PATCH_PART: u32 = 6;
 pub const SONG_MUTE: u32 = 7;
 pub const SONG_SOLO: u32 = 8;
 pub const SONG_LOOP_PATTERN: u32 = 9;
+pub const SONG_CHANNEL_VOLUME: u32 = 10;
+pub const SONG_CHANNEL_PAN: u32 = 11;
+pub const SONG_CHANNEL_REVERB: u32 = 12;
+pub const SONG_CHANNEL_DELAY: u32 = 13;
+pub const SONG_LOOP_START: u32 = 14;
+pub const SONG_LOOP_END: u32 = 15;
 
 /// The part number that means "every part".
 pub const ALL_PARTS: u16 = 0xFFFF;
@@ -67,7 +73,7 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_MACRO_TICK, "macro_tick", "part (65535: every part): step the macros of parts with macro.sync on"),
     (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random, 5 up-down with the ends twice, 6 all together; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
     (EV_ARP_MORE, "arp_more", "part; a: handle, or 0 for the part's next note; b: offsets 4-7, a signed byte each"),
-    (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part), 7 mute (x: channel from 0, or below 0 for all; y: 0 off, 1 on), 8 solo (the same), 9 loop this pattern (x: 0 off, 1 on)"),
+    (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part), 7 mute (x: channel from 0, or below 0 for all; y: 0 off, 1 on), 8 solo (the same), 9 loop this pattern (x: 0 off, 1 on), 10 a channel's volume (x: channel from 0, y: 0..2), 11 its pan (y: -1..1), 12 its send to the reverb (y: 0..1), 13 its send to the delay (y: 0..1), 14 the loop's start (x: order, or below 0 for none; y: row), 15 the loop's end (the same)"),
     (EV_RECORD, "record", "a: 0 stop, 1 start; x: sample slot (made with synths_record_buffer); y: what to record, 0 the live input, 1 a part (part: which), 2 the whole output"),
     (EV_ARP_STYLE, "arp_style", "part; a: handle, or 0 for the part's next note; x: gate, 0.05..1 of a step each note is held (0: nothing is struck, the pitch jumps); y: octaves, 1..4; z: swing, 0..0.75 of a step; b: how hard each step is struck, four bits a step (0: all full)"),
     (EV_ARP_BEAT, "arp_beat", "part; a: handle, or 0 for the part's next note; x: steps to a beat of the tempo parameter, 0.01..64 (0: go by the arp event's rate)"),

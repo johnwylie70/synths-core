@@ -503,11 +503,138 @@ pub fn save_in_one(song: &Song) -> String {
     write(song, None)
 }
 
+/// The song's mix, its effects and its loop: whichever of them it has.
+fn write_mix(o: &mut Out, song: &Song) {
+    let number = |o: &mut Out, first: &mut bool, key: &str, n: f32| {
+        o.s(if core::mem::take(first) { "\"" } else { ", \"" }).s(key).s("\": ");
+        text::push_number(&mut o.0, n as f64);
+    };
+    if song.volume != 1.0 || !song.mix.is_empty() {
+        o.s(",\n  \"mixer\": {");
+        let mut first = true;
+        if song.volume != 1.0 {
+            number(o, &mut first, "volume", song.volume);
+        }
+        if !song.mix.is_empty() {
+            o.s(if first { "\"channels\": [" } else { ", \"channels\": [" });
+            for (i, m) in song.mix.iter().enumerate() {
+                o.s(if i == 0 { "{" } else { ", {" });
+                let (mut first, plain) = (true, ChannelMix::default());
+                for (key, n, usual) in [("volume", m.volume, plain.volume), ("reverb", m.reverb, plain.reverb), ("echo", m.echo, plain.echo)] {
+                    if n != usual {
+                        number(o, &mut first, key, n);
+                    }
+                }
+                o.s("}");
+            }
+            o.s("]");
+        }
+        o.s("}");
+    }
+    if !song.effects.is_empty() {
+        o.s(",\n  \"effects\": {");
+        let mut first = true;
+        for (i, (key, _)) in EFFECT_KEYS.iter().enumerate() {
+            // (The echo's time is written where the echo's settings begin.)
+            if *key == "echoFeedback" {
+                if let Some(time) = &song.effects.echo_time {
+                    o.s(if core::mem::take(&mut first) { "\"echoTime\": " } else { ", \"echoTime\": " });
+                    match *time {
+                        Time::Seconds(n) => text::push_number(&mut o.0, n as f64),
+                        time => write_time(o, &time),
+                    }
+                }
+            }
+            let Some(value) = song.effects.values[i] else { continue };
+            match *key {
+                "reverbType" => {
+                    o.s(if core::mem::take(&mut first) { "\"" } else { ", \"" }).s(key).s("\": \"").s(REVERB_TYPES[(value as usize).min(4)]).s("\"");
+                }
+                "echoBounce" => {
+                    o.s(if core::mem::take(&mut first) { "\"" } else { ", \"" }).s(key).s(if value >= 0.5 { "\": true" } else { "\": false" });
+                }
+                _ => number(o, &mut first, key, value),
+            }
+        }
+        o.s("}");
+    }
+    if song.loop_start.is_some() || song.loop_end.is_some() {
+        o.s(",\n  \"loop\": {");
+        if let Some((order, row)) = song.loop_start {
+            o.s("\"start\": [").n(order as i64).s(", ").n(row as i64).s("]");
+        }
+        if let Some((order, row)) = song.loop_end {
+            o.s(if song.loop_start.is_some() { ", " } else { "" }).s("\"end\": [").n(order as i64).s(", ").n(row as i64).s("]");
+        }
+        o.s("}");
+    }
+}
+
+/// The mix, the effects and the loop a song's JSON has.
+fn read_mix(v: &Value, song: &mut Song) -> Result<(), LoadError> {
+    if let Some(m) = v.get("mixer").filter(|m| **m != Value::Null) {
+        if !matches!(m, Value::Object(_)) {
+            return invalid("\"mixer\" must be {\"volume\": ..., \"channels\": [{\"volume\": ..., \"reverb\": ..., \"echo\": ...}, ...]}");
+        }
+        song.volume = number(m, "volume", 0.0, 2.0)?.unwrap_or(1.0);
+        let channels = list(m, "channels")?;
+        if channels.len() > song.channels() {
+            return invalid("the mixer's \"channels\" has more entries than the song has channels");
+        }
+        for c in channels {
+            if !matches!(c, Value::Object(_)) {
+                return invalid("each of the mixer's \"channels\" is {\"volume\": ..., \"reverb\": ..., \"echo\": ...}, or {} for a channel left as it is");
+            }
+            song.mix.push(ChannelMix {
+                volume: number(c, "volume", 0.0, 2.0)?.unwrap_or(1.0),
+                reverb: number(c, "reverb", 0.0, 1.0)?.unwrap_or(0.0),
+                echo: number(c, "echo", 0.0, 1.0)?.unwrap_or(0.0),
+            });
+        }
+    }
+    if let Some(fx) = v.get("effects").filter(|x| **x != Value::Null) {
+        for (i, (key, id)) in EFFECT_KEYS.iter().enumerate() {
+            let Some(value) = fx.get(key).filter(|x| **x != Value::Null) else { continue };
+            song.effects.values[i] = Some(match (*key, value) {
+                ("reverbType", _) => match value.as_str().and_then(|name| REVERB_TYPES.iter().position(|t| *t == name)) {
+                    Some(kind) => kind as f32,
+                    None => return invalid("\"reverbType\" must be \"room\", \"hall\", \"plate\", \"cathedral\" or \"spring\""),
+                },
+                ("echoBounce", Value::Bool(on)) => *on as u8 as f32,
+                ("echoBounce", _) => return invalid("\"echoBounce\" must be true or false"),
+                _ => {
+                    let (min, max) = crate::params::info(*id).map_or((0.0, 1.0), |info| (info.min as f64, info.max as f64));
+                    number(fx, key, min, max)?.unwrap_or(0.0)
+                }
+            });
+        }
+        match fx.get("echoTime") {
+            None | Some(Value::Null) => {}
+            Some(Value::Number(_)) => song.effects.echo_time = number(fx, "echoTime", 0.001, 2.0)?.map(Time::Seconds),
+            Some(t) => song.effects.echo_time = Some(read_time(t, "echoTime")?),
+        }
+    }
+    if let Some(l) = v.get("loop").filter(|x| **x != Value::Null) {
+        let place = |key: &str| -> Result<Option<(u16, u16)>, LoadError> {
+            match l.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(p) => match p.as_array().map(|p| (p.len(), p.first().and_then(Value::as_i64), p.get(1).and_then(Value::as_i64))) {
+                    Some((2, Some(order), Some(row))) if (0..song.orders.len().max(1) as i64).contains(&order) && (0..MAX_ROWS as i64).contains(&row) => Ok(Some((order as u16, row as u16))),
+                    _ => invalid("a loop's \"start\" and \"end\" are each [place in the order, row], both from 0 and inside the song"),
+                },
+            }
+        };
+        song.loop_start = place("start")?;
+        song.loop_end = place("end")?;
+    }
+    Ok(())
+}
+
 fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
     let mut out = Out(String::new());
     let o = &mut out;
     // A song with no chord in it says nothing an older reader would get wrong.
-    let chords = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some() || e.extra != 0)) || song.instruments.iter().any(|i| i.gate.is_some());
+    let chords = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some() || e.extra != 0)) || song.instruments.iter().any(|i| i.gate.is_some()) || song.has_mix();
     o.s("{\n  \"format\": \"").s(FORMAT).s("\",\n  \"version\": ").n(if chords { VERSION } else { 1 });
     o.s(",\n  \"title\": ").quoted(&song.title);
     o.s(",\n  \"rules\": ").s(if song.rules == Rules::ProTracker { "\"protracker\"" } else { "\"ft2\"" });
@@ -521,6 +648,7 @@ fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
         o.s(",\n  \"pan\": ").list(song.channel_pan.iter().map(|&p| p as i64));
     }
     o.s(",\n  \"order\": ").list(song.orders.iter().map(|&p| p as i64));
+    write_mix(o, song);
 
     o.s(",\n  \"patterns\": [");
     for (i, p) in song.patterns.iter().enumerate() {
@@ -1132,6 +1260,7 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
         }
     }
     song.restart = int(v, "restart", 0, (song.orders.len() as i64 - 1).max(0), 0)? as u16;
+    read_mix(v, song)?;
 
     let samples = list(v, "samples")?;
     if samples.len() > MAX_SAMPLES {

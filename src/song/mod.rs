@@ -801,6 +801,63 @@ impl Instrument {
     }
 }
 
+/// One channel's place in the song's mix. (Its pan is the song's `channel_pan`.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChannelMix {
+    /// How loud, 0 to 2; 1 is as written.
+    pub volume: f32,
+    /// How much of the channel is sent to the reverb and to the echo, 0 to 1.
+    pub reverb: f32,
+    pub echo: f32,
+}
+
+impl Default for ChannelMix {
+    fn default() -> ChannelMix {
+        ChannelMix { volume: 1.0, reverb: 0.0, echo: 0.0 }
+    }
+}
+
+/// The names of the reverb's types, in order.
+pub const REVERB_TYPES: [&str; 5] = ["room", "hall", "plate", "cathedral", "spring"];
+
+/// The settings of the shared effects a song can keep: the name each has
+/// in a song (which is the name the libraries give it) and the engine's
+/// parameter it sets. `reverbType` is one of `REVERB_TYPES`, `echoBounce`
+/// is true or false, and the rest are numbers in the parameter's range.
+pub const EFFECT_KEYS: [(&str, usize); 11] = [
+    ("reverbType", crate::params::REVERB_TYPE),
+    ("reverbDecay", crate::params::REVERB_DECAY),
+    ("reverbSize", crate::params::REVERB_SIZE),
+    ("reverbDamping", crate::params::REVERB_DAMP),
+    ("reverbPredelay", crate::params::REVERB_PREDELAY),
+    ("reverbLowCut", crate::params::REVERB_LOW_CUT),
+    ("reverbLevel", crate::params::REVERB_LEVEL),
+    ("echoFeedback", crate::params::DELAY_FEEDBACK),
+    ("echoTone", crate::params::DELAY_TONE),
+    ("echoBounce", crate::params::DELAY_PINGPONG),
+    ("echoLevel", crate::params::DELAY_LEVEL),
+];
+
+/// The reverb and the echo as a song sets them: only what it mentions.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Effects {
+    /// The value of each of `EFFECT_KEYS`, as the engine's parameter takes it, if the song gives one.
+    pub values: [Option<f32>; 11],
+    /// `echoTime`, the time between echoes: seconds, or a length in the song's own time.
+    pub echo_time: Option<Time>,
+}
+
+impl Effects {
+    pub fn is_empty(&self) -> bool {
+        *self == Effects::default()
+    }
+
+    /// The value the song gives a setting, by its name.
+    pub fn get(&self, name: &str) -> Option<f32> {
+        self.values[EFFECT_KEYS.iter().position(|(key, _)| *key == name)?]
+    }
+}
+
 /// Whose rules the song is played by. The two trackers disagree on a great
 /// many details, and songs were written to their tracker's behaviour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -847,6 +904,18 @@ pub struct Song {
     pub arp_patterns: Vec<crate::arp::Pattern>,
     /// What events say beyond a cell and a chord: `Event::extra` 1 is the first.
     pub extras: Vec<Extra>,
+    /// How loud the whole song is, 0 to 2; 1 is as written.
+    pub volume: f32,
+    /// Each channel's place in the mix, from the first; channels past the
+    /// end of the list are as `ChannelMix::default()`.
+    pub mix: Vec<ChannelMix>,
+    /// What the song sets of the reverb and the echo its channels send to.
+    pub effects: Effects,
+    /// Where the song goes back to when it reaches its loop's end or runs
+    /// off its last pattern (order, row), and the place that is the loop's
+    /// end: the song goes back on reaching it, without playing it.
+    pub loop_start: Option<(u16, u16)>,
+    pub loop_end: Option<(u16, u16)>,
 }
 
 impl Default for Song {
@@ -865,6 +934,11 @@ impl Default for Song {
             samples: Vec::new(),
             arp_patterns: Vec::new(),
             extras: Vec::new(),
+            volume: 1.0,
+            mix: Vec::new(),
+            effects: Effects::default(),
+            loop_start: None,
+            loop_end: None,
         }
     }
 }
@@ -883,6 +957,16 @@ impl Song {
     /// plays as 64 empty rows, as the trackers do.
     pub fn rows_at(&self, order: usize) -> u16 {
         self.pattern_at(order).map_or(64, |p| p.rows.max(1))
+    }
+
+    /// A channel's place in the mix.
+    pub fn channel_mix(&self, channel: usize) -> ChannelMix {
+        self.mix.get(channel).copied().unwrap_or_default()
+    }
+
+    /// Has the song a mix, effects or a loop of its own?
+    pub fn has_mix(&self) -> bool {
+        self.volume != 1.0 || !self.mix.is_empty() || !self.effects.is_empty() || self.loop_start.is_some() || self.loop_end.is_some()
     }
 
     /// What an event says beyond its cell and chord, by its number.
@@ -950,6 +1034,14 @@ impl Song {
         }
         self.tempo = self.tempo.clamp(32, 255);
         self.speed = self.speed.clamp(1, 31);
+        // The mix: no more channels than there are, and none listed for nothing.
+        self.mix.truncate(self.channel_pan.len());
+        while self.mix.last() == Some(&ChannelMix::default()) {
+            self.mix.pop();
+        }
+        let orders = self.orders.len() as u16;
+        self.loop_start = self.loop_start.filter(|&(order, _)| order < orders);
+        self.loop_end = self.loop_end.filter(|&(order, _)| order < orders);
         let channels = self.channels();
         let (extras, patterns) = (self.extras.len(), self.arp_patterns.len());
         for p in &mut self.patterns {

@@ -260,6 +260,8 @@ param_table! {
 
     // ---- time ----
     224, TEMPO, "tempo", Float, 20, 999, 120, "bpm", "", "Beats a minute, for arpeggios that count their steps in beats. A change is taken up at each arpeggio's next step.";
+    225, REVERB_LEVEL, "reverb.level", Float, 0, 2, 1, "gain", "", "How loud the reverb comes back into the mix (1 is unchanged).";
+    226, DELAY_LEVEL, "delay.level", Float, 0, 2, 1, "gain", "", "How loud the echoes come back into the mix (1 is unchanged).";
 }
 
 // Offsets inside a group of parameters that repeats.
