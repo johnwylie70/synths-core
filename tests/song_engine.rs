@@ -13,8 +13,8 @@ use synths_core::{Engine, Event};
 
 const SR: f32 = 44100.0;
 
-fn load(engine: &mut Engine, file: &[u8], first_part: u32, first_slot: u32) -> i32 {
-    unsafe { synths_song_load(engine, file.as_ptr(), file.len() as u32, first_part, first_slot) }
+fn load(engine: &mut Engine, file: &[u8], first_slot: u32) -> i32 {
+    unsafe { synths_song_load(engine, file.as_ptr(), file.len() as u32, first_slot) }
 }
 
 fn position(engine: &Engine) -> [u32; 10] {
@@ -37,7 +37,7 @@ fn render(engine: &mut Engine, frames: usize, block: usize) -> (Vec<f32>, Vec<f3
 
 fn playing(file: &[u8]) -> Box<Engine> {
     let mut engine = Engine::new(SR);
-    assert_eq!(load(&mut engine, file, 0, 0), SONG_OK, "{}", error());
+    assert_eq!(load(&mut engine, file, 0), SONG_OK, "{}", error());
     engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
     engine
 }
@@ -135,7 +135,7 @@ fn a_mod_and_an_xm_sound_the_same_through_the_engine_as_through_the_plain_mixer(
         }
         // And silent before it is told to play.
         let mut idle = Engine::new(SR);
-        assert_eq!(load(&mut idle, &file, 0, 0), SONG_OK);
+        assert_eq!(load(&mut idle, &file, 0), SONG_OK);
         let (l, _) = render(&mut idle, 4000, 512);
         assert!(l.iter().all(|x| *x == 0.0));
         assert_eq!(position(&idle)[0], STATE_STOPPED);
@@ -156,10 +156,10 @@ fn the_position_can_be_read_as_the_song_plays() {
     let file = write_mod(&tune(Rules::ProTracker));
     let mut engine = Engine::new(SR);
     assert_eq!(position(&engine), [0; 10]);
-    assert_eq!(load(&mut engine, &file, 8, 100), SONG_OK);
+    assert_eq!(load(&mut engine, &file, 100), SONG_OK);
     let mut info = [0u32; 8];
     assert_eq!(unsafe { synths_song_info(&*engine, info.as_mut_ptr()) }, 8);
-    assert_eq!(info, [4, 1, 1, 31, 31, 8, 100, 1]);
+    assert_eq!(info, [4, 1, 1, 31, 31, 32, 100, 1]);
     assert_eq!(position(&engine), [STATE_STOPPED, 0, 0, 0, 0, 6, 125, 0, 64, 1]);
 
     // Told to play at frame 1000: the first tick is on that frame.
@@ -252,7 +252,7 @@ fn a_chord_becomes_the_engines_arpeggio_and_a_patch_becomes_a_note_on_its_part()
                             -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100],
                    "loop": {}}]}"#;
     let mut engine = Engine::new(SR);
-    assert_eq!(load(&mut engine, text.as_bytes(), 0, 0), SONG_OK, "{}", error());
+    assert_eq!(load(&mut engine, text.as_bytes(), 0), SONG_OK, "{}", error());
     let mut name = [0u8; 16];
     assert_eq!(unsafe { synths_song_patch_name(&*engine, 2, name.as_mut_ptr(), 16) }, 7);
     assert_eq!(&name[..7], b"my-lead");
@@ -284,13 +284,13 @@ fn a_chord_becomes_the_engines_arpeggio_and_a_patch_becomes_a_note_on_its_part()
 #[test]
 fn songs_that_cannot_be_loaded_say_why() {
     let mut engine = Engine::new(SR);
-    assert_eq!(load(&mut engine, b"not a song at all", 0, 0), SONG_BAD);
+    assert_eq!(load(&mut engine, b"not a song at all", 0), SONG_BAD);
     assert!(error().contains("too short"), "{}", error());
     let bad = br#"{"format": "synths-song", "version": 1, "tempo": 5}"#;
-    assert_eq!(load(&mut engine, bad, 0, 0), SONG_BAD);
+    assert_eq!(load(&mut engine, bad, 0), SONG_BAD);
     assert!(error().contains("\"tempo\" must be a whole number from 32 to 255"), "{}", error());
     let needs = br#"{"format": "synths-song", "version": 1, "samples": [{"file": "samples/a.wav"}]}"#;
-    assert_eq!(load(&mut engine, needs, 0, 0), SONG_MISSING_FILE);
+    assert_eq!(load(&mut engine, needs, 0), SONG_MISSING_FILE);
     assert!(error().contains("samples/a.wav"));
     assert_eq!(position(&engine)[0], STATE_NONE);
 
@@ -298,15 +298,19 @@ fn songs_that_cannot_be_loaded_say_why() {
     let wav = wav::write(&SampleData::Bits8(vec![1, 2, 3, 4]), 8363);
     let name = "samples/a.wav";
     assert_eq!(unsafe { synths_song_file(name.as_ptr(), name.len() as u32, wav.as_ptr(), wav.len() as u32) }, SONG_OK);
-    assert_eq!(load(&mut engine, needs, 0, 0), SONG_OK, "{}", error());
+    assert_eq!(load(&mut engine, needs, 0), SONG_OK, "{}", error());
     assert_eq!(error(), "");
-    assert_eq!(load(&mut engine, needs, 0, 0), SONG_MISSING_FILE);
+    assert_eq!(load(&mut engine, needs, 0), SONG_MISSING_FILE);
 
     let file = write_mod(&tune(Rules::ProTracker));
-    assert_eq!(load(&mut engine, &file, 61, 0), SONG_NO_PARTS);
-    assert_eq!(load(&mut engine, &file, 0, 1000), SONG_NO_SLOTS);
-    assert_eq!(unsafe { synths_song_load(core::ptr::null_mut(), file.as_ptr(), 4, 0, 0) }, SONG_NULL);
-    assert_eq!(load(&mut engine, &file, 60, 993), SONG_OK);
+    // A song has parts 32 to 63: 32 channels fit, 33 do not.
+    let wide = |channels: usize| write_xm(&song(Rules::FastTracker2, channels, vec![square(32, 1)], vec![pattern(4, &["C-4 01 .. 000"])]));
+    assert_eq!(load(&mut engine, &wide(33), 0), SONG_NO_PARTS);
+    assert!(error().contains("33 channels"), "{}", error());
+    assert_eq!(load(&mut engine, &wide(32), 0), SONG_OK);
+    assert_eq!(load(&mut engine, &file, 1000), SONG_NO_SLOTS);
+    assert_eq!(unsafe { synths_song_load(core::ptr::null_mut(), file.as_ptr(), 4, 0) }, SONG_NULL);
+    assert_eq!(load(&mut engine, &file, 993), SONG_OK);
 }
 
 #[test]
@@ -314,7 +318,7 @@ fn loading_another_song_or_unloading_clears_the_first_away() {
     let mut engine = playing(&write_mod(&tune(Rules::ProTracker)));
     render(&mut engine, 5000, 256);
     assert!(engine.active_voices() > 0);
-    assert_eq!(load(&mut engine, &write_xm(&tune(Rules::FastTracker2)), 0, 0), SONG_OK);
+    assert_eq!(load(&mut engine, &write_xm(&tune(Rules::FastTracker2)), 0), SONG_OK);
     assert_eq!(engine.active_voices(), 0);
     assert_eq!(position(&engine)[0], STATE_STOPPED);
     engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
@@ -325,7 +329,7 @@ fn loading_another_song_or_unloading_clears_the_first_away() {
     let (l, _) = render(&mut engine, 5000, 256);
     assert!(l[2000..].iter().all(|x| x.abs() < 1e-4));
     // A reset stops the song and takes it back to the start.
-    assert_eq!(load(&mut engine, &write_mod(&tune(Rules::ProTracker)), 0, 0), SONG_OK);
+    assert_eq!(load(&mut engine, &write_mod(&tune(Rules::ProTracker)), 0), SONG_OK);
     engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
     render(&mut engine, 882 * 14, 256);
     engine.reset();
@@ -465,4 +469,30 @@ fn a_part_can_pan_as_fasttracker_did() {
     // Equal power, as it always was: the cosine and sine of 67.5 degrees.
     assert!(near(sides(0.0, 0.5), (0.3827, 0.9239)), "{:?}", sides(0.0, 0.5));
     assert!(near(sides(0.0, 0.0), (0.7071, 0.7071)));
+}
+
+#[test]
+fn a_song_leaves_the_hosts_own_parts_alone() {
+    use synths_core::params::{AMP_SUSTAIN, VOLUME};
+    let mut engine = Engine::new(SR);
+    // The host has a sound of its own on part 3, with settings of its own.
+    engine.set_param(3, VOLUME, 0.8);
+    engine.set_param(3, AMP_SUSTAIN, 0.6);
+    let before: Vec<f32> = (0..32u16).flat_map(|part| (0..128).map(move |id| (part, id))).map(|(part, id)| engine.param(part as usize, id)).collect();
+    assert_eq!(load(&mut engine, &write_mod(&tune(Rules::ProTracker)), 0), SONG_OK);
+    engine.push(Event::note_on(0.0, 3, 77, 60.0, 1.0));
+    engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+    render(&mut engine, 882 * 8, 256);
+    engine.push(Event::song(0.0, SONG_VOLUME, 0.3, 0.0));
+    engine.push(Event::song(0.0, SONG_SEEK, 0.0, 4.0));
+    render(&mut engine, 882 * 8, 256);
+    engine.push(Event::song(0.0, SONG_STOP, 0.0, 0.0));
+    render(&mut engine, 4000, 256);
+    // The host's note is still held, alone, and nothing of parts 0 to 31 changed.
+    assert_eq!(engine.active_voices(), 1);
+    let after: Vec<f32> = (0..32u16).flat_map(|part| (0..128).map(move |id| (part, id))).map(|(part, id)| engine.param(part as usize, id)).collect();
+    assert!(before == after);
+    assert!((engine.param(32, VOLUME) - 0.3 * CHANNEL_GAIN).abs() < 1e-6);
+    unsafe { synths_song_unload(&mut *engine) };
+    assert_eq!(engine.active_voices(), 1);
 }

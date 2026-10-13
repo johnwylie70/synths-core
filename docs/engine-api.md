@@ -107,7 +107,7 @@ uint32_t       synths_notes_read(const SynthsEngine *engine, uint32_t part, uint
 
 int32_t        synths_song_file(const uint8_t *name, uint32_t name_len, const uint8_t *data, uint32_t len);
 int32_t        synths_song_load(SynthsEngine *engine, const uint8_t *data, uint32_t len,
-                                uint32_t first_part, uint32_t first_slot);
+                                uint32_t first_slot);
 const uint8_t *synths_song_error(void);
 void           synths_song_unload(SynthsEngine *engine);
 uint32_t       synths_song_info(const SynthsEngine *engine, uint32_t *out);
@@ -289,11 +289,11 @@ In WebAssembly `out` must be inside the module's memory: get it once with
 These load a tracker song and read where it is; playing it is done with the
 `song` event. See [Songs](#songs) for the whole of it.
 
-**`synths_song_load(engine, data: *const u8, len, first_part, first_slot) -> i32`**
+**`synths_song_load(engine, data: *const u8, len, first_slot) -> i32`**
 Load a song from the bytes of a file: a MOD, an XM, or one of our own JSON
 songs (`docs/song-format.md`). The engine works out which. The song's
-channels take the parts from `first_part` on, one each, and its samples the
-sample slots from `first_slot` on; a song already loaded is unloaded first.
+channels take parts 32 to 63, one each, and its samples the sample slots
+from `first_slot` on; a song already loaded is unloaded first.
 The song is then ready and stopped. Returns one of:
 
 | result | meaning |
@@ -302,7 +302,7 @@ The song is then ready and stopped. Returns one of:
 | `SONG_NULL -1` | A null pointer. |
 | `SONG_BAD -2` | Not a song the engine knows, or too damaged to load. |
 | `SONG_MISSING_FILE -3` | A JSON song names a sample file that was not given with `synths_song_file`. |
-| `SONG_NO_PARTS -4` | The song has more channels than there are parts from `first_part` on. |
+| `SONG_NO_PARTS -4` | The song has more than 32 channels. |
 | `SONG_NO_SLOTS -5` | The song has more samples than there are slots from `first_slot` on. |
 
 It copies what it needs: `data` can be freed afterwards. It allocates, so it
@@ -992,7 +992,10 @@ quirks included. Our own songs say which they want.
 ### What a song takes over
 
 - **Parts.** Each channel of the song has a part to itself: channel 0 is
-  `first_part`, channel 1 the next, and so on. Loading sets those parts up to
+  part 32, channel 1 is part 33, and so on up to part 63. Parts 0 to 31 are
+  the host's own: no song ever changes them or their voices, whether it is
+  loaded, played, sought, stopped or unloaded, so a game can play its sound
+  effects over a song. Loading sets those parts up to
   play samples as they are: `volume` 0.5, `pan` 0, the amp envelope full on
   at once and gone at once (`amp.attack`, `amp.decay` and `amp.release` 0,
   `amp.sustain` 1), `velocity` 0, `filter.type` off, and `pan.law` to suit
@@ -1008,14 +1011,15 @@ quirks included. Our own songs say which they want.
 - **The sequencer.** There is one song at a time: loading another unloads the
   first.
 
-The host can go on playing notes of its own on other parts while a song
+The host can go on playing notes of its own on parts 0 to 31 while a song
 plays. It should leave the song's parts and slots alone, and not use handles
 1 to the number of channels on the parts it has given to synth patches (see
 below).
 
-A MOD has 31 samples and 4 to 32 channels; an XM can have 64 channels and
-several samples for each of up to 128 instruments. `SONG_NO_PARTS` and
-`SONG_NO_SLOTS` say when a song does not fit where it was put.
+A MOD has 31 samples and 4 to 32 channels; an XM can have more channels
+than 32 (few do), and several samples for each of up to 128 instruments.
+`SONG_NO_PARTS` says a song has too many channels to play, and
+`SONG_NO_SLOTS` that its samples do not fit from `first_slot` on.
 
 ### Steering the song
 
@@ -1029,7 +1033,7 @@ frame. `a` says what; `x` and `y` are its numbers.
 | 2 | pause | | | Hold every sample where it is, in silence, until `play`. |
 | 3 | seek | order | row | Go to a row of a place in the order. The song's voices are cut. If the song is playing it carries on from there on this frame; if not, that is where `play` will start. Numbers past the end are brought back to the last order and row. |
 | 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and leaves the last notes to ring. |
-| 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's parts to half of this, sliding there over 20 milliseconds. |
+| 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's parts, and no others, to half of this, sliding there over 20 milliseconds. |
 | 6 | patch part | instrument, from 1 | part | Say which part plays an instrument that is a synth patch. |
 
 In JavaScript, with the `event` function of [A host loop](#a-host-loop):
@@ -1458,7 +1462,7 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
   which does nothing unless it is written. Returning true has `advance`
   called at once, on that same frame, whenever it was next due.
 - The engine's own song player is such a sequencer:
-  `synths_core::song_player::install(&mut engine, song, first_part, first_slot, raw)`
+  `synths_core::song_player::install(&mut engine, song, FIRST_PART, first_slot, raw)`
   is what `synths_song_load` does once it has read the file.
 - A sequencer keeps being called while the engine sleeps, and wakes it by
   starting a voice.

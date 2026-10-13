@@ -116,7 +116,7 @@ fn render(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let code = unsafe { synths_song_load(&mut *engine, data.as_ptr(), data.len() as u32, 0, 0) };
+    let code = unsafe { synths_song_load(&mut *engine, data.as_ptr(), data.len() as u32, 0) };
     if code != SONG_OK {
         let why = unsafe { std::ffi::CStr::from_ptr(synths_song_error().cast()) }.to_string_lossy().to_string();
         return Err(format!("the engine would not load it ({code}): {why}").into());

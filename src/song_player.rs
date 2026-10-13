@@ -38,6 +38,11 @@ pub const INFO_SIZE: usize = 8;
 /// one synth note at full volume.
 pub const CHANNEL_GAIN: f32 = 0.5;
 
+/// The part a song's first channel plays on. A song has parts 32 to 63, a
+/// channel each; parts 0 to 31 are the host's own, and a song never touches
+/// them.
+pub const FIRST_PART: u16 = 32;
+
 /// A part number that means "no part": the instrument is not heard.
 pub const NO_PART: u16 = 0xFFFF;
 

@@ -22,7 +22,7 @@ pub const SONG_NULL: i32 = -1;
 pub const SONG_BAD: i32 = -2;
 /// A sample file the song names has not been given with `synths_song_file`.
 pub const SONG_MISSING_FILE: i32 = -3;
-/// Too many channels for the parts from `first_part` on.
+/// More than 32 channels: a song's channels play on parts 32 to 63.
 pub const SONG_NO_PARTS: i32 = -4;
 /// Too many samples for the slots from `first_slot` on.
 pub const SONG_NO_SLOTS: i32 = -5;
@@ -65,16 +65,16 @@ pub unsafe extern "C" fn synths_song_file(name: *const u8, name_len: u32, data: 
 }
 
 /// Load a song from the bytes of a file: a MOD, an XM, or one of our own
-/// JSON songs. Its channels take the parts from `first_part` on (their
-/// volume, pan, amp envelope and filter are set for playing samples as they
-/// are) and its samples the slots from `first_slot` on; a song already
-/// loaded is unloaded first. The song is ready and stopped: send a `song`
+/// JSON songs. Its channels take parts 32 to 63, one each (their volume,
+/// pan, amp envelope and filter are set for playing samples as they are),
+/// and its samples the slots from `first_slot` on; a song already loaded is
+/// unloaded first. The song is ready and stopped: send a `song`
 /// event to play it. Returns 0, or a negative number (see the document).
 ///
 /// # Safety
 /// `engine` must be a live engine or null; `data` must point to `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, len: u32, first_part: u32, first_slot: u32) -> i32 {
+pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, len: u32, first_slot: u32) -> i32 {
     let files = FILES.lock().map(|mut f| core::mem::take(&mut *f)).unwrap_or_default();
     let (Some(engine), false) = (engine.as_mut(), data.is_null()) else { return fail(SONG_NULL, "a null pointer".to_string()) };
     let data = core::slice::from_raw_parts(data, len as usize);
@@ -89,12 +89,13 @@ pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, 
         Err(e @ LoadError::MissingSample(_)) => return fail(SONG_MISSING_FILE, e.to_string()),
         Err(e) => return fail(SONG_BAD, e.to_string()),
     };
-    if first_part > u16::MAX as u32 || first_slot > u16::MAX as u32 {
-        return fail(SONG_NO_PARTS, "there is no such part or slot".to_string());
+    if first_slot > u16::MAX as u32 {
+        return fail(SONG_NO_SLOTS, "there is no such slot".to_string());
     }
-    match song_player::install(engine, song, first_part as u16, first_slot as u16, own.is_none()) {
+    let channels = song.channels();
+    match song_player::install(engine, song, song_player::FIRST_PART, first_slot as u16, own.is_none()) {
         Ok(_) => fail(SONG_OK, String::new()),
-        Err(InstallError::Parts) => fail(SONG_NO_PARTS, "the song has more channels than there are parts left".to_string()),
+        Err(InstallError::Parts) => fail(SONG_NO_PARTS, format!("the song has {channels} channels, and the engine plays at most 32")),
         Err(InstallError::Slots) => fail(SONG_NO_SLOTS, "the song has more samples than there are slots left".to_string()),
     }
 }
