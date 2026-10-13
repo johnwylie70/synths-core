@@ -8,7 +8,7 @@
 mod replayer_support;
 use replayer_support::*;
 use std::path::PathBuf;
-use synths_core::replayer::Player;
+use synths_core::replayer::{Player, Source, Start};
 use synths_core::song::{load_module, Song};
 
 fn test_dir(kind: &str) -> Option<PathBuf> {
@@ -20,6 +20,7 @@ fn test_dir(kind: &str) -> Option<PathBuf> {
 /// the channels `heard` picks.
 fn render_some(song: &Song, seconds: f64, heard: impl Fn(usize) -> bool) -> (Vec<f32>, Vec<f32>) {
     let mut player = Player::new(song, RATE);
+    player.set_repeat(false);
     let mut mixer = Mixer::new(song, RATE);
     mixer.muted = (0..song.channels()).map(|c| !heard(c)).collect();
     let most = (seconds * RATE) as usize;
@@ -31,6 +32,28 @@ fn render_some(song: &Song, seconds: f64, heard: impl Fn(usize) -> bool) -> (Vec
 
 fn render(song: &Song, seconds: f64) -> (Vec<f32>, Vec<f32>) {
     render_some(song, seconds, |_| true)
+}
+
+/// Everything the replayer asks of the voices until the song ends, or for
+/// `seconds` if it is to go round and round.
+fn instructions(song: &Song, seconds: f64, repeat: bool) -> Vec<Logged> {
+    let mut player = Player::new(song, RATE);
+    player.set_repeat(repeat);
+    let mut mixer = Mixer::new(song, RATE);
+    while (repeat || !player.ended()) && (mixer.left.len() as f64) < seconds * RATE {
+        play(song, &mut player, &mut mixer, 1024);
+    }
+    mixer.log
+}
+
+/// The samples started, in order, each with the offset it started at.
+fn starts(log: &[Logged]) -> Vec<(usize, u32)> {
+    log.iter()
+        .filter_map(|l| match l.command {
+            Command::Play(Start { source: Source::Sample(s), offset, .. }) => Some((s, offset)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The windows the two sides are compared in: `WINDOW` frames long, one
@@ -134,6 +157,18 @@ enum Expect {
     /// The module cancels itself out when played correctly. A click where a
     /// volume or panning changes is allowed, as the tests themselves say.
     Silent,
+    /// These samples must be started, in this order, and no others. The
+    /// modules that say "success" or count aloud are checked this way.
+    Starts(&'static [usize]),
+    /// As `Starts`, for a module that never ends: its first starts.
+    FirstStarts(&'static [usize]),
+    /// The samples in the first list are the voice saying "success" and at
+    /// least one must be started; those in the second say "fail" and none may be.
+    Says(&'static [usize], &'static [usize]),
+    /// Samples must be started at exactly these offsets, and no more.
+    Offsets(&'static [u32]),
+    /// The second channel must always play at this multiple of the first's rate.
+    InTune(usize, usize, f64),
     /// The module is judged by listening (a voice says "success", say), or
     /// its recording does not line up; a machine cannot mark it.
     ByEar,
@@ -160,7 +195,7 @@ use Expect::*;
 /// The MOD tests, https://wiki.openmpt.org/Development:_Test_Cases/MOD
 const MOD_CASES: &[Case] = &[
     // Two channels an octave apart that must stay in tune.
-    case("AmigaLimitsFinetune.mod", ByEar),
+    case("AmigaLimitsFinetune.mod", InTune(1, 3, 2.0)),
     case("ArpWraparound.mod", SidesRoughPitch),
     // The recording is of XMPlay, which leaves out one retrigger (on the
     // first tick of the row with the delay) that ProTracker makes.
@@ -176,10 +211,10 @@ const MOD_CASES: &[Case] = &[
     case("PTStoppedSwap.mod", Sides),
     case("PTSwapEmpty.mod", Sides),
     case("PTSwapNoLoop.mod", Sides),
-    // A voice says "success".
-    case("PatLoop-Break.mod", ByEar),
+    // The voice starts to say "success" twice and is cut off, then says it.
+    case("PatLoop-Break.mod", Starts(&[0, 0, 0])),
     case("PatternDelaysRetrig.mod", Sides),
-    case("PatternJump.mod", ByEar),
+    case("PatternJump.mod", Says(&[1], &[0])),
     case("PortaSmpChange.mod", Sides),
     // Both sides are this player's and are not meant to match throughout.
     case("PortaSwapPT.mod", ByEar),
@@ -222,14 +257,16 @@ const XM_CASES: &[Case] = &[
     case("NoteOffVolume.xm", Sides),
     case("Off-Porta.xm", Sides),
     case("OffDelay.xm", Sides),
-    case("OffsetRange.xm", ByEar),
-    // The word "correct" is heard once.
-    case("OffsetWithoutNote.xm", ByEar),
+    // Only the sample longer than the offset plays, once on each channel.
+    case("OffsetRange.xm", Starts(&[0, 0])),
+    // The word "correct" is heard once (the first start is at no volume);
+    // the later notes are past the end of the sample and start nothing.
+    case("OffsetWithoutNote.xm", Offsets(&[0x2200, 0x2200])),
     case("PanMemory.xm", ChannelsAndPanning(0, 1)),
     // One channel's panning jumps (an instrument number) where the other's
     // glides (a panning command), so two ticks of it do not quite cancel.
     Case { allow: 0.05, ..case("PanMemory2.xm", Silent) },
-    case("PanOff.xm", ByEar),
+    case("PanOff.xm", Stereo(&[0])),
     case("PanSlideMem.xm", Silent),
     case("PanSlideZero.xm", Stereo(&[0])),
     case("PanSustainRelease.xm", Silent),
@@ -240,10 +277,13 @@ const XM_CASES: &[Case] = &[
     case("PatLoop-Jumps.xm", Sides),
     // FT2 itself plays this one differently every time.
     case("PatLoop-Nested.xm", ByEar),
-    case("PatLoop-Overflow.xm", ByEar),
+    case("PatLoop-Overflow.xm", Says(&[0], &[1])),
+    // "Fail" is started three times, each a tick before it is silenced (the
+    // "bit of quiet noise" the test describes), and then "success" is said.
     case("PatLoop-Various.xm", ByEar),
-    case("PatLoop-Weird.xm", ByEar),
-    case("PatternDelay-NoteDelay.xm", ByEar),
+    // The voice counts "1 4 2" twice and then "3 4 2" for ever.
+    case("PatLoop-Weird.xm", FirstStarts(&[0, 3, 1, 0, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1])),
+    case("PatternDelay-NoteDelay.xm", Sides),
     // The second pattern tests a ModPlug effect that FT2 does not have.
     Case { until: 0.95, ..case("PatternDelays.xm", Sides) },
     case("PatternDelaysRetrig.xm", Sides),
@@ -355,6 +395,59 @@ fn judge(case: &Case, song: &Song) -> Result<String, String> {
             } else {
                 Err(format!("should be silent, but {:.1}% of it is not", heard * 100.0))
             }
+        }
+        Starts(want) | FirstStarts(want) => {
+            let repeat = matches!(case.expect, FirstStarts(_));
+            let got: Vec<usize> = starts(&instructions(song, 20.0, repeat)).iter().map(|s| s.0).collect();
+            let seen = if matches!(case.expect, FirstStarts(_)) { &got[..want.len().min(got.len())] } else { &got[..] };
+            if seen == want {
+                Ok(format!("samples {want:?} in order"))
+            } else {
+                Err(format!("samples started were {seen:?}, not {want:?}"))
+            }
+        }
+        Says(success, fail) => {
+            let got: Vec<usize> = starts(&instructions(song, 20.0, false)).iter().map(|s| s.0).collect();
+            if got.iter().any(|s| fail.contains(s)) {
+                Err(format!("it says \"fail\": samples started were {got:?}"))
+            } else if !got.iter().any(|s| success.contains(s)) {
+                Err(format!("it never says \"success\": samples started were {got:?}"))
+            } else {
+                Ok("says \"success\"".to_string())
+            }
+        }
+        Offsets(want) => {
+            let got: Vec<u32> = starts(&instructions(song, 20.0, false)).iter().map(|s| s.1).collect();
+            if got == want {
+                Ok(format!("offsets {want:?}"))
+            } else {
+                Err(format!("offsets were {got:?}, not {want:?}"))
+            }
+        }
+        InTune(a, b, ratio) => {
+            // Each channel's rate after every frame on which either changed.
+            let log = instructions(song, 20.0, false);
+            let mut rates = [0.0f64; 64];
+            let mut checked = 0;
+            for (i, l) in log.iter().enumerate() {
+                match l.command {
+                    Command::Play(start) => rates[l.channel] = start.rate,
+                    Command::Rate(rate) => rates[l.channel] = rate,
+                    _ => continue,
+                }
+                let last_of_frame = log.get(i + 1).is_none_or(|next| next.frame != l.frame);
+                if last_of_frame && rates[a] > 0.0 && rates[b] > 0.0 {
+                    checked += 1;
+                    let got = rates[b] / rates[a];
+                    if (got / ratio - 1.0).abs() > 0.005 {
+                        return Err(format!("at {:.2} seconds the rates are {got:.4} apart, not {ratio}", l.frame as f64 / RATE));
+                    }
+                }
+            }
+            if checked == 0 {
+                return Err("the channels never play together".to_string());
+            }
+            Ok(format!("in tune at {checked} moments"))
         }
         ByEar | Fails(_) => unreachable!(),
     }

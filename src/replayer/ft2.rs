@@ -248,7 +248,7 @@ pub struct Replayer {
     loop_back: bool,
     delay_asked: u8,
     delay_left: u8,
-    visited: Visited,
+    pub(crate) visited: Visited,
     shown: Position,
 }
 
@@ -323,9 +323,13 @@ impl Replayer {
         self.delay_asked = 0;
         self.delay_left = 0;
         self.visited.clear();
+        self.visited.stopped = false;
     }
 
     pub fn tick(&mut self, song: &Song, frame: u32, sample_rate: f64, voices: &mut dyn Voices) {
+        if self.visited.stopped {
+            return;
+        }
         for ch in &mut self.channels {
             if core::mem::take(&mut ch.volume_due) {
                 ch.status |= VOLUME;
@@ -337,7 +341,10 @@ impl Replayer {
             self.counter = self.speed;
         }
         if first && self.delay_left == 0 {
-            self.visited.visit(self.order, self.row);
+            let looping = self.channels.iter().any(|ch| ch.loop_count > 0);
+            if !self.visited.visit(self.order, self.row, looping) {
+                return;
+            }
             self.shown.order = self.order as u16;
             self.shown.pattern = song.orders.get(self.order).copied().unwrap_or(0);
             self.shown.row = self.row as u16;
@@ -803,7 +810,7 @@ impl Replayer {
                 } else {
                     // Speed 0 stops FT2 moving on; call that the song's end.
                     if param == 0 {
-                        self.visited.loops += 1;
+                        self.visited.end();
                     }
                     self.speed = param as u16;
                     self.counter = param as u16;

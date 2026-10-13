@@ -96,7 +96,7 @@ pub struct Replayer {
     /// A pattern delay asked for on this row, and the repeats still to go.
     delay_asked: u8,
     delay_left: u8,
-    visited: Visited,
+    pub(crate) visited: Visited,
     shown: Position,
 }
 
@@ -147,9 +147,13 @@ impl Replayer {
         self.delay_asked = 0;
         self.delay_left = 0;
         self.visited.clear();
+        self.visited.stopped = false;
     }
 
     pub fn tick(&mut self, song: &Song, frame: u32, voices: &mut dyn Voices) {
+        if self.visited.stopped {
+            return;
+        }
         if let Some(tempo) = self.next_tempo.take() {
             self.tempo = tempo;
         }
@@ -212,7 +216,10 @@ impl Replayer {
     }
 
     fn play_row(&mut self, song: &Song, frame: u32, voices: &mut dyn Voices) {
-        self.visited.visit(self.order, self.row);
+        let looping = self.channels.iter().any(|ch| ch.loop_count > 0);
+        if !self.visited.visit(self.order, self.row, looping) {
+            return;
+        }
         self.shown.order = self.order as u16;
         self.shown.pattern = song.orders.get(self.order).copied().unwrap_or(0);
         self.shown.row = self.row as u16;
@@ -332,7 +339,7 @@ impl Replayer {
             fx::SPEED => {
                 if ch.param == 0 {
                     // F00 stops the song in ProTracker.
-                    self.visited.loops += 1;
+                    self.visited.end();
                 } else if ch.param < 32 {
                     self.speed = ch.param as u16;
                 } else {

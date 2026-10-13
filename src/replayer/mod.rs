@@ -122,29 +122,42 @@ pub struct Position {
 pub(crate) struct Visited {
     bits: Vec<u64>,
     pub loops: u32,
+    /// Play the song round and round (as trackers do), or stop at its end.
+    pub repeat: bool,
+    /// The song reached its end with `repeat` off, and plays no more.
+    pub stopped: bool,
 }
 
 impl Visited {
     const ROWS: usize = crate::song::MAX_ROWS;
 
     pub fn new(orders: usize) -> Visited {
-        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0 }
+        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false }
     }
 
     pub fn clear(&mut self) {
         self.bits.fill(0);
     }
 
-    /// Notes that a row is being played. Coming to a row for the second time
-    /// counts one more loop and starts the record afresh.
-    pub fn visit(&mut self, order: usize, row: usize) {
+    /// Counts the song as having ended (a command stopped it).
+    pub fn end(&mut self) {
+        self.loops += 1;
+        self.stopped = !self.repeat;
+    }
+
+    /// Notes that a row is about to be played, and says whether to play it.
+    /// Coming to a row for the second time counts one more loop and starts
+    /// the record afresh, unless a pattern loop is under way (`looping`):
+    /// that plays rows again without the song having ended.
+    pub fn visit(&mut self, order: usize, row: usize, looping: bool) -> bool {
         let i = order * Self::ROWS + row.min(Self::ROWS - 1);
-        let Some(word) = self.bits.get(i / 64).copied() else { return };
-        if word & (1 << (i % 64)) != 0 {
-            self.loops += 1;
+        let Some(word) = self.bits.get(i / 64).copied() else { return true };
+        if word & (1 << (i % 64)) != 0 && !looping {
+            self.end();
             self.clear();
         }
         self.bits[i / 64] |= 1 << (i % 64);
+        !self.stopped
     }
 
     /// Forgets rows `from..=to` of an order: a pattern loop is about to play
@@ -231,10 +244,21 @@ impl Player {
     }
 
     /// True once the song has played through to a row it had already
-    /// played, or to a command that stops it. Playing carries on regardless
-    /// (most songs loop); stop calling `process` to stop.
+    /// played, or to a command that stops it. Unless `set_repeat(false)` was
+    /// called, playing carries on regardless, as most songs are made to loop.
     pub fn ended(&self) -> bool {
         self.position().loops > 0
+    }
+
+    /// Chooses what happens at the song's end: carry on round (the default),
+    /// or stop before the first row that would be played a second time. A
+    /// stopped player sends nothing more, and leaves the voices as they are
+    /// so that the last notes can ring; `seek` starts it again.
+    pub fn set_repeat(&mut self, repeat: bool) {
+        match &mut self.core {
+            Core::Pt(r) => r.visited.repeat = repeat,
+            Core::Ft2(r) => r.visited.repeat = repeat,
+        }
     }
 }
 

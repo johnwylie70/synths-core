@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut player = Player::new(&song, RATE as f64);
+    player.set_repeat(false);
     let mut mixer = mixer::Mixer::new(&song, RATE as f64);
     // Play to the song's end, then a little more for the last notes to ring.
     let most = (limit * RATE as f64) as usize;
