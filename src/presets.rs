@@ -36,19 +36,20 @@ pub const VOICE_PRESETS: &[VoicePreset] = &[
     VoicePreset {
         name: "monster",
         help: "Huge and deep: seven semitones lower, with a growl and a little room.",
-        values: &[("fx.pitch", -7.0), ("fx.drive", 0.25), ("send.reverb", 0.25), ("reverb.size", 0.7), ("reverb.damping", 0.6)],
+        values: &[("fx.pitch", -7.0), ("fx.drive", 0.25), ("send.reverb", 0.3), ("reverb.size", 0.7), ("reverb.damping", 0.6)],
     },
     VoicePreset {
         name: "cave",
-        help: "Far inside a cave: long echoes and a very big room.",
+        help: "Far inside a cave: long echoes and an enormous, dark space.",
         values: &[
             ("send.delay", 0.5),
-            ("send.reverb", 0.7),
+            ("send.reverb", 0.6),
             ("delay.time", 0.38),
             ("delay.feedback", 0.55),
             ("delay.tone", 2500.0),
-            ("reverb.size", 0.92),
-            ("reverb.damping", 0.3),
+            ("reverb.type", 3.0),
+            ("reverb.size", 0.4),
+            ("reverb.damping", 0.55),
         ],
     },
     VoicePreset {

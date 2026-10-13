@@ -203,7 +203,7 @@ pub const KINDS: [Kind; 5] = [
         bass: 1.0,
         drift: 0.00002,
         drift_hz: 0.8,
-        gain: 1.41,
+        gain: 0.9,
     },
 ];
 
