@@ -432,6 +432,11 @@ impl Voice {
             aim(&mut self.g, &mut self.dg, g, jump || was_off, inv_len);
             // Resonance 0..1 is a Q of 0.5 (no peak) up to about 45 (it rings).
             self.k = 2.0 * (-6.5 * p[RESONANCE]).exp2();
+            if self.filter_24 {
+                // The two stages share the resonance: each has the square
+                // root of the Q, so together they peak as high as one would.
+                self.k = self.k.sqrt();
+            }
             if was_off {
                 self.filters = [[Svf::default(); 2]; 2];
             }
@@ -575,7 +580,7 @@ impl Voice {
                 let buf: &mut [f32] = if side == 0 { &mut *a } else { &mut *b };
                 self.g = self.filters[side][0].process(buf, g, dg, k, kind);
                 if self.filter_24 {
-                    self.filters[side][1].process(buf, g, dg, core::f32::consts::SQRT_2, kind);
+                    self.filters[side][1].process(buf, g, dg, k, kind);
                 }
             }
         }

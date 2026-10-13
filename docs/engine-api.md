@@ -609,8 +609,10 @@ number: it is set with `synths_macro_set`.
   that grows with the resonance).
 - **`filter.resonance`** `r` gives a Q of `0.5 * 2^(6.5 * r)`: 0.5 (no peak
   at all) at 0, 1.4 at 0.23, about 45 at 1. It rings but does not
-  oscillate by itself. With `filter.slope` 24 dB a second stage with a Q of
-  0.707 follows the first.
+  oscillate by itself. With `filter.slope` 24 dB there are two stages, one
+  after the other, each with the square root of that Q, so that together
+  they peak exactly as high at the cutoff as the 12 dB filter does (and
+  with no resonance are 6 dB down there, as it is).
 - **Envelope times** are in seconds and exact to the frame. `curve` 0 gives
   straight lines; towards 1 each stage moves quickly at first and then
   slowly. A sustain of 0 ends the voice when the decay finishes, with no

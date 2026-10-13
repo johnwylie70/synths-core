@@ -105,3 +105,24 @@ fn the_filter_stays_stable_when_the_cutoff_jumps_about() {
     // It rings (that is what full resonance does) but it does not run away.
     assert!(loudest < 64.0, "{loudest}");
 }
+
+#[test]
+fn the_steeper_slope_resonates_as_strongly() {
+    // Both of its stages ring and share the resonance, so the peak is as
+    // high as the 12 dB filter's, not one stage's peak dulled by the other.
+    for res in [0.0, 0.4, 0.7, 0.9] {
+        let one = gain(1.0, 0.0, 1000.0, res, 1000.0);
+        let two = gain(1.0, 1.0, 1000.0, res, 1000.0);
+        assert!((one - two).abs() < 0.5, "resonance {res}: {one} dB and {two} dB at the cutoff");
+    }
+    // It is still flat below, and still falls 24 dB an octave above.
+    assert!(gain(1.0, 1.0, 1000.0, 0.7, 60.0).abs() < 0.5);
+    let step = gain(1.0, 1.0, 500.0, 0.7, 4000.0) - gain(1.0, 1.0, 500.0, 0.7, 8000.0);
+    assert!((step - 24.0).abs() < 3.0, "{step}");
+    // The band-pass and the high-pass share it out the same way.
+    for kind in [2.0, 3.0] {
+        let one = gain(kind, 0.0, 1000.0, 0.6, 1000.0);
+        let two = gain(kind, 1.0, 1000.0, 0.6, 1000.0);
+        assert!((one - two).abs() < 0.5, "type {kind}: {one} dB and {two} dB");
+    }
+}
