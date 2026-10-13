@@ -31,8 +31,9 @@ pub enum Source {
 pub struct Start {
     pub source: Source,
     /// The frame of the sample to begin at. At or past the end of what the
-    /// sample plays, a looped sample carries on inside its loop and an
-    /// unlooped one is silent.
+    /// sample plays (the end of its loop, or of the sample if it has none),
+    /// a looped sample begins at the start of its loop and an unlooped one
+    /// is silent.
     pub offset: u32,
     /// Frames of the sample to play each second (see `Voices::set_rate`).
     pub rate: f64,

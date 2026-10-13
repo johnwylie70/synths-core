@@ -84,3 +84,73 @@ pub fn busy_song(rules: synths_core::song::Rules) -> synths_core::song::Song {
     }
     s
 }
+
+/// What the replayer asked of the voices on each of the first `n` ticks:
+/// the channel and the command, in the order they came.
+pub fn run_ticks(song: &synths_core::song::Song, n: usize) -> Vec<Vec<(usize, Command)>> {
+    let mut player = synths_core::replayer::Player::new(song, RATE);
+    let mut mixer = Mixer::new(song, RATE);
+    (0..n)
+        .map(|_| {
+            let before = mixer.log.len();
+            player.tick(song, 0, &mut mixer);
+            mixer.log[before..].iter().map(|l| (l.channel, l.command)).collect()
+        })
+        .collect()
+}
+
+/// A channel's (rate, volume, pan) after each tick, carried forward from
+/// tick to tick; all 0 before its first note.
+pub fn track(ticks: &[Vec<(usize, Command)>], channel: usize) -> Vec<(f64, f32, f32)> {
+    let mut now = (0.0, 0.0, 0.0);
+    ticks
+        .iter()
+        .map(|tick| {
+            for (c, command) in tick {
+                if *c != channel {
+                    continue;
+                }
+                match *command {
+                    Command::Play(s) => now = (s.rate, s.volume, s.pan),
+                    Command::Rate(r) => now.0 = r,
+                    Command::Volume(v, _) => now.1 = v,
+                    Command::Pan(p, _) => now.2 = p,
+                    Command::Stop => now.1 = 0.0,
+                    _ => {}
+                }
+            }
+            now
+        })
+        .collect()
+}
+
+/// The ticks on which a channel started a sample, with the sample and offset.
+pub fn plays(ticks: &[Vec<(usize, Command)>], channel: usize) -> Vec<(usize, usize, u32)> {
+    let mut out = Vec::new();
+    for (t, tick) in ticks.iter().enumerate() {
+        for (c, command) in tick {
+            if let (true, Command::Play(s)) = (*c == channel, command) {
+                if let synths_core::replayer::Source::Sample(i) = s.source {
+                    out.push((t, i, s.offset));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The Amiga period a rate comes from.
+pub fn amiga_period(rate: f64) -> u32 {
+    (3_546_894.6 / rate).round() as u32
+}
+
+/// The FastTracker 2 linear period a rate comes from: 64 to the semitone,
+/// falling as the pitch rises, with C-4 (8363 frames a second) at 4608.
+pub fn linear_period(rate: f64) -> i32 {
+    (4608.0 - 768.0 * (rate / 8363.0).log2()).round() as i32
+}
+
+/// A volume from 0 to 1 as the trackers count it, 0 to 64.
+pub fn volume64(v: f32) -> i32 {
+    (v * 64.0).round() as i32
+}

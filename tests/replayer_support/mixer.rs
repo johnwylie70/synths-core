@@ -115,7 +115,7 @@ impl<'a> Mixer<'a> {
                 v.pos = start.offset as f64;
                 if start.offset >= end {
                     match s.loop_range() {
-                        Some((a, b)) => v.pos = a as f64 + ((start.offset - b) % (b - a)) as f64,
+                        Some((a, _)) => v.pos = a as f64,
                         None => v.sample = None,
                     }
                 }
