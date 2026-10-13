@@ -187,7 +187,7 @@ fn the_document_lists_everything_a_sequencer_can_do() {
             assert!(DOC.contains(&format!("`{name}(")), "Voices::{name} is not in the document");
         }
     }
-    assert_eq!(count, 27);
+    assert_eq!(count, 32);
     for text in ["fn advance(&mut self, voices: &mut Voices<'_>) -> u32", "`Sequencer::reset`", "`Engine::set_sequencer("] {
         assert!(DOC.contains(text), "the document no longer says: {text}");
     }
@@ -291,4 +291,29 @@ fn the_document_gives_the_numbers_of_the_arpeggiators() {
     // The examples' packed offsets are the chords they say they are.
     assert_eq!(u32::from_le_bytes([0, 3, 7, 10]), 0x0a070300);
     assert!(DOC.matches("0x0a070300);").count() == 2);
+}
+
+#[test]
+fn the_document_lists_the_patterns_and_the_gate_as_the_engine_has_them() {
+    use synths_core::arp::{NAMED_PATTERNS, PATTERN_SLOTS, PATTERN_STEP_SIZE, MAX_PATTERN, PLAIN_LEVEL, SLIDE_TIME};
+    use synths_core::gate::{MAX_GATE_STEPS, NAMED_GATES};
+    let mut count = 0;
+    for line in include_str!("../src/pattern_abi.rs").lines() {
+        if let Some(rest) = line.strip_prefix("pub unsafe extern \"C\" fn ") {
+            let name = rest.split('(').next().unwrap();
+            count += 1;
+            assert!(DOC.matches(&format!("{name}(")).count() >= 2, "{name} should be in the header and described");
+        }
+    }
+    assert_eq!(count, 4);
+    for (name, steps) in NAMED_PATTERNS {
+        assert!(DOC.contains(&format!("| `{name}` | `{steps}` |")), "the arp pattern {name}");
+    }
+    for (name, steps) in NAMED_GATES {
+        assert!(DOC.contains(&format!("`{name}` (`{steps}`")), "the gate pattern {name}");
+    }
+    assert_eq!((MAX_PATTERN, PATTERN_SLOTS, PATTERN_STEP_SIZE, MAX_GATE_STEPS, PLAIN_LEVEL, SLIDE_TIME), (32, 64, 4, 32, 10, 0.06));
+    for text in ["to 32 steps that goes round", "in one of 64 places", "A step is four bytes", "at two thirds (level 10)", "in 60 ms", "up to 32 steps, each a level from 0 (closed) to 1"] {
+        assert!(DOC.contains(text), "the document no longer says: {text}");
+    }
 }

@@ -124,6 +124,13 @@ uint32_t       synths_zones_flags(const SynthsEngine *engine, uint32_t part);
 uint32_t       synths_zones_read(const SynthsEngine *engine, uint32_t part, SynthsZone *out,
                                  uint32_t capacity);
 
+int32_t        synths_arp_pattern_set(SynthsEngine *engine, uint32_t slot, const uint8_t *steps,
+                                      uint32_t count);
+int32_t        synths_arp_pattern_text(SynthsEngine *engine, uint32_t slot, const uint8_t *pattern,
+                                       uint32_t len);
+int32_t        synths_gate_set(SynthsEngine *engine, uint32_t part, const float *levels, uint32_t count);
+int32_t        synths_gate_text(SynthsEngine *engine, uint32_t part, const uint8_t *pattern, uint32_t len);
+
 uint32_t       synths_scope_read(const SynthsEngine *engine, uint32_t source, float *out, uint32_t frames);
 uint32_t       synths_levels_read(const SynthsEngine *engine, uint32_t source, uint32_t count, float *out);
 uint32_t       synths_notes_read(const SynthsEngine *engine, uint32_t part, uint32_t *out);
@@ -433,163 +440,38 @@ many frames were copied, which is fewer at the end of the sample. This is
 how a host gets a recording out to save it. It works for any sample, and
 must not overlap a render.
 
-#### Arpeggiators
+### Patterns for arpeggios and gates
 
-An arpeggio that asks for more than one voice stepping its own pitch is
-played by an **arpeggiator**: a small player inside the engine that strikes
-and lets go of ordinary notes of the part, under the note's handle, on
-exact frames. An arpeggio is an arpeggiator's as soon as any of the events
-17, 18 or 19 has had a say in it, or its order is 5 or 6. Until then it is
-the voice's own, as above, and nothing about that has changed.
+Both are short lists of steps, and both can be handed over as data or as
+the text a song file has them in, so that one reader decides what the text
+means. They are for the thread that owns the engine, between renders;
+none of them allocates.
 
-The four events take the same `part` and `a` as `arp`: a handle, or 0 for
-the next note that starts on the part.
+**`synths_arp_pattern_set(engine, slot, steps: *const u8, count) -> i32`**
+Put a [pattern](#patterns) of `count` steps (0 to 32), four bytes each, in
+place `slot` (1 to 64) for arpeggios to follow; the `arp_pattern` event
+chooses one. A count of 0 empties the place. An arpeggio that is following
+that place takes the new steps at its next step. Returns 0, -1 for a slot
+that is not 1 to 64, -2 for more than 32 steps, -4 for a null pointer.
 
-**17 `arp_style`**
+**`synths_arp_pattern_text(engine, slot, pattern: *const u8, len) -> i32`**
+The same from the pattern's text, `len` bytes of UTF-8 (no zero byte
+needed): `"1 - 3 2 _ 1 3 5^"`, or the name of a built-in pattern. Returns
+how many steps it has, or -2 if the text is not a pattern (the place is
+then left as it was), -1 and -4 as above.
 
-| field | meaning |
-|---|---|
-| `x` | the gate: how much of its step each note is held before it is let go, 0.05..1. At 1 a note is held until the next is struck. 0 (or less): notes are not struck at all, and the arpeggio is one voice whose pitch jumps. |
-| `y` | octaves, 1..4: the pattern is played through that many octaves, each above the last, before it comes round. |
-| `z` | swing, 0..0.75: every second step is put back by that part of a step (0.33 is a triplet feel). |
-| `b` | accents: how hard each step is struck, four bits a step, the first step in the lowest four. 15 is the note's own velocity, 1 a fifteenth of it, 0 a rest (nothing is struck, and the pattern still moves on). The pattern of accents is as long as its last four bits that are not 0, at most 8 steps, and goes round by itself. 0 in all: every step at full. |
+**`synths_gate_set(engine, part, levels: *const f32, count) -> i32`** Give
+a part's [trance gate](#the-trance-gate) its pattern: `count` levels (0 to
+32), each 0 (closed) to 1 (open); anything else is brought into that.
+`part` 65535 is every part. A count of 0 leaves the gate with open and
+closed by turns. Returns 0, -1 for a part that does not exist, -2 for more
+than 32 levels, -4 for a null pointer.
 
-**18 `arp_beat`** `x` is how many steps there are to a beat of the `tempo`
-parameter (id 224, beats a minute), 0.01..64: 1 is quarter notes, 2
-eighths, 3 eighth-note triplets, 4 sixteenths, 8 thirty-seconds: one over
-the note's length in quarter notes, so a dotted eighth is 1.3333.
-0 (or less) goes back to the rate the `arp` or `arp_notes` event gave. A
-step then lasts `sample_rate * 60 / (tempo * steps)` frames, worked out
-afresh at each step, so a change of `tempo` is taken up at the next step,
-on the frame that step was always going to begin: nothing jumps.
+**`synths_gate_text(engine, part, pattern: *const u8, len) -> i32`** The
+same from text: `"x.x.xx.x"`, or the name of a built-in pattern. Returns
+how many steps it has, or -2 if the text is not a pattern.
 
-**19 `arp_notes`** has the fields of `arp`: `x` the rate, `y` the order,
-`z` how many offsets, `b` the first four (and `arp_more` carries the rest).
-The differences: it does not start the pattern again, and an `x` of 0 leaves
-the rate as it was. Its `z` of 0 takes the arpeggio away, as `arp`'s does.
-
-**20 `arp_step`** For an arpeggio with no clock (a rate below 0, and no
-`arp_beat`): take its next step on this frame. `x` is how long the step is
-to last, in frames, which the gate and the swing are measured against; 0
-means as long as the last one. Something that keeps time itself steps its
-arpeggios this way: the engine's song player does, so that an arpeggio
-keeps to a song's rows whatever the song's tempo does. It needs a handle.
-`macro_tick` does not step an arpeggiator.
-
-To start a note with such an arpeggio, send the arpeggio's events with `a`
-0 and then the `note_on`, all with the same time. `arp` starts a fresh
-arpeggio (it puts back the plain style, one octave, no swing, no accents
-and no beat), so if it is used it goes first; `arp_notes` can stand in its
-place. Sixteenths at the tempo, up through two octaves, each note held for
-half its step, on a C minor seventh:
-
-```js
-event(now, 19 /* arp_notes */, 0, 0, 0, 0 /* up */, 4, 0x0a070300);  // 0, 3, 7, 10
-event(now, 17 /* arp_style */, 0, 0, 0.5, 2, 0, 0);                  // gate, octaves, swing, accents
-event(now, 18 /* arp_beat */,  0, 0, 4);                             // four steps to a beat
-event(now, 1  /* note_on */,   0, 7, 48, 0.8);                       // handle 7, C
-```
-
-How an arpeggiator behaves:
-
-- **It is the note.** The `note_on` that takes a waiting arpeggio starts
-  the arpeggiator, with that note as the note the chord is built on, its
-  velocity and its handle. `note_off` (by handle, or with handle 0 by that
-  note) lets go of whatever it has sounding and ends it. So do
-  `voice_kill` and `all_notes_off`.
-- **Steps.** The first step sounds on the frame of the `note_on`. With a
-  clock (a rate, or beats), each step begins `floor` of the sum of the step
-  lengths so far after it: at four steps to a beat, 120 beats a minute and
-  48 kHz, every 6000 frames exactly. The size of the blocks rendered
-  changes nothing.
-- **Struck notes.** At each step the notes of the last step that are still
-  held are let go and the step's note is struck, with the note's velocity
-  (times the step's accent). It is held for `gate` times the length of
-  the step and then let go, so its release sounds through the rest of the
-  step and on under the next ones. A struck note is a `note_on` like any
-  other: it has the part's patch as it is at that moment, takes unison
-  voices, goes through a [sample map](#sample-maps), and in mono mode
-  re-uses the part's one voice.
-- **Swing.** Every second step (the 2nd, 4th...) begins `swing` of a step
-  late, and is that much shorter; the step before it is that much longer.
-  The gate is a part of the step as it turns out.
-- **Octaves.** With `y` octaves the pattern is the chord's notes, then the
-  same an octave up, and so on, and the order runs over all of those: up
-  over two octaves of 0, 4, 7 is 0 4 7 12 16 19. As given keeps the order
-  written inside each octave. The octaves are worked out inside the
-  engine, so the offsets themselves stay within a byte.
-- **Orders.** 0 to 4 are as for `arp`. 5 is up and then down with the top
-  and the bottom played twice (0 4 7 7 4 0). 6 strikes every note of the
-  chord at once on each step: a stab, and with more than one octave each
-  step's stab is an octave above the last. Random draws from a generator
-  of the arpeggiator's own, seeded from the engine's, so the same events
-  always make the same tune.
-- **Changes come at the next step, and keep the place.** `arp_notes`,
-  `arp_style`, `arp_beat` and `arp_more` sent to the handle change what
-  the arpeggio plays from its next step on: the step in hand finishes as
-  it was, and the count of steps carries on, so a held arpeggio follows a
-  change of chord as a trance arpeggio does. (The third step of C major
-  followed by a change to a four-note chord is that chord's fourth note.)
-  A new rate or beat applies from the next step too. `arp` sent to the
-  handle is the exception: it starts the pattern again at once.
-- **Given to a note that is sounding.** The events can be sent to the
-  handle of a plain note. A struck arpeggio then lets that note go and
-  strikes its first step on that frame, with the note's velocity; one
-  whose pitch jumps uses the note itself. Sent to a note with an `arp` of
-  the voice's own, they hand that arpeggio to an arpeggiator, which carries
-  on from the step it was on, at the time its next step was due. Sent to a
-  handle nothing has, they do nothing.
-- **Taking it away.** `arp` or `arp_notes` with no offsets ends it. A
-  voice whose pitch was jumping goes back to its own note and plays on. A
-  struck note that is sounding is held for its gate and let go, and nothing
-  more is struck; one that was to be held until the next step is left held,
-  a plain note of the handle, until it is let go.
-- **Pitch, volume, pan.** `voice_pitch` and `voice_freq` to the handle
-  move the note the chord is built on: sounding notes move with it (each
-  stays as far from it as it was struck), and later steps are struck from
-  the new note. `voice_volume` and `voice_pan` are remembered for the
-  notes yet to be struck.
-
-### Chords
-
-A chord, its notes together, is an arpeggio of order 6 that never steps:
-send `arp` with a rate below 0 and order 6, then the `note_on`.
-
-```js
-event(now, 13 /* arp */,     0, 0, -1, 6, 4, 0x0a070300);  // no clock, together: 0, 3, 7, 10
-event(now, 1  /* note_on */, 0, 9, 48, 0.8);              // C minor seventh on C, handle 9
-```
-
-All its notes start on the frame of the `note_on`, each a voice of its own
-(times `unison.voices`), and the handle is the chord: one `note_off` lets
-them all go on one frame, one `voice_volume` or `voice_pan` sets them all,
-and `voice_pitch` moves the chord, every note keeping its place in it.
-With no handle, a `note_off` for the note the chord is on lets it go. To
-change a held chord for another without a new note, send `arp_notes` (with
-order 6) and then `arp_step`, with the same time: the old notes are let go
-and the new ones struck on that frame.
-
-(A host can also simply send several `note_on` events. They then need a
-handle each if they are to be moved separately, and nothing keeps their
-intervals when one handle is given a new pitch.)
-
-### What an arpeggiator costs
-
-- **Voices.** An arpeggio whose pitch jumps is one voice. A chord is a
-  voice for each note. A struck arpeggio has the voices of the step that
-  is sounding (one, or with order 6 one for each note) and those of
-  earlier steps that are still dying away. It never has more than 8: when
-  a step would take it past that, the oldest of its notes that have been
-  let go are cut, without a click. Notes that are held are never cut for
-  this, so a chord of eight notes with two unison voices is 16. With a
-  release shorter than a step and a gate under 1, a struck arpeggio is two
-  voices at most; with the part in mono mode it is always one.
-- **Arpeggiators.** 32 can run at once, over all parts. A 33rd takes the
-  place of the one that has run longest, whose notes are let go.
-- **Time.** An arpeggiator does nothing between steps; a step is a
-  `note_on` and a `note_off`. Nothing here allocates.
-
-## Songs
+### Songs
 
 These load a tracker song and read where it is; playing it is done with the
 `song` event. See [Songs](#songs) for the whole of it.
@@ -748,8 +630,11 @@ millisecond at 48 kHz.
 | 18 | `arp_beat` | one part or all | handle, or 0 for the part's next note | steps to a beat | |
 | 19 | `arp_notes` | one part or all | handle, or 0 for the part's next note | steps a second, or 0 | order |
 | 20 | `arp_step` | one part or all | handle | the step's length in frames | |
+| 21 | `arp_pattern` | one part or all | handle, or 0 for the part's next note | which pattern, 1..64, or 0 | |
+| 22 | `clock` | | | the beat it is | |
+| 23 | `voice_vibrato` | one part or all | handle | depth in semitones | rate in Hz |
 
-Events 13, 14, 17 and 19 also use `z` and `b`; see [their descriptions](#the-arpeggio-of-a-note).
+Events 13, 14, 17, 19 and 23 also use `z` or `b`; see [their descriptions](#the-arpeggio-of-a-note).
 
 An event with a type not in this table, or a part that does not exist, is
 ignored. So is one whose `x` is not a number, if it uses `x`. A velocity that
@@ -843,6 +728,22 @@ rate if `x` is not 0, from its next step and without losing its place.
 **20 `arp_step`** Take the next step of an arpeggio that has no clock, now.
 
 All four are described under [Arpeggiators](#arpeggiators).
+
+**21 `arp_pattern`** Have an arpeggio follow one of the engine's patterns
+of steps (`x`, 1 to 64) in place of its order; 0 goes back to the order.
+See [Patterns](#patterns).
+
+**22 `clock`** Say which beat it is on this frame (`x`; fractions allowed,
+and 0 is the start of a bar). The engine counts beats at the `tempo`
+parameter from wherever this last put them; the trance gates take their
+steps from that count. `part` is ignored. See [The beat](#the-beat).
+
+**23 `voice_vibrato`** Give live voices a vibrato of their own: `x`
+semitones each way (0..12; 0 stops it), `y` times a second (up to 40; not
+a number counts as 6), beginning `z` seconds from now (so that a held note
+starts straight and then begins to sing). It is a sine, it belongs to the
+voices that are sounding when the event comes (a note struck later has
+none), and it is added to everything else that moves their pitch.
 
 ### Handles
 
@@ -958,6 +859,12 @@ Ids not in the table do not exist yet. Setting one does nothing.
 | 87 | `lfo1.cutoff` | float | -96 | 96 | 0 | semitones | How far it moves the filter cutoff. |
 | 88 | `lfo1.amp` | float | 0 | 1 | 0 |  | Tremolo: how much it changes the loudness. |
 | 89 | `lfo1.pan` | float | 0 | 1 | 0 |  | How far it moves the sound left and right. |
+| 90 | `gate.depth` | float | 0 | 1 | 0 |  | Trance gate: how far a closed step of its pattern closes (0: no gate; 1: to silence). |
+| 91 | `gate.rate` | float | 0.25 | 16 | 4 | steps | Trance gate: steps to a beat of the tempo (4 is sixteenths, 2 eighths, 8 thirty-seconds, 3 eighth-note triplets). |
+| 92 | `gate.smooth` | float | 0.001 | 0.5 | 0.008 | seconds | Trance gate: how long it takes to open or close. It never clicks; 0.001 is as hard as it goes. |
+| 93 | `gate.swing` | float | 0 | 0.75 | 0 |  | Trance gate: how far every second step is put back, as a part of a step. |
+| 94 | `gate.sends` | bool | 0 | 1 | 1 |  | On: the echo, reverb and chorus are sent the gated sound, so their tails ring through the gaps. Off: they are sent the sound as it was before the gate, and only the part's own sound is chopped. |
+| 95 | `gate.stereo` | bool | 0 | 1 | 0 |  | On: the gate's steps open on the left and on the right by turns. |
 | 96 | `lfo2.wave` | choice: 0 sine, 1 triangle, 2 saw, 3 square, 4 random | 0 | 4 | 1 |  | The shape of the slow wave. |
 | 97 | `lfo2.rate` | float | 0.01 | 50 | 0.5 | hz | How fast it goes. |
 | 98 | `lfo2.delay` | float | 0 | 10 | 0 | seconds | How long after the note starts before it begins. |
@@ -1650,6 +1557,309 @@ event(now, 13 /* arp */,     0, 0, 0, 0, 3, 0x00070300);  // x: 50 a second, y: 
 event(now, 1  /* note_on */, 0, 0, 60, 0.8);
 ```
 
+### Arpeggiators
+
+An arpeggio that asks for more than one voice stepping its own pitch is
+played by an **arpeggiator**: a small player inside the engine that strikes
+and lets go of ordinary notes of the part, under the note's handle, on
+exact frames. An arpeggio is an arpeggiator's as soon as any of the events
+17, 18 or 19 has had a say in it, or its order is 5 or 6. Until then it is
+the voice's own, as above, and nothing about that has changed.
+
+The four events take the same `part` and `a` as `arp`: a handle, or 0 for
+the next note that starts on the part.
+
+**17 `arp_style`**
+
+| field | meaning |
+|---|---|
+| `x` | the gate: how much of its step each note is held before it is let go, 0.05..1. At 1 a note is held until the next is struck. 0 (or less): notes are not struck at all, and the arpeggio is one voice whose pitch jumps. |
+| `y` | octaves, 1..4: the pattern is played through that many octaves, each above the last, before it comes round. |
+| `z` | swing, 0..0.75: every second step is put back by that part of a step (0.33 is a triplet feel). |
+| `b` | accents: how hard each step is struck, four bits a step, the first step in the lowest four. 15 is the note's own velocity, 1 a fifteenth of it, 0 a rest (nothing is struck, and the pattern still moves on). The pattern of accents is as long as its last four bits that are not 0, at most 8 steps, and goes round by itself. 0 in all: every step at full. |
+
+**18 `arp_beat`** `x` is how many steps there are to a beat of the `tempo`
+parameter (id 224, beats a minute), 0.01..64: 1 is quarter notes, 2
+eighths, 3 eighth-note triplets, 4 sixteenths, 8 thirty-seconds: one over
+the note's length in quarter notes, so a dotted eighth is 1.3333.
+0 (or less) goes back to the rate the `arp` or `arp_notes` event gave. A
+step then lasts `sample_rate * 60 / (tempo * steps)` frames, worked out
+afresh at each step, so a change of `tempo` is taken up at the next step,
+on the frame that step was always going to begin: nothing jumps.
+
+**19 `arp_notes`** has the fields of `arp`: `x` the rate, `y` the order,
+`z` how many offsets, `b` the first four (and `arp_more` carries the rest).
+The differences: it does not start the pattern again, and an `x` of 0 leaves
+the rate as it was. Its `z` of 0 takes the arpeggio away, as `arp`'s does.
+
+**20 `arp_step`** For an arpeggio with no clock (a rate below 0, and no
+`arp_beat`): take its next step on this frame. `x` is how long the step is
+to last, in frames, which the gate and the swing are measured against; 0
+means as long as the last one. Something that keeps time itself steps its
+arpeggios this way: the engine's song player does, so that an arpeggio
+keeps to a song's rows whatever the song's tempo does. It needs a handle.
+`macro_tick` does not step an arpeggiator.
+
+To start a note with such an arpeggio, send the arpeggio's events with `a`
+0 and then the `note_on`, all with the same time. `arp` starts a fresh
+arpeggio (it puts back the plain style, one octave, no swing, no accents
+and no beat), so if it is used it goes first; `arp_notes` can stand in its
+place. Sixteenths at the tempo, up through two octaves, each note held for
+half its step, on a C minor seventh:
+
+```js
+event(now, 19 /* arp_notes */, 0, 0, 0, 0 /* up */, 4, 0x0a070300);  // 0, 3, 7, 10
+event(now, 17 /* arp_style */, 0, 0, 0.5, 2, 0, 0);                  // gate, octaves, swing, accents
+event(now, 18 /* arp_beat */,  0, 0, 4);                             // four steps to a beat
+event(now, 1  /* note_on */,   0, 7, 48, 0.8);                       // handle 7, C
+```
+
+How an arpeggiator behaves:
+
+- **It is the note.** The `note_on` that takes a waiting arpeggio starts
+  the arpeggiator, with that note as the note the chord is built on, its
+  velocity and its handle. `note_off` (by handle, or with handle 0 by that
+  note) lets go of whatever it has sounding and ends it. So do
+  `voice_kill` and `all_notes_off`.
+- **Steps.** The first step sounds on the frame of the `note_on`. With a
+  clock (a rate, or beats), each step begins `floor` of the sum of the step
+  lengths so far after it: at four steps to a beat, 120 beats a minute and
+  48 kHz, every 6000 frames exactly. The size of the blocks rendered
+  changes nothing.
+- **Struck notes.** At each step the notes of the last step that are still
+  held are let go and the step's note is struck, with the note's velocity
+  (times the step's accent). It is held for `gate` times the length of
+  the step and then let go, so its release sounds through the rest of the
+  step and on under the next ones. A struck note is a `note_on` like any
+  other: it has the part's patch as it is at that moment, takes unison
+  voices, goes through a [sample map](#sample-maps), and in mono mode
+  re-uses the part's one voice.
+- **Swing.** Every second step (the 2nd, 4th...) begins `swing` of a step
+  late, and is that much shorter; the step before it is that much longer.
+  The gate is a part of the step as it turns out.
+- **Octaves.** With `y` octaves the pattern is the chord's notes, then the
+  same an octave up, and so on, and the order runs over all of those: up
+  over two octaves of 0, 4, 7 is 0 4 7 12 16 19. As given keeps the order
+  written inside each octave. The octaves are worked out inside the
+  engine, so the offsets themselves stay within a byte.
+- **Orders.** 0 to 4 are as for `arp`. 5 is up and then down with the top
+  and the bottom played twice (0 4 7 7 4 0). 6 strikes every note of the
+  chord at once on each step: a stab, and with more than one octave each
+  step's stab is an octave above the last. Random draws from a generator
+  of the arpeggiator's own, seeded from the engine's, so the same events
+  always make the same tune.
+- **Changes come at the next step, and keep the place.** `arp_notes`,
+  `arp_style`, `arp_beat` and `arp_more` sent to the handle change what
+  the arpeggio plays from its next step on: the step in hand finishes as
+  it was, and the count of steps carries on, so a held arpeggio follows a
+  change of chord as a trance arpeggio does. (The third step of C major
+  followed by a change to a four-note chord is that chord's fourth note.)
+  A new rate or beat applies from the next step too. `arp` sent to the
+  handle is the exception: it starts the pattern again at once.
+- **Given to a note that is sounding.** The events can be sent to the
+  handle of a plain note. A struck arpeggio then lets that note go and
+  strikes its first step on that frame, with the note's velocity; one
+  whose pitch jumps uses the note itself. Sent to a note with an `arp` of
+  the voice's own, they hand that arpeggio to an arpeggiator, which carries
+  on from the step it was on, at the time its next step was due. Sent to a
+  handle nothing has, they do nothing.
+- **Taking it away.** `arp` or `arp_notes` with no offsets ends it. A
+  voice whose pitch was jumping goes back to its own note and plays on. A
+  struck note that is sounding is held for its gate and let go, and nothing
+  more is struck; one that was to be held until the next step is left held,
+  a plain note of the handle, until it is let go.
+- **Pitch, volume, pan.** `voice_pitch` and `voice_freq` to the handle
+  move the note the chord is built on: sounding notes move with it (each
+  stays as far from it as it was struck), and later steps are struck from
+  the new note. `voice_volume` and `voice_pan` are remembered for the
+  notes yet to be struck.
+
+### Patterns
+
+Beyond the fixed orders, an arpeggio can follow a **pattern**: a list of up
+to 32 steps that goes round, each saying which note of the chord to play,
+or to rest, or to hold. This is what makes a syncopated trance lead or a
+bass line out of one held chord: the rhythm is in the pattern.
+
+A step is four bytes:
+
+| byte | | |
+|---|---|---|
+| 0 | note | Signed. Which note of the chord, counted from 1 at its lowest. Past the chord's last note the count carries on an octave up (on a triad, 4 is the root an octave higher). Below 0 it counts down from the top of the chord an octave below (-1). 0 is a rest, unless the tie flag is set. |
+| 1 | flags | 1: a tie: the last step's note is held on through this one and nothing is struck. 2: a slide: this step's note is not struck; the note that is sounding slides to it, in 60 ms or the step's length if that is less. (With nothing sounding, it is struck.) |
+| 2 | octave | Signed, -3..3: octaves to move the note. |
+| 3 | shape | The low four bits: how hard it is struck, 1 to 15 fifteenths of the note's velocity; 0 is full. The high four bits: the step's own gate in tenths of a step, 1 to 10; 0 is the arpeggio's gate. |
+
+The same as text is the steps with spaces between them:
+
+| written | means |
+|---|---|
+| `1`, `2` ... `32` | that note of the chord |
+| `-` (or `.`) | a rest |
+| `_` | a tie: hold the last note through this step |
+| `'` after a note | an octave up (`1''` is two) |
+| `,` after a note | an octave down |
+| `^` after a note | an accent. In a pattern with any accents, the accented steps are struck at full and the others at two thirds (level 10). |
+| `:1` to `:9` after a note | its own gate, in tenths of a step |
+| `~` before a note | slide into it |
+
+So `"1 - 3 2 _ 1 3 5^"` is root, rest, third note, second note held for two
+steps, root, third, and the fifth note accented. A name in place of the
+steps gives a built-in pattern:
+
+| name | steps |
+|---|---|
+| `bounce` | `1 2 3 2` |
+| `octaves` | `1 1' 1 1'` |
+| `root-fifth` | `1 3 1' 3` |
+| `thumb` | `1 2 1 3 1 4 1 3` |
+| `converge` | `1 4 2 3` |
+| `diverge` | `2 3 1 4` |
+| `offbeat` | `- 1 - 2 - 3 - 2` |
+| `gallop` | `1^ - 1 1 2^ - 2 2` |
+| `trance` | `1^ - 3 2 - 1^ 3 -` |
+| `acid` | `1^ 1 ~3 - 1' ~1 2^ -` |
+
+A host puts a pattern in one of 64 places with `synths_arp_pattern_set`
+(bytes) or `synths_arp_pattern_text` (text), and gives it to an arpeggio
+with the `arp_pattern` event (21): with `a` 0 for the part's next note,
+sent with the arpeggio's other events before the `note_on`, or with a
+handle for a note that is sounding. One place can serve any number of
+notes on any parts.
+
+How a pattern is played:
+
+- The pattern has its own length, whatever the chord's: step `k` of the
+  arpeggio is step `k mod length` of the pattern. Rate, gate, swing and
+  the two styles are the arpeggio's as before, and each step lands on its
+  exact frame.
+- A pattern takes the place of the order and of `arp_style`'s accents,
+  which are not used while there is one.
+- **Octaves.** With `arp_style`'s `y` above 1, each time round the pattern
+  is an octave higher than the last, through that many octaves.
+- **Ties.** A note followed by a tie is not let go at its gate: it is held
+  through the tie, and let go at the gate of the last step that holds it.
+- **One voice.** In the style whose pitch jumps (gate 0) a note step moves
+  the pitch, and a rest or a tie leaves it where it is; levels and gates
+  do nothing.
+- **Changes.** A new chord (`arp_notes`) under a running pattern is taken
+  at the next step, which is the pattern's next step: the place is kept.
+  So is a new pattern, or none.
+- The fixed orders are not patterns underneath: they depend on how many
+  notes the chord has (and one of them is random), which a list of steps
+  cannot say. A pattern, when there is one, simply replaces them.
+
+### Chords
+
+A chord, its notes together, is an arpeggio of order 6 that never steps:
+send `arp` with a rate below 0 and order 6, then the `note_on`.
+
+```js
+event(now, 13 /* arp */,     0, 0, -1, 6, 4, 0x0a070300);  // no clock, together: 0, 3, 7, 10
+event(now, 1  /* note_on */, 0, 9, 48, 0.8);              // C minor seventh on C, handle 9
+```
+
+All its notes start on the frame of the `note_on`, each a voice of its own
+(times `unison.voices`), and the handle is the chord: one `note_off` lets
+them all go on one frame, one `voice_volume` or `voice_pan` sets them all,
+and `voice_pitch` moves the chord, every note keeping its place in it.
+With no handle, a `note_off` for the note the chord is on lets it go. To
+change a held chord for another without a new note, send `arp_notes` (with
+order 6) and then `arp_step`, with the same time: the old notes are let go
+and the new ones struck on that frame.
+
+(A host can also simply send several `note_on` events. They then need a
+handle each if they are to be moved separately, and nothing keeps their
+intervals when one handle is given a new pitch.)
+
+### What an arpeggiator costs
+
+- **Voices.** An arpeggio whose pitch jumps is one voice. A chord is a
+  voice for each note. (Each of these is times `unison.voices`, and on a
+  part with a [sample map](#sample-maps) times the zones the note plays:
+  one, unless zones are layered or crossfaded there.) A struck arpeggio has the voices of the step that
+  is sounding (one, or with order 6 one for each note) and those of
+  earlier steps that are still dying away. It never has more than 8: when
+  a step would take it past that, the oldest of its notes that have been
+  let go are cut, without a click. Notes that are held are never cut for
+  this, so a chord of eight notes with two unison voices is 16. With a
+  release shorter than a step and a gate under 1, a struck arpeggio is two
+  voices at most; with the part in mono mode it is always one.
+- **Arpeggiators.** 32 can run at once, over all parts. A 33rd takes the
+  place of the one that has run longest, whose notes are let go.
+- **Time.** An arpeggiator does nothing between steps; a step is a
+  `note_on` and a `note_off`. Nothing here allocates.
+
+## The trance gate
+
+Each part has a gate after its voices and its effects that turns its
+sound up and down in a pattern of steps, in time with the tempo: a held
+chord becomes a rhythm. It chops whatever the part is playing, a pad, a
+chord, a sample, the live input. With `gate.depth` at 0 (as it is to begin
+with) there is no gate and it costs nothing.
+
+- **The pattern** is up to 32 steps, each a level from 0 (closed) to 1
+  (open), so that a step can be half open as well as on or off. It is set
+  with `synths_gate_set` (levels) or `synths_gate_text` (text). As text it
+  is one character a step: `x` open, `.` closed, `0` to `9` a level in
+  ninths (`9` is open, `0` closed); spaces are passed over, so
+  `"x.x.xx.x x.x.x.xx"` is sixteen steps. With no pattern set, the steps
+  are open and closed by turns. The built-in patterns, by name:
+  `eighths` (`x.x.x.x.x.x.x.x.`), `offbeat` (`..x...x...x...x.`),
+  `gallop` (`x.xxx.xxx.xxx.xx`), `trance` (`x.x.xx.xx.x.xx.x`),
+  `stutter` (`xxx.xx.xx.xxx.x.`), `pump` (`2468246824682468`),
+  `triplets` (`x..x..x..x..x..x..x..x..`, for a rate of 6) and
+  `dotted` (`x..x..x.x..x..x.`).
+- **`gate.depth`** is how far a closed step closes: a step of level `l`
+  lets through `1 - depth * (1 - l)` of the sound. At 1 a closed step is
+  silence; at 0.5 it is half.
+- **`gate.rate`** is steps to a beat: 4 for sixteenths, 2 for eighths, 8
+  for thirty-seconds, 3 and 6 for triplets, 1.3333 for dotted eighths.
+- **`gate.smooth`** is how long the gate takes to get from one level to
+  the next, in seconds (about 95% of the way; it eases there). It never
+  jumps: at the least, 0.001, it is a ramp too short to hear as anything
+  but an edge and too long to click. Each frame the gate moves a fixed
+  part of the way to where it is going, so however the pattern, the rate,
+  the depth or the beat is changed while it runs, its steepest slope is
+  the same.
+- **`gate.swing`** puts every second step back by that part of a step.
+- **`gate.sends`**, on (as it is to begin with): the gate comes before
+  the part's sends, so the echo and the reverb are fed the chopped sound
+  and their tails ring through the gaps, which is the sound of the thing.
+  Off: the sends are taken from the sound before the gate, and only the
+  part's own sound is chopped.
+- **`gate.stereo`** opens the steps on the left and on the right by
+  turns: an open even step is open on the left and closed on the right.
+- The part's meter, scope and recording have the gated sound.
+
+All of these are parameters of the part, so they can be set and glided by
+events while the gate runs.
+
+### The beat
+
+The engine counts beats: the count goes up by `tempo` beats a minute, and
+a gate's step is `floor(beat * gate.rate)` (with swing, the pairs of steps
+are divided unevenly). So every gate, on every part, is on the same grid,
+and a step begins on its exact frame whatever the block size.
+
+- A new engine, and `synths_reset`, start the count at 0.
+- **`clock`** (event 22) says which beat it is on a frame: send it with
+  `x` 0 on the downbeat of a bar to line every gate up with the music, and
+  again whenever the music jumps. The gates move to wherever that puts
+  them without a click.
+- A change of `tempo` is taken up from its own frame: the count carries
+  on from where it was at the new speed, so the gates stay on the beat
+  through it.
+- **While a song plays, the beat is the song's.** The song player gives
+  the engine its tempo (four rows to the beat, at the song's speed and
+  tempo as they change) and the beat of each row as it begins, so gates
+  and arpeggios counted in beats keep to the song's rows through tempo
+  changes, pattern jumps and seeks. The `tempo` parameter itself is not
+  touched, and has the beat back when the song stops or is paused.
+
+A gate costs about as much as the part's volume does: a multiply a frame,
+only on parts whose `gate.depth` is above 0.
+
 ## Songs
 
 The engine can play a whole tracker song by itself. A song is loaded with
@@ -1670,7 +1880,7 @@ quirks included. Our own songs say which they want.
 | our own format, packed | every build with the `songs` feature |
 | our own format, as JSON | builds with the `json` feature, which is on unless a build turns it off |
 
-The JSON reader is about 47 KB of a WebAssembly module. `scripts/build-wasm.sh`
+The JSON reader is about 62 KB of a WebAssembly module. `scripts/build-wasm.sh`
 leaves it in, so that one reader decides what a song's JSON means for a page,
 for Python and for a native app alike; a module built with
 `scripts/build-wasm.sh --no-json` is that much smaller and reads MOD, XM and
@@ -1860,6 +2070,22 @@ under the channel's handle:
   chord is its notes, a struck arpeggio at most 8 and usually 2. The
   channel's next note cuts whatever of them is still sounding, as it cuts a
   single note.
+
+- **A pattern** an arp follows is handed to its arpeggiator as it is
+  (`Voices::arp_pattern`), without using any of the 64 places a host has.
+- **A gate** on an instrument or an event is put on the part the channel's
+  note plays through, with `set_gate` and that part's `gate.` parameters:
+  the channel's own part, or for a synth patch the part the host named,
+  which is the one thing a song changes on a part of the host's. It is
+  taken off again (`gate.depth` 0) when the song is stopped or sought.
+  While the song plays [the beat](#the-beat) is the song's, so the gate's
+  steps are on the rows.
+- **A glide over a time** is `set_pitch` or `set_rate` with that time as
+  the glide, on the voices that are sounding, in place of a new note. **A
+  bend or a slide** is the same from the note's own pitch, begun on the
+  row's first frame, its second leg (a scoop's, a dip's) begun on the
+  frame the first ends. **A vibrato** is the `voice_vibrato` event. All of
+  them are on the exact frame, on samples and patches alike.
 
 The trackers' own arpeggio effect, `0xy`, is none of this: it is played
 tick by tick exactly as those trackers played it.
@@ -2373,7 +2599,10 @@ change that.
   notes (times `unison.voices`). A struck arpeggio takes one for the note
   of its step (or for each note, when they are struck together), and the
   notes of earlier steps go on taking theirs until they have died away:
-  up to 8 voices in all for one arpeggio, whatever its release. See
+  up to 8 voices in all for one arpeggio, whatever its release. On a
+  [sample map](#sample-maps) each struck note picks its own zones, as any
+  note does, and so may be more than one voice; an arpeggio of one voice
+  whose pitch jumps keeps the zone its note began in. See
   [what an arpeggiator costs](#what-an-arpeggiator-costs).
 - **Taking over.** When all the voices allowed (the `voices` parameter, at
   most 64) are in use, a new note takes over the oldest voice that has
@@ -2475,14 +2704,15 @@ and there are none.)
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro, plays a chord and
-an arpeggio, feeds it a live input, plays a sample map and times it. The
-module is about 413 KB (166 KB gzipped), of which the song loaders and
-player are about 158 KB, the JSON song reader 47 KB of that, the live
-input, voice effects and recorder 29 KB, the arpeggiators 19 KB and the
-sample maps 12 KB. Two smaller
+an arpeggio, sets patterns and a gate, feeds it a live input, plays a
+sample map and times it. The
+module is about 460 KB (183 KB gzipped), of which the song loaders and
+player are about 189 KB, the JSON song reader 62 KB of that, the live
+input, voice effects and recorder 29 KB, the arpeggiators, their patterns
+and the trance gate 37 KB and the sample maps 12 KB. Two smaller
 modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
-reader (365 KB, 148 KB gzipped), and `--no-songs` the whole song player
-(254 KB, 101 KB gzipped). See
+reader (399 KB, 161 KB gzipped), and `--no-songs` the whole song player
+(272 KB, 108 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
@@ -2773,6 +3003,10 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 | `arp_notes(part, handle, rate, order, offsets)`, `arp_style(part, handle, gate, octaves, swing, levels)`, `arp_beat(part, handle, steps)` | The `arp_notes` (with `arp_more`), `arp_style` and `arp_beat` events: an [arpeggiator](#arpeggiators)'s notes, style and tempo, changed at its next step. |
 | `arp_step(part, handle, frames)` | The `arp_step` event: take the next step of the handle's arpeggio now, to last `frames` frames. For an arpeggio with no clock (a rate below 0), which the sequencer steps in its own time. |
 | `arp_sample(part, handle, slot, position)` | Have the handle's arpeggiator play the sample in `slot` (`Some(slot)`) as oscillator 1 of every note it strikes, from `position` frames in, whatever the part's patch says: what `trigger` does for one note, for the notes of an arpeggio or a chord. `None` goes back to the patch. Send it after the arpeggio's events and before its first step. |
+| `arp_pattern(part, handle, pattern)` | Hand the handle's arpeggiator a [pattern](#patterns) of steps of its own (`Some(&Pattern)`), without one of the engine's 64 places: a song's patterns are given this way. `None` goes back to its order. |
+| `set_gate(part, levels) -> bool` | Give a part's [trance gate](#the-trance-gate) its pattern, as `synths_gate_set` does. The part's `gate.` parameters are set with `set_param`. |
+| `clock(beat)`, `set_tempo(beats_a_minute)` | [The beat](#the-beat): `clock` is the `clock` event; `set_tempo` says what tempo the music this sequencer is playing has, which the beat then goes by in place of the `tempo` parameter, until it is given 0. |
+| `set_vibrato(part, handle, depth, rate, delay)` | The `voice_vibrato` event. |
 | `chord(part, handle, note, velocity, offsets)` | Start a chord: a note for each of the `offsets` (semitones from `note`; at most 8), all on this frame, under one handle. It is the `arp` event with no clock and order 6, and a `note_on`. The handle then means the whole chord. |
 | `sounding(part, handle) -> bool` | Whether any voice with that handle is still sounding on the part. |
 | `note_on(part, handle, note, velocity)`, `note_off(part, handle)` | The `note_on` and `note_off` events, for parts that play synth patches. |

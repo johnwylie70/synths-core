@@ -743,3 +743,20 @@ fn glides_and_bends_work_on_samples_with_chords_and_through_a_replaced_song() {
     x.extend(render(&mut e, 5292 * 8, 256).0);
     assert!((pitch_at(&x, 5292 * 4) - 6.0).abs() < 0.12 && (pitch_at(&x, 5292 * 9) - 12.0).abs() < 0.12);
 }
+
+#[test]
+fn the_bends_example_reads_back_and_plays_one_voice_to_its_end() {
+    let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/songs/bends.json")).unwrap();
+    let song = native::load(&text, &|_| None).unwrap();
+    round_trips(&song);
+    assert!(song.extras.len() >= 8);
+    let mut e = playing(song);
+    let mut most = 0;
+    let (mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+    for _ in 0..(44100 * 8 / 256) {
+        e.render(&mut l, &mut r);
+        most = most.max(e.active_voices());
+    }
+    assert_eq!((most, e.active_voices()), (1, 0));
+    assert_eq!(song_player::shared(&e).unwrap().position()[0], STATE_STOPPED);
+}

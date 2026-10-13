@@ -157,6 +157,39 @@ if (together !== 3 || struck !== 4 || sounding !== 0) {
   console.error('the chord or the arpeggio is not what was asked for');
   process.exit(1);
 }
+// A pattern for an arpeggio and one for a part's gate, both as text; text
+// that is not a pattern is refused.
+const say = (fn, where, words) => {
+  const bytes = new TextEncoder().encode(words);
+  const at = x.synths_alloc(bytes.length);
+  new Uint8Array(memory.buffer, at, bytes.length).set(bytes);
+  const answer = fn(engine, where, at, bytes.length);
+  x.synths_free(at);
+  return answer;
+};
+const steps = [say(x.synths_arp_pattern_text, 1, '1 - 3 2 _ 1 3 5^'), say(x.synths_gate_text, 0, 'x.x.xx.x x.x.x.xx'), say(x.synths_gate_text, 0, 'trance')];
+const refused = [say(x.synths_arp_pattern_text, 1, '1 two'), say(x.synths_gate_text, 0, 'x.y')];
+push([
+  [x.synths_time(engine), PARAM, 0, id['gate.depth'], 1],
+  [x.synths_time(engine), PARAM, 0, id['osc1.wave'], 3],
+  [x.synths_time(engine), 22 /* clock */, 0, 0, 0],
+  [x.synths_time(engine), NOTE_ON, 0, 7, 60, 0.5],
+  [x.synths_time(engine) + 15000, NOTE_OFF, 0, 7, 0],
+]);
+// At 150 beats a minute a sixteenth is 4800 frames: "x.x." is open, closed, open.
+const loud = [];
+for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 37; j++) x.synths_render(engine, 128);
+  loud.push(Math.max(...new Float32Array(memory.buffer, x.synths_output_left(engine), 128).map(Math.abs)) > 0.01);
+  x.synths_render(engine, 64);
+}
+for (let j = 0; j < 40; j++) x.synths_render(engine, 128);
+console.log(`patterns as text: an arpeggio's of ${steps[0]} steps, a gate's of ${steps[1]} and ${steps[2]}; the gate's first steps: ${loud.map((on) => (on ? 'x' : '.')).join('')}`);
+if (steps.join() !== '8,16,16' || refused.join() !== '-2,-2' || loud.join() !== 'true,false,true') {
+  console.error('the patterns are not what was asked for');
+  process.exit(1);
+}
+push([[x.synths_time(engine), PARAM, 0, id['gate.depth'], 0], [x.synths_time(engine), PARAM, 0, id['osc1.wave'], 0]]);
 push(['amp.release', 'tempo'].map((name) => [x.synths_time(engine), PARAM, 0, id[name], table.params.find((p) => p.name === name).default]));
 
 // A sample, through memory from synths_alloc.

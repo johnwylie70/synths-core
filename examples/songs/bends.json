@@ -1,0 +1,33 @@
+{
+  "format": "synths-song",
+  "version": 2,
+  "title": "Bends",
+  "speed": 6,
+  "tempo": 125,
+  "channels": 1,
+  "order": [0],
+  "patterns": [
+    {"rows": 64, "events": [
+      {"row": 0, "ch": 0, "note": "A-4", "ins": 1, "bend": "scoop"},
+      {"row": 4, "ch": 0, "note": "C-5", "ins": 1, "glide": "1/16"},
+      {"row": 8, "ch": 0, "note": "E-5", "ins": 1, "glide": "1/8"},
+      {"row": 12, "ch": 0, "note": "D-5", "ins": 1, "glide": "1/16"},
+      {"row": 16, "ch": 0, "note": "A-4", "ins": 1, "bend": "scoop", "vibrato": true},
+      {"row": 28, "ch": 0, "bend": "fall"},
+      {"row": 31, "ch": 0, "note": "off"},
+      {"row": 32, "ch": 0, "note": "E-5", "ins": 1, "bend": "dip"},
+      {"row": 36, "ch": 0, "note": "G-5", "ins": 1, "bend": {"to": 2, "over": "1/8"}},
+      {"row": 40, "ch": 0, "note": "A-5", "ins": 1, "vibrato": {"depth": 0.5, "rate": 5.5, "delay": "1/4"}},
+      {"row": 48, "ch": 0, "note": "A-3", "ins": 1},
+      {"row": 49, "ch": 0, "slide": {"to": 24, "over": "1/4"}},
+      {"row": 53, "ch": 0, "slide": {"to": -24, "over": "1/4"}},
+      {"row": 57, "ch": 0, "slide": {"to": 24, "over": "1/8"}},
+      {"row": 59, "ch": 0, "slide": {"to": -36, "over": "1/4"}},
+      {"row": 63, "ch": 0, "note": "off"}
+    ]}
+  ],
+  "instruments": [
+    {"name": "lead", "patch": "lead"}
+  ],
+  "samples": []
+}

@@ -474,7 +474,9 @@ fn the_examples_in_the_document_are_songs_this_reads() {
             whole += 1;
         } else if block.starts_with("{\"row\"") {
             let song = native::load(&with_events(block.trim_end().trim_end_matches(',')), &no_files).unwrap_or_else(|e| panic!("{e}: {block}"));
-            assert!(song.patterns[0].events.iter().any(|e| e.chord.is_some()), "{block}");
+            assert!(song.patterns[0].events.iter().any(|e| e.chord.is_some() || e.extra != 0), "{block}");
+            assert_eq!(load_saved(&native::save(&song)).unwrap(), song, "{block}");
+            assert_eq!(binary::load(&binary::save(&song)).unwrap(), song, "{block}");
             lines += block.lines().count();
         }
     }
@@ -488,6 +490,21 @@ fn the_examples_in_the_document_are_songs_this_reads() {
     assert_eq!(p.chord(16, 0), Some(Chord::arp(&[0, 3, 7, 10], Arp { octaves: 2, ..Arp::SIXTEENTHS })));
     assert_eq!(p.chord(32, 0), Some(Chord::arp(&[0, 4, 7], Arp { rate: ArpRate::PerSecond(50.0), ..Arp::FAST })));
     assert_eq!(p.chord(48, 0), Some(Chord::OFF));
+    // Everything in the table of what to write for what you want to hear is read.
+    let table = &doc[doc.find("| What you want to hear | What to write |").unwrap()..];
+    let table = &table[..table.find("\n\n").unwrap()];
+    let mut written = 0;
+    for piece in table.split('`').skip(1).step_by(2) {
+        let text = with_events(&format!(r#"{{"row": 0, "ch": 0, "note": "C-4", "ins": 1, {piece}}}"#));
+        let song = native::load(&text, &no_files).unwrap_or_else(|e| panic!("{e}: {piece}"));
+        assert!(song.patterns[0].events[0].extra != 0 || song.patterns[0].events[0].cell.effect == 3, "{piece}");
+        written += 1;
+    }
+    assert!(written >= 12, "{written}");
+    // The gate on an instrument, as the document has it.
+    let gated = with_events("").replace(r#"{"sample": 0}"#, r#"{"name": "pad", "patch": "pad", "gate": "x.x.xx.x x.x.x.xx"}"#);
+    assert!(doc.contains(r#""instruments": [{"name": "pad", "patch": "pad", "gate": "x.x.xx.x x.x.x.xx"}]"#));
+    assert_eq!(native::load(&gated, &no_files).unwrap().instruments[0].gate.as_ref().unwrap().levels.len(), 16);
     // Every key and every order the document's table gives is one the reader takes.
     for key in ["chord", "rate", "perRow", "perTick", "hz", "order", "style", "gate", "octaves", "swing", "accent"] {
         assert!(doc.contains(&format!("| `{key}` |")), "{key}");

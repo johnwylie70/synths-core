@@ -106,6 +106,49 @@ fn arpeggios_and_chords_never_touch_the_allocator() {
 }
 
 #[test]
+fn patterns_gates_and_vibrato_never_touch_the_allocator() {
+    use synths_core::arp::*;
+    use synths_core::pattern_abi::*;
+    let mut e = Engine::new(SR);
+    let (mut l, mut r) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+    let before = calls();
+    // Setting patterns, as text and as numbers, asks for nothing either.
+    unsafe {
+        assert_eq!(synths_arp_pattern_text(&mut *e, 1, "1^ - 3 2 _ 1' ~3 5:2".as_ptr(), 20), 8);
+        assert_eq!(synths_gate_text(&mut *e, 0, "x.x.xx.x4".as_ptr(), 9), 9);
+        assert_eq!(synths_gate_set(&mut *e, 1, [1.0f32, 0.0, 0.5].as_ptr(), 3), 0);
+    }
+    e.set_param(0, TEMPO, 150.0);
+    for part in 0..2 {
+        e.set_param(part, GATE_DEPTH, 1.0);
+        e.set_param(part, SEND_REVERB, 0.3);
+        e.set_param(part, GATE_SENDS, part as f32);
+    }
+    let mut all_taken = true;
+    let mut push = |ev: Event| all_taken &= e.push(ev);
+    push(Event::arp_notes(0.0, 0, 0, 0.0, ORDER_UP, &[0, 3, 7, 10]));
+    push(Event::arp_style(0.0, 0, 0, 0.5, 2, 0.1, 0));
+    push(Event::arp_beat(0.0, 0, 0, 4.0));
+    push(Event::arp_pattern(0.0, 0, 0, 1));
+    push(Event::note_on(0.0, 0, 1, 48.0, 0.8));
+    push(Event::note_on(0.0, 1, 2, 60.0, 0.8));
+    push(Event::voice_vibrato(0.0, 1, 2, 0.4, 6.0, 0.2));
+    for i in 0..30 {
+        let at = 3000.0 * i as f64;
+        push(Event::clock(at, (i % 4) as f32));
+        push(Event::param(at + 1000.0, 1, GATE_RATE, 2.0 + (i % 3) as f32, 0.0));
+        push(Event::param(at + 2000.0, 0, TEMPO, 120.0 + i as f32, 0.5));
+    }
+    assert!(all_taken);
+    for block in [128usize, 1, 4096, 77, 128, 128, 2048].into_iter().cycle().take(100) {
+        e.render(&mut l[..block], &mut r[..block]);
+    }
+    let after = calls();
+    assert_eq!(after - before, 0, "the allocator was called {} times", after - before);
+    assert!(peak(&l) > 0.0 && e.active_voices() >= 2);
+}
+
+#[test]
 fn an_engine_is_about_as_big_as_the_document_says() {
     // "About 2.6 MB at 48 kHz": the echo's two seconds and the reverb are more than half of it.
     let before = BYTES.with(|c| c.get());

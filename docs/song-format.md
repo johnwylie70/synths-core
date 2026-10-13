@@ -83,6 +83,10 @@ An event:
 | `fx` | An effect: a letter or digit and two hexadecimal digits, as a tracker shows it (`"A04"`, `"F7D"`, `"R23"`). `[10, 4]` is read too. |
 | `chord` | A chord on the note: several notes sounding together. See [Chords and arpeggios](#chords-and-arpeggios). |
 | `arp` | An arpeggio on the note: the notes of a chord one at a time. |
+| `glide` | The note does not start afresh: the channel's sounding note slides to it. See [Glides, bends and vibrato](#glides-bends-and-vibrato). |
+| `bend`, `slide` | A bend of the note's pitch, and a slide from wherever the pitch is. |
+| `vibrato` | A vibrato on the note. |
+| `gate` | Puts a [trance gate](#the-trance-gate) on the channel, changes it or takes it off. |
 | `chordSpeed`, `chordHz`, `chordOrder` | Only in [songs from before](#songs-from-before). |
 
 C-4 plays a sample at 8363 frames a second (unless the sample is tuned otherwise), and is middle C for a synth patch.
@@ -124,6 +128,7 @@ The first is the four notes of C minor seventh together. The second is a trance 
 | `octaves` | 1 to 4: the pattern runs through the chord, then the chord an octave up, and so on. | 1 |
 | `swing` | 0 to 0.75: every second step is this part of a step late. | 0 |
 | `accent` | Struck notes: how hard each step is struck, a list of up to 8 levels that goes round, each 0 (a rest) to 15 (full). The last must not be 0. | every step full |
+| `pattern` | A pattern of steps to follow in place of `order` and `accent`: see [Arp patterns](#arp-patterns). | none |
 
 An `arp` has one of `rate`, `perRow`, `perTick` and `hz`.
 
@@ -136,6 +141,119 @@ An `arp` has one of `rate`, `perRow`, `perTick` and `hz`.
 A writer writes the notes as their list of numbers, so a name survives loading and saving as the chord it meant, not as the name, and leaves out what is at its default.
 
 This is all separate from the trackers' arpeggio effect `0xy`, which is kept for songs that came from MOD and XM files and behaves exactly as those trackers did: three notes, a step a tick, restarting on every row.
+
+### Arp patterns
+
+An arpeggio can follow a pattern of its own in place of one of the orders: up to 32 steps that go round, each a note of the chord, a rest or a tie. The pattern is as long as it is, whatever the chord's size, and the rhythm is in it:
+
+```json
+{"row": 0, "ch": 0, "note": "A-3", "ins": 1, "arp": {"chord": "m7", "rate": "1/16", "pattern": "1 - 3 2 _ 1 3 5^"}},
+{"row": 16, "ch": 0, "arp": {"chord": [-4, 0, 3, 8], "rate": "1/16", "pattern": "1 - 3 2 _ 1 3 5^"}},
+{"row": 32, "ch": 0, "note": "A-3", "ins": 1, "arp": {"chord": "min", "pattern": "trance"}}
+```
+
+The steps are written with spaces between them:
+
+| Written | Means |
+|---|---|
+| `1`, `2` ... `32` | That note of the chord, counted from its lowest. Past the chord's last note the count carries on an octave up: on a three-note chord, `4` is the root an octave higher and `5` the next note above that. |
+| `-` (or `.`) | A rest. |
+| `_` | A tie: the last note is held through this step. |
+| `'` after a note | An octave up (`1''` is two octaves up). |
+| `,` after a note | An octave down. |
+| `^` after a note | An accent. When a pattern has accents, the accented steps are struck at full and the rest at two thirds. |
+| `:1` to `:9` after a note | That step's own gate, in tenths of a step, in place of the arp's `gate`. |
+| `~` before a note | Slide into it: the note is not struck; the one sounding slides to it, as a bass line does on a 303. |
+
+So `"1 - 3 2 _ 1 3 5^"` is: the root, a rest, the third note, the second note held for two steps, the root, the third, and the fifth note accented.
+
+In place of the steps a pattern can be the name of one that is built in: `"bounce"` (`1 2 3 2`), `"octaves"` (`1 1' 1 1'`), `"root-fifth"` (`1 3 1' 3`), `"thumb"` (`1 2 1 3 1 4 1 3`), `"converge"` (`1 4 2 3`), `"diverge"` (`2 3 1 4`), `"offbeat"` (`- 1 - 2 - 3 - 2`), `"gallop"` (`1^ - 1 1 2^ - 2 2`), `"trance"` (`1^ - 3 2 - 1^ 3 -`) and `"acid"` (`1^ 1 ~3 - 1' ~1 2^ -`).
+
+It can also be a list, a step each, for a program that would sooner write numbers and for the few things text cannot say: a number is that note of the chord (0 a rest; below 0 counts down from the chord an octave below, -1 its top note), `"-"` a rest, `"_"` a tie, and `{"note": 3, "octave": 1, "level": 12, "gate": 0.3, "slide": true, "tie": false}` a step in full, where `level` is 1 to 15 (how hard it is struck, of 15) and `gate` 0.1 to 1.
+
+`rate`, `gate`, `octaves` (each time round the pattern is an octave higher), `swing` and `style` are the arp's, as above; with `"style": "slide"` the one voice's pitch follows the pattern's notes, and rests and ties leave it where it is. A change of chord under a running pattern (an event with the arp and no note, as on row 16 above) keeps the pattern's place. A writer writes a pattern as its steps (a name is not kept), as text when text can say it.
+
+### Glides, bends and vibrato
+
+The pitch of a note can be moved by keys that say what they do. They work on sample instruments and on synth patches alike, and their times are counted in the song's own time: a note length (`"1/16"`, `"1/8t"`, `"1/4."`, four rows to the beat as for an arp), or `{"rows": 2}`, `{"ticks": 3}` or `{"seconds": 0.25}`.
+
+| What you want to hear | What to write |
+|---|---|
+| This note slides up or down to the next one | `"glide": "1/16"` on the next note |
+| The same, the tracker's way (a speed, not a time) | `"glide": true`, or `"glide": 24` |
+| A quick rise into the note from below | `"bend": "scoop"` |
+| The note drooping away at its end | `"bend": "fall"` on an event with no note, where the droop begins |
+| A dip down and back | `"bend": "dip"` |
+| The note bending up two semitones and staying there | `"bend": {"to": 2, "over": "1/8"}` |
+| A bend to a named note | `"bend": {"to": "E-4", "over": "1/8"}` |
+| A long note that begins to sing after a moment | `"vibrato": true` |
+| A wide, slow vibrato straight away | `"vibrato": {"depth": 0.6, "rate": 4, "delay": {"ticks": 0}}` |
+| A siren, or a laser drop | `"slide": 12` on one row and `"slide": -12` on the next; `"slide": {"to": -24, "over": "1/4"}` |
+
+```json
+{"row": 0, "ch": 0, "note": "A-4", "ins": 1, "bend": "scoop"},
+{"row": 4, "ch": 0, "note": "C-5", "ins": 1, "glide": "1/16"},
+{"row": 8, "ch": 0, "note": "E-5", "ins": 1, "glide": "1/8", "vibrato": true},
+{"row": 20, "ch": 0, "bend": "fall"},
+{"row": 24, "ch": 0, "note": "A-3", "ins": 1},
+{"row": 25, "ch": 0, "slide": {"to": 24, "over": "1/4"}}
+```
+
+**`glide`** goes on the note that is glided *to*. That note is not struck: the channel's sounding note slides to it, in a straight line in pitch, over the time given, and carries on. With nothing sounding on the channel, the note simply starts. `"glide": true` and `"glide": 24` (1 to 255) are the trackers' own glide, the effect `3xx` (true is `300`: at the speed the channel last had), and they are exactly that effect: an event has one of them or an `fx`, not both. A time is a different thing: it always takes that long, however far apart the notes are.
+
+**`bend`** is `{"to": ..., "over": ...}`: `to` is how far, in semitones (fractions allowed, 96 either way), or a note name, which needs the event to have a `note` to measure from; `over` is how long it takes (an eighth if left out). The pitch goes there in a straight line and stays. On an event with a note it begins with the note; on an event with no note it bends the note that is sounding, from that row. Three shapes have names, and `"bend": "scoop"` and so on use them as they are:
+
+| Shape | Does | As it is by default |
+|---|---|---|
+| `"scoop"` | The note starts `to` away from its pitch and comes to it. | from 2 semitones below, over a sixteenth |
+| `"fall"` | The pitch goes `to` away and stays: a bend, with a size of its own. | 5 semitones down, over an eighth |
+| `"dip"` | The pitch goes `to` away and comes back, half the time each way. | a semitone down and back, over an eighth |
+
+`{"shape": "scoop", "to": -5, "over": "1/8"}` is a scoop of another size; leave out what is to stay as it is.
+
+**`slide`** moves the pitch from wherever it is now, where a bend moves it from the note: `"slide": 12` is an octave up over one row, and `{"to": -12, "over": "1/4"}` an octave down over a quarter. Slides add up, so a row up and a row down is a siren. An event has a `bend` or a `slide`, not both.
+
+**`vibrato`** is `{"depth": 0.3, "rate": 6, "delay": "1/8"}`: semitones each way (up to 12), times a second (0.1 to 40), and how long the note sounds before it begins; `true` is exactly those numbers, and what is left out of the braces is as there. It lasts for the note. `"vibrato": false` on a later event stops it, and `"vibrato"` on an event with no note gives one to the note that is sounding. (An instrument's own `vibrato`, under [Instruments](#instruments), is the tracker's: every note of the instrument has it.)
+
+How they go together, and what is not done:
+
+- A new note (one with no `glide`) starts at its own pitch: whatever bend or slide the last note had is gone, and so is its vibrato.
+- A glide to a note with a `chord`, or onto a channel playing one, moves the whole chord, each note keeping its place. With an `arp`, the glide moves the note the arpeggio is built on: the notes that are sounding slide, and the steps that follow are struck from where it is going. A bend, a slide and a vibrato act on the notes that are sounding when they begin; notes an arpeggio strikes afterwards are struck at the bent pitch, without vibrato.
+- A bend and the trackers' pitch effects (`1xx`, `2xx`, `4xy` and the rest) can be on the same note: the effect moves the pitch the song gives the note, and the bend stays on top of it. But an effect that sets the pitch while a bend is still on its way ends the bend's movement there, at where it was going.
+- A glide over a time keeps the instrument's envelopes going as the trackers' glide does, and keeps the sample that is playing: it does not change to the new note's sample.
+- Seeking stops every channel, so a bend begun before the place sought is not picked up. A song put in the place of the playing one leaves a bend that is under way to finish.
+- Every `fx` and volume-column code goes on working and is written back as it was, except `3xx`, which is written as `glide`. A MOD or an XM that is loaded keeps its effects as they are.
+
+### The trance gate
+
+A gate chops a sustained sound in a rhythm: a pattern of steps, each open, closed or part open, in time with the song. It is put on an instrument, so that every note of it is gated, or switched on and off by events, so that a pad is gated for some bars only.
+
+```json
+"instruments": [{"name": "pad", "patch": "pad", "gate": "x.x.xx.x x.x.x.xx"}]
+```
+
+```json
+{"row": 0, "ch": 1, "note": "A-3", "ins": 2, "chord": "min", "gate": {"pattern": "trance", "rate": "1/16", "depth": 0.9}},
+{"row": 32, "ch": 1, "gate": "off"}
+```
+
+A gate is its pattern alone, or `{"pattern": ..., ...}` with any of:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `pattern` | One character a step, up to 32: `x` open, `.` closed, `0` to `9` a level between (in ninths: `9` is open). Spaces are passed over. Or a built-in pattern's name: `"eighths"`, `"offbeat"`, `"gallop"`, `"trance"`, `"stutter"`, `"pump"`, `"triplets"` (for a rate of `"1/16t"`), `"dotted"`. Or a list of levels from 0 to 1. | |
+| `rate` | How long a step is, as a note length. | `"1/16"` |
+| `depth` | How far a closed step closes, 0 to 1: at 1 it is silence. | 1 |
+| `smooth` | How long the gate takes to open or close, in seconds, 0.001 to 0.5; or `"hard"`, the least, which is still a ramp and does not click. | 0.008 |
+| `swing` | 0 to 0.75: every second step is this part of a step late. | 0 |
+| `sends` | `true`: the echo and the reverb are sent the chopped sound, and ring through the gaps. `false`: they are sent the sound from before the gate. | `true` |
+| `stereo` | `true`: the steps open on the left and the right by turns. | `false` |
+
+The steps keep to the song: the pattern starts at the top of each pattern of the song (row 0 is its first step when the pattern's length divides the rows into whole bars), a sixteenth is a row, and a change of tempo or speed, a pattern jump or a seek leaves it on the rows.
+
+On an event, `gate` is a gate as above, which stays on the channel from that row, through its later notes, until another event changes it; `"off"`, which takes any gate off the channel, the instrument's own included; or `"instrument"`, which goes back to whatever the instrument of the channel's note has.
+
+The gate is on the part the channel's note plays through: the channel's own part for an instrument that is samples, and for a synth patch the part the host gave the patch, where it chops everything that part is playing and is left open again when the song stops. Two channels playing the same patch share its part, and so its gate.
 
 ### Songs from before
 
@@ -219,6 +337,7 @@ An instrument is what a cell's `ins` names. It is either samples or a synth patc
 | `volumeEnvelope`, `panEnvelope` | Envelopes, below. | none |
 | `vibrato` | The instrument's own vibrato: `{"wave": "sine", "sweep": 0, "depth": 4, "rate": 20}`. `wave` is `"sine"`, `"square"`, `"ramp-up"` or `"ramp-down"`; `sweep` is how many ticks it takes to reach full depth. | none |
 | `fadeout` | How fast the note fades after key off, 0 to 65535. 0 never fades; 32768 fades in one tick. | 0 |
+| `gate` | A [trance gate](#the-trance-gate) every note of the instrument is played through. | none |
 
 An envelope is `{"points": [[0, 64], [8, 32], [20, 0]], "sustain": 1, "loop": [0, 2]}`: up to 12 points of `[tick, value]`, the value from 0 to 64 (for panning, 32 is the middle). `sustain` is the point the envelope waits at until the key is let go, and `loop` the first and last points it repeats between; both can be left out. `"on": false` keeps an envelope's points but does not use it.
 
@@ -286,7 +405,7 @@ and each of its events, in order of row and then channel:
 |---|---|
 | `u16` | Row. |
 | `u8` | Channel. |
-| `u8` | What follows this event: 0 nothing, 1 an arpeggio as version 1 packed it (16 bytes), 2 a chord or arpeggio in full (32 bytes). |
+| `u8` | What follows this event. The low two bits: 0 no chord, 1 an arpeggio as version 1 packed it (16 bytes), 2 a chord or arpeggio in full (32 bytes). Bit 2 (4): a `u16` comes first, straight after the next five bytes: the number, from 1, of the event's entry in the list of extras (its glide, bend, slide, vibrato or gate). |
 | `u8` × 5 | Note (0 none, 1 to 96 for C-0 to B-7, 97 off), instrument (0 none), the volume column, the effect, the effect's number. |
 
 The volume column is as FastTracker 2 stores it: 0 for nothing, `0x10` to `0x50` for a volume of 0 to 64, and from `0x60` a command in the high four bits (`6` `-`, `7` `+`, `8` `D`, `9` `U`, `A` `S`, `B` `V`, `C` `P`, `D` `L`, `E` `R`, `F` `M`, in the JSON's letters) with its number in the low four. The effect is 0 to 35: the JSON's digit or letter as a base-36 digit.
@@ -308,7 +427,7 @@ A chord or arpeggio in full is 32 bytes:
 |---|---|
 | `u8` | How many offsets are used, 1 to 8. |
 | `u8` | 0 for a chord (its notes together; the next 22 bytes are then not used), 1 for an arpeggio. |
-| `u8` | Order: 0 up, 1 down, 2 updown, 3 written, 4 random, 5 updown2, 6 together. |
+| `u8` | Order: 0 up, 1 down, 2 updown, 3 written, 4 random, 5 updown2, 6 together; 7 for an arpeggio that follows a pattern. |
 | `u8` | Style: 0 slide, 1 strike. |
 | `u8` | What the rate is: 0 steps a tick, 1 steps a second, 2 steps a row, 3 a note length. |
 | `u8`, `u8` | For a note length: how many make a whole note (1, 2, 4 ... 64), and 0 for plain, 1 for one of a triplet, 2 for dotted. |
@@ -316,7 +435,7 @@ A chord or arpeggio in full is 32 bytes:
 | `f32` | The rate, when it is not a note length. |
 | `f32` | Gate, 0.05 to 1. |
 | `f32` | Swing, 0 to 0.75. |
-| `u32` | Accents: four bits a step, the first step lowest, each 0 to 15; as long as its last four bits that are not 0; 0 for none. |
+| `u32` | Accents: four bits a step, the first step lowest, each 0 to 15; as long as its last four bits that are not 0; 0 for none. With order 7: the number, from 1, of its pattern in the list of arp patterns. |
 | `i8` × 8 | The offsets; those not used are 0. |
 
 **Then each instrument**
@@ -351,6 +470,26 @@ An envelope is `u8` flags (bit 0 on, bit 1 has a sustain point, bit 2 has a loop
 | `u32`, bytes × instruments | For each instrument in turn, the length of its `synth` as JSON text and then the text; a length of 0 for an instrument with none. |
 
 This comes after everything a reader of the first layout looks at, so such a reader loads the song without it, and a song with no `synth` packs to the same bytes as before.
+
+**Then what version 2 added**, each list begun by its four letters and there only if it has something in it, in this order. (A plain `"glide": true` or a speed is the cell's effect 3, and needs none of this.)
+
+`ARPP`, the arp patterns: a `u16` count, then for each a `u8` number of steps (1 to 32) and four bytes a step: the note (`i8`; 0 a rest), flags (1 a tie, 2 a slide), octaves (`i8`, -3 to 3), and a byte whose low four bits are the level (1 to 15; 0 full) and high four the step's gate in tenths (1 to 10; 0 the arp's).
+
+`XTRA`, the extras: a `u16` count, then for each a `u8` saying what it has (1 a glide, 2 a bend or slide, 4 a vibrato, 8 a gate) and those, in that order:
+
+| | bytes | |
+|---|---|---|
+| a time | 8 | `u8` kind (0 a note length, 1 rows, 2 ticks, 3 seconds), `u8` and `u8` the note length (how many to a whole note; 0 plain, 1 triplet, 2 dotted), `u8` 0, `f32` the number of rows, ticks or seconds. |
+| glide | 8 | Its time. |
+| bend | 16 | `u8` shape (0 to and stay, 1 scoop, 2 dip, 3 slide), `u8` × 3 0, `f32` semitones, and its time. |
+| vibrato | 16 | `f32` depth, `f32` rate, and the time of its delay. |
+| gate | 1, or 17 and its levels | `u8`: 0 off, 1 the instrument's, 2 a gate, which follows. |
+
+A gate is `u8` how many levels (1 to 32), `u8` flags (bit 0 the sends are gated, bit 1 stereo), `u8` and `u8` its rate as a note length, `f32` depth, `f32` smooth, `f32` swing, and an `f32` for each level.
+
+`IGAT`, the instruments' gates: for each instrument in turn a `u8`, 1 if it has a gate, and then the gate.
+
+A song with any of this is version 2.
 
 A reader takes a file that ends early as far as it goes, treats counts and lengths that the bytes cannot back up as smaller, and never fails on a damaged one: what does not make sense is left out.
 

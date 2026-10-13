@@ -9,7 +9,12 @@
 //! eighths up and down on a soft pluck. `chord-together.wav`: the same
 //! progression as block chords. `song-chords-and-arps.wav`: the song in
 //! `examples/songs/chords-and-arps.json`, which has all three, played by
-//! the song player.
+//! the song player. `arp-pattern.wav`: the trance progression following a
+//! syncopated pattern with rests, accents, a tie and a slide.
+//! `trance-gate.wav`: a pad holding the progression, chopped in sixteenths,
+//! with the echo and the reverb ringing through the gaps.
+//! `arp-pattern-and-gate.wav`: the two together. `bends.wav`: a lead line
+//! from a song with a glide, a scoop, a fall, a delayed vibrato and a siren.
 
 use std::fs;
 use synths_core::arp::*;
@@ -189,6 +194,90 @@ fn main() {
     }
     save("chord-together", &mut e, 8.0 * bar + 2.0);
 
+    // The trance lead again, following a pattern: accents on the root, rests,
+    // a tie and a slide; and a pad chopped by a gate; and both at once.
+    let bar = 60.0 / 138.0 * 4.0;
+    let lead = |e: &mut Engine| {
+        e.set_arp_pattern(1, &Pattern::parse("1^ - 3 2 _ 1^ ~3 - 2 1' - 3^ 2 - 1 ~4").unwrap()).unwrap();
+        set(e, 0, &[(DELAY_TIME, bar / 16.0 * 3.0), (DELAY_FEEDBACK, 0.45), (DELAY_PINGPONG, 1.0)]);
+        set(
+            e,
+            0,
+            &[
+                (OSC1_WAVE, 2.0),
+                (OSC2_WAVE, 2.0),
+                (OSC2_LEVEL, 0.7),
+                (OSC2_FINE, 9.0),
+                (FILTER_TYPE, 1.0),
+                (CUTOFF, 500.0),
+                (RESONANCE, 0.35),
+                (FILTER_ENV, 48.0),
+                (FENV_DECAY, 0.12),
+                (FENV_SUSTAIN, 0.1),
+                (FILTER_VELOCITY, 0.6),
+                (AMP_ATTACK, 0.001),
+                (AMP_DECAY, 0.2),
+                (AMP_SUSTAIN, 0.7),
+                (AMP_RELEASE, 0.12),
+                (SEND_DELAY, 0.3),
+                (VOLUME, 0.5),
+            ],
+        );
+        e.push(Event::arp_notes(0.0, 0, 0, 0.0, ORDER_UP, &FROM_A[0]));
+        e.push(Event::arp_style(0.0, 0, 0, 0.5, 1, 0.0, 0));
+        e.push(Event::arp_beat(0.0, 0, 0, 4.0));
+        e.push(Event::arp_pattern(0.0, 0, 0, 1));
+        e.push(Event::note_on(0.0, 0, 1, 57.0, 0.9));
+        for bars in 1..8 {
+            e.push(Event::arp_notes((bars as f32 * bar * SR) as f64, 0, 1, 0.0, ORDER_UP, &FROM_A[bars % 4]));
+        }
+        e.push(Event::note_off((8.0 * bar * SR) as f64, 0, 1, 0.0));
+    };
+    let pad = |e: &mut Engine| {
+        set(e, 0, &[(DELAY_TIME, bar / 16.0 * 3.0), (DELAY_FEEDBACK, 0.4), (DELAY_PINGPONG, 1.0), (REVERB_TYPE, 1.0)]);
+        set(
+            e,
+            1,
+            &[
+                (OSC1_WAVE, 2.0),
+                (OSC2_WAVE, 2.0),
+                (OSC2_LEVEL, 0.8),
+                (OSC2_FINE, 8.0),
+                (FILTER_TYPE, 1.0),
+                (CUTOFF, 2200.0),
+                (AMP_ATTACK, 0.05),
+                (AMP_SUSTAIN, 0.9),
+                (AMP_RELEASE, 0.3),
+                (SEND_DELAY, 0.35),
+                (SEND_REVERB, 0.3),
+                (VOLUME, 0.3),
+                (GATE_DEPTH, 1.0),
+                (GATE_RATE, 4.0),
+                (GATE_SMOOTH, 0.004),
+            ],
+        );
+        let (levels, n) = synths_core::gate::parse("x.x.xx.xx.x6xx.x").unwrap();
+        e.set_gate(1, &levels[..n]).unwrap();
+        for bars in 0..8 {
+            let at = (bars as f32 * bar * SR) as f64;
+            let (root, chord) = BLOCK[bars % 4];
+            e.push(Event::arp(at, 1, 0, -1.0, ORDER_TOGETHER, &chord));
+            e.push(Event::note_on(at, 1, 10 + bars as u32, root, 0.7));
+            e.push(Event::note_off(at + (bar * SR) as f64, 1, 10 + bars as u32, 0.0));
+        }
+    };
+    for (name, with_lead, with_pad) in [("arp-pattern", true, false), ("trance-gate", false, true), ("arp-pattern-and-gate", true, true)] {
+        let mut e = Engine::new(SR);
+        e.set_param(0, TEMPO, 138.0);
+        if with_lead {
+            lead(&mut e);
+        }
+        if with_pad {
+            pad(&mut e);
+        }
+        save(name, &mut e, 8.0 * bar + 2.5);
+    }
+
     // A song with all three, through the song player.
     #[cfg(feature = "json")]
     {
@@ -225,5 +314,21 @@ fn main() {
         e.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
         e.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
         save("song-chords-and-arps", &mut e, 9.5);
+
+        // A lead line with a glide between notes, a scoop, a fall, a
+        // delayed vibrato on a long note and a siren slide.
+        let text = fs::read_to_string("examples/songs/bends.json").unwrap();
+        let song = native::load(&text, &|_| None).unwrap();
+        let mut e = Engine::new(SR);
+        set(
+            &mut e,
+            0,
+            &[(OSC1_WAVE, 3.0), (OSC1_PW, 0.25), (FILTER_TYPE, 1.0), (CUTOFF, 3500.0), (AMP_ATTACK, 0.005), (AMP_DECAY, 0.3), (AMP_SUSTAIN, 0.7), (AMP_RELEASE, 0.15), (SEND_DELAY, 0.2), (VOLUME, 0.4)],
+        );
+        song_player::install(&mut e, song, song_player::FIRST_PART, 0, false).unwrap();
+        e.push(Event::song(0.0, SONG_PATCH_PART, 1.0, 0.0));
+        e.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
+        e.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        save("bends", &mut e, 9.0);
     }
 }
