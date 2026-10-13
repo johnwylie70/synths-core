@@ -42,6 +42,38 @@ fn run(voices: usize, patch: &[(usize, f32)]) -> f64 {
     took
 }
 
+/// Render `SECONDS` with a live input playing through part 31 with `patch`,
+/// and return how long it took, in seconds. The input is a tone and hiss,
+/// so that every effect has something to chew on; `level` 0 is silence.
+fn run_input(level: f32, patch: &[(usize, f32)], globals: &[(usize, f32)]) -> f64 {
+    let mut e = Engine::new(SR);
+    e.set_param(0, MASTER_VOLUME, 0.05);
+    for &(id, v) in patch {
+        e.set_param(31, id, v);
+    }
+    for &(id, v) in globals {
+        e.set_param(0, id, v);
+    }
+    let mut rng = synths_core::math::Rng::new(1);
+    let input: Vec<f32> = (0..128 * 64)
+        .map(|i| level * (0.5 * (i as f32 * 0.02).sin() + 0.2 * (i as f32 * 0.171).sin() + 0.1 * rng.bipolar()))
+        .collect();
+    let mut l = [0.0f32; 128];
+    let mut r = [0.0f32; 128];
+    let blocks = SECONDS * SR as usize / 128;
+    let mut sum = 0.0f32;
+    let start = Instant::now();
+    for i in 0..blocks {
+        let at = (i % 64) * 128;
+        e.render_io(&input[at..at + 128], None, &mut l, &mut r);
+        sum += l[0] + r[127];
+    }
+    let took = start.elapsed().as_secs_f64();
+    // Loud enough to be heard, or silence (or hiss under the gate) and nothing out.
+    assert!(sum.is_finite() && (sum != 0.0) == (level > 0.5));
+    took
+}
+
 fn main() {
     let simple: &[(usize, f32)] = &[(OSC1_WAVE, 2.0)];
     let full: &[(usize, f32)] = &[
@@ -77,5 +109,48 @@ fn main() {
                 );
             }
         }
+    }
+
+    // The live input, and what each voice effect adds for the one part that uses it.
+    println!("a live input (mono), through one part:");
+    let ms = |took: f64| took / SECONDS as f64 * 1000.0;
+    let asleep = {
+        let mut e = Engine::new(SR);
+        let (mut l, mut r) = ([0.0f32; 128], [0.0f32; 128]);
+        let start = Instant::now();
+        for _ in 0..SECONDS * SR as usize / 128 {
+            e.render(&mut l, &mut r);
+        }
+        ms(start.elapsed().as_secs_f64())
+    };
+    let silent = ms(run_input(0.0, &[], &[]));
+    println!("  no input at all, engine asleep: {asleep:6.3} ms per second of sound");
+    let gated = ms(run_input(0.01, &[], &[(INPUT_GATE, -20.0)]));
+    let plain = ms(run_input(1.0, &[], &[]));
+    println!("  silence coming in:              {silent:6.3} ms");
+    println!("  hiss the gate keeps out:        {gated:6.3} ms");
+    println!("  sound, no effects:              {plain:6.3} ms (the mix and the shared effects run, as for one voice)");
+    let extra: &[(&str, &[(usize, f32)], &[(usize, f32)])] = &[
+        ("the gate, open", &[], &[(INPUT_GATE, -60.0)]),
+        ("the part's filter", &[(FILTER_TYPE, 3.0), (FILTER_SLOPE, 1.0)], &[]),
+        ("pitch shifter, +3 semitones", &[(FX_PITCH, 3.0)], &[]),
+        ("pitch shifter, +7 semitones", &[(FX_PITCH, 7.0)], &[]),
+        ("pitch shifter, +12 semitones", &[(FX_PITCH, 12.0)], &[]),
+        ("pitch shifter, -7 semitones", &[(FX_PITCH, -7.0)], &[]),
+        ("pitch shifter, -12 semitones", &[(FX_PITCH, -12.0)], &[]),
+        ("ring modulator", &[(FX_RING, 1.0)], &[]),
+        ("ring modulator, noise", &[(FX_RING, 1.0), (FX_RING_WAVE, 1.0)], &[]),
+        ("comb", &[(FX_COMB, 0.5)], &[]),
+        ("comb, swept", &[(FX_COMB, 0.5), (FX_COMB_DEPTH, 0.5)], &[]),
+        ("distortion and bit crusher", &[(DRIVE, 0.3), (CRUSH_BITS, 8.0), (CRUSH_RATE, 4.0)], &[]),
+        (
+            "all of them at once",
+            &[(FILTER_TYPE, 3.0), (FX_PITCH, 7.0), (FX_RING, 1.0), (FX_COMB, 0.5), (FX_COMB_DEPTH, 0.5), (DRIVE, 0.3), (CRUSH_BITS, 8.0)],
+            &[(INPUT_GATE, -60.0)],
+        ),
+    ];
+    for (name, patch, globals) in extra {
+        let took = ms(run_input(1.0, patch, globals));
+        println!("  + {name:28} {:6.3} ms more ({:.3}% of one core)", took - plain, (took - plain) / 10.0);
     }
 }
