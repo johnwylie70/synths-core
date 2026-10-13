@@ -34,3 +34,4 @@
 - Seven voice changers as data (robot, chipmunk, monster, cave, telephone, alien, whisper), in `synths_core::presets` and in the parameter table's JSON as `voice_presets`. `cargo run --release --example voice` renders a made-up voice through each to `target/demo`.
 - A test that counts calls to the allocator while everything renders (there are none), and the benchmark times the live input and each voice effect.
 - A change of a part's volume, or the master's, slides while the live input is sounding, as it does while a voice is.
+- A song with repeat off no longer leaves notes droning when it ends: a sample that loops is faded out over a quarter of a second and a synth patch's note is let go, to finish as its release says. Unloading a song cuts the notes of its synth patches as well as its own parts'.

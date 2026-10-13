@@ -46,6 +46,10 @@ pub const FIRST_PART: u16 = 32;
 /// A part number that means "no part": the instrument is not heard.
 pub const NO_PART: u16 = 0xFFFF;
 
+/// How long a looping sample takes to fade away when a song that does not
+/// repeat reaches its end, in seconds.
+pub const END_FADE: f32 = 0.25;
+
 /// The cutoff that stands in for the Amiga's "LED" filter, in Hz.
 const LED_FILTER_HZ: f32 = 3300.0;
 
@@ -96,6 +100,8 @@ struct Channel {
     part: u16,
     /// The voice is a synth patch's note and not a sample.
     patch: bool,
+    /// The voice is a sample that goes round a loop, and so never ends by itself.
+    looped: bool,
     rate: f64,
     volume: f32,
     pan: f32,
@@ -151,10 +157,12 @@ impl Channels for Adapter<'_, '_> {
         if was.part != own {
             self.voices.kill(was.part, handle);
         }
-        let mut now = Channel { part: own, patch: false, rate: start.rate, volume: start.volume, pan: start.pan };
+        let mut now = Channel { part: own, patch: false, looped: false, rate: start.rate, volume: start.volume, pan: start.pan };
         match start.source {
             Source::Sample(sample) => {
-                if !self.start_sample(channel, sample, start.offset, start.rate, start.volume, start.pan) {
+                if self.start_sample(channel, sample, start.offset, start.rate, start.volume, start.pan) {
+                    now.looped = self.song.samples.get(sample).is_some_and(|s| s.loop_range().is_some());
+                } else {
                     self.voices.kill(own, handle);
                 }
             }
@@ -233,11 +241,13 @@ impl Channels for Adapter<'_, '_> {
         if ch.patch {
             return;
         }
+        let loops = sample.and_then(|s| self.song.samples.get(s)).is_some_and(|s| s.loop_range().is_some());
         if self.voices.sounding(ch.part, handle) {
             self.voices.queue_sample(ch.part, handle, sample.map(|s| self.first_slot + s as u16));
+            self.channels[channel].looped = loops;
         } else if let Some(sample) = sample {
             // The old sample has run out: the new one's loop starts at once.
-            self.start_sample(channel, sample, u32::MAX, ch.rate, ch.volume, ch.pan);
+            self.channels[channel].looped = self.start_sample(channel, sample, u32::MAX, ch.rate, ch.volume, ch.pan) && loops;
         }
     }
 
@@ -299,7 +309,7 @@ impl SongPlayer {
             position: core::array::from_fn(|_| AtomicU32::new(0)),
         });
         let channels = (0..song.channels())
-            .map(|c| Channel { part: first_part + c as u16, patch: false, rate: 0.0, volume: 0.0, pan: 0.0 })
+            .map(|c| Channel { part: first_part + c as u16, patch: false, looped: false, rate: 0.0, volume: 0.0, pan: 0.0 })
             .collect();
         let s = SongPlayer {
             patch_parts: vec![NO_PART; song.instruments.len()],
@@ -380,8 +390,18 @@ impl Sequencer for SongPlayer {
             voices.macro_tick(ch.part);
         }
         if self.player.stopped() {
-            // The last notes are left to ring.
+            // The last notes are left to ring, but not for ever: a synth
+            // patch's note is let go, to die away as its patch says, and a
+            // sample that loops is faded out. A sample with an end plays to it.
             self.state = STATE_STOPPED;
+            for (c, ch) in self.channels.iter_mut().enumerate() {
+                if ch.patch {
+                    voices.note_off(ch.part, c as u32 + 1);
+                } else if ch.looped {
+                    voices.fade(ch.part, c as u32 + 1, END_FADE);
+                    ch.looped = false;
+                }
+            }
         }
         self.publish();
         self.carry += length;
@@ -530,6 +550,9 @@ pub fn install(engine: &mut Engine, song: Song, first_part: u16, first_slot: u16
 pub fn remove(engine: &mut Engine) {
     let Some(shared) = engine.song.take() else { return };
     let [channels, _, _, _, samples, first_part, first_slot, _] = shared.info();
+    // Stopping cuts every voice the song has, on its own parts and on the
+    // parts of synth patches, without a click.
+    engine.apply(&Event::song(0.0, SONG_STOP, 0.0, 0.0));
     engine.set_sequencer(None);
     for c in 0..channels {
         engine.apply(&Event::all_notes_off(0.0, (first_part + c) as u16, true));

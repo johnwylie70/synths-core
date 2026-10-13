@@ -547,3 +547,74 @@ fn any_song_can_be_packed_and_the_packed_song_loaded() {
     assert_eq!(unsafe { synths_song_pack(b"rubbish".as_ptr(), 7) }, SONG_BAD);
     assert_eq!(unsafe { synths_song_pack(core::ptr::null(), 7) }, SONG_NULL);
 }
+
+/// A song of our own with one pattern of 8 rows: a sample that loops on
+/// channel 0 and a synth patch on channel 1, both started on row 0 and
+/// never let go. `extra` is more events for the pattern.
+fn held_notes(extra: &str) -> String {
+    let wave: Vec<String> = (0..64).map(|i| if (i / 16) % 2 == 0 { "100".to_string() } else { "-100".to_string() }).collect();
+    format!(
+        r#"{{"format": "synths-song", "version": 1, "channels": 2, "order": [0],
+      "patterns": [{{"rows": 8, "events": [
+        {{"row": 0, "ch": 0, "note": "C-4", "ins": 1}},
+        {{"row": 0, "ch": 1, "note": "A-4", "ins": 2}}{extra}
+      ]}}],
+      "instruments": [{{"sample": 0}}, {{"name": "lead", "patch": "my-lead"}}],
+      "samples": [{{"wave": [{}], "loop": {{}}}}]}}"#,
+        wave.join(", ")
+    )
+}
+
+/// The frames the one pattern of `held_notes` lasts: 8 rows of 6 ticks of 882 frames.
+const HELD_FRAMES: usize = 8 * 6 * 882;
+
+#[test]
+fn a_song_that_ends_lets_its_last_notes_die_away_and_not_drone() {
+    use synths_core::params::*;
+    // One channel at a time: the looping sample, then the synth patch.
+    for channel in [0, 1] {
+        let mut engine = Engine::new(SR);
+        assert_eq!(load(&mut engine, held_notes("").as_bytes(), 0), SONG_OK, "{}", error());
+        engine.set_param(10, AMP_RELEASE, 0.2);
+        engine.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 10.0));
+        engine.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
+        // Silence the other channel's part.
+        engine.set_param(if channel == 0 { 10 } else { 32 }, VOLUME, 0.0);
+        engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        let (l, _) = render(&mut engine, HELD_FRAMES + SR as usize * 2, 256);
+        assert_eq!(position(&engine)[0], STATE_STOPPED);
+        let end = HELD_FRAMES;
+        let loud = loudness(&l[end - 4410..end], 4410)[0];
+        assert!(loud > 0.01, "channel {channel} was not sounding at the end");
+        // It is not cut off: a twentieth of a second on it can still be
+        // heard, quieter; it never jumps; and within a second it is gone.
+        let after = loudness(&l[end + 2205 - 441..end + 2205 + 441], 882)[0];
+        assert!(after > 0.05 * loud && after < loud, "channel {channel}: {after} after {loud}");
+        let biggest_step_before = (end - 4410..end).map(|i| (l[i] - l[i - 1]).abs()).fold(0.0f32, f32::max);
+        let biggest_step_after = (end..end + 44100).map(|i| (l[i] - l[i - 1]).abs()).fold(0.0f32, f32::max);
+        assert!(biggest_step_after <= biggest_step_before * 1.05, "channel {channel} clicked: {biggest_step_after} against {biggest_step_before}");
+        assert!(l[end + 44100..].iter().all(|&x| x == 0.0), "channel {channel} is still sounding a second after the end");
+        assert_eq!(engine.active_voices(), 0);
+    }
+}
+
+#[test]
+fn stopping_and_unloading_cut_a_synth_patchs_note_too() {
+    for unload in [false, true] {
+        let mut engine = Engine::new(SR);
+        assert_eq!(load(&mut engine, held_notes("").as_bytes(), 0), SONG_OK, "{}", error());
+        engine.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 10.0));
+        engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+        render(&mut engine, 882 * 12, 256);
+        assert_eq!(engine.active_voices(), 2);
+        if unload {
+            unsafe { synths_song_unload(&mut *engine) };
+        } else {
+            engine.push(Event::song(0.0, SONG_STOP, 0.0, 0.0));
+        }
+        let (l, _) = render(&mut engine, 4410, 256);
+        assert_eq!(engine.active_voices(), 0, "unload {unload}");
+        // Cut, but without a click: what is left fades over a few milliseconds.
+        assert!(l[0].abs() > 0.0 && l[2205..].iter().all(|&x| x.abs() < 1.0e-4), "unload {unload}");
+    }
+}

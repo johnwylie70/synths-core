@@ -424,7 +424,8 @@ Sample files given with `synths_song_file` are used and forgotten.
 `synths_song_pack` last packed. The pointer is good until the next
 `synths_song_pack`.
 
-**`synths_song_unload(engine)`** Take the song out: its voices are cut and
+**`synths_song_unload(engine)`** Take the song out: its voices are cut (those
+of its synth patches too) and
 its sample slots emptied. The parts keep the settings the song gave them.
 
 **`synths_song_info(engine, out: *mut u32) -> u32`** Write eight facts about
@@ -1181,11 +1182,11 @@ frame. `a` says what; `x` and `y` are its numbers.
 
 | `a` | what | `x` | `y` | |
 |---|---|---|---|---|
-| 0 | stop | | | Cut the song's voices and go back to the start. |
+| 0 | stop | | | Cut the song's voices, on its own parts and on the parts of synth patches, and go back to the start. Like every cut, it does not click. |
 | 1 | play | | | Start, or carry on after a pause. After a stop, or at the end of a song that does not repeat, it starts from the top. The first tick is played on this frame. |
 | 2 | pause | | | Hold every sample where it is, in silence, until `play`. |
 | 3 | seek | order | row | Go to a row of a place in the order. The song's voices are cut. If the song is playing it carries on from there on this frame; if not, that is where `play` will start. Numbers past the end are brought back to the last order and row. |
-| 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and leaves the last notes to ring. |
+| 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and lets the last notes die away: a sample with an end plays to it, a sample that loops is faded out over a quarter of a second, and a synth patch's note is let go, to finish as its patch's release says. |
 | 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's parts, and no others, to half of this, sliding there over 20 milliseconds. |
 | 6 | patch part | instrument, from 1 | part | Say which part plays an instrument that is a synth patch. |
 
