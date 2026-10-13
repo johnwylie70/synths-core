@@ -187,5 +187,30 @@ const ms = performance.now() - start;
 const left = new Float32Array(memory.buffer, x.synths_output_left(engine), 128);
 if (!left.every(Number.isFinite) || voices !== 64) throw new Error('the busy engine went wrong');
 console.log(`${voices} voices with everything on: ${(ms / 10).toFixed(1)} ms per second of sound (${(ms / 100).toFixed(1)}% of one core), ${(10000 / ms).toFixed(0)} times faster than real time`);
+
+// The reverb: one held note sent to each type, against the same note sent
+// nowhere, 10 seconds of sound each. The difference is what the reverb costs.
+function oneNote(type) {
+  x.synths_reset(engine);
+  const at = x.synths_time(engine);
+  push([
+    [at, PARAM, 0xffff, id['send.delay'], 0], [at, PARAM, 0xffff, id['send.chorus'], 0],
+    [at, PARAM, 0xffff, id['send.reverb'], type < 0 ? 0 : 0.5], [at, PARAM, 0, id['reverb.type'], Math.max(type, 0)],
+    [at, NOTE_ON, 0, 0, 60, 0.8],
+  ]);
+  for (let i = 0; i < 400; i++) x.synths_render(engine, 128);
+  const start = performance.now();
+  for (let i = 0; i < blocks; i++) x.synths_render(engine, 128);
+  const took = (performance.now() - start) / 10;
+  const out = new Float32Array(memory.buffer, x.synths_output_left(engine), 128);
+  if (!out.every(Number.isFinite) || out.every((v) => v === 0)) throw new Error('the reverb went wrong');
+  return took;
+}
+const types = table.params.find((p) => p.name === 'reverb.type').choices;
+if (types.join(' ') !== 'room hall plate cathedral spring') throw new Error(`reverb types: ${types}`);
+oneNote(-1);
+const without = Math.min(oneNote(-1), oneNote(-1));
+const costs = types.map((name, type) => `${name} ${Math.max(Math.min(oneNote(type), oneNote(type)) - without, 0).toFixed(2)}`);
+console.log(`the reverb, in ms per second of sound: ${costs.join(', ')} (one voice without it: ${without.toFixed(2)})`);
 x.synths_destroy(engine);
 console.log(`memory: ${(memory.buffer.byteLength / 1048576).toFixed(1)} MB`);
