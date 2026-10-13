@@ -42,6 +42,53 @@ fn run(voices: usize, patch: &[(usize, f32)]) -> f64 {
     took
 }
 
+/// Render `SECONDS` of `notes` held notes of a looped sample spread over 16
+/// parts and return how long it took, in seconds, and how many voices that
+/// was. `layers` 0 plays one sample slot on every key, as `osc1.sample`
+/// does; 1 plays a sample map of five zones; 2 a map whose every note is
+/// two zones, as a crossfade or a layer is.
+fn run_samples(notes: usize, layers: usize) -> (f64, usize) {
+    use synths_core::zones::Zone;
+    let mut e = Engine::new(SR);
+    e.set_param(0, MASTER_VOLUME, 0.05);
+    e.set_param(ALL_PARTS, OSC1_WAVE, 4.0);
+    let roots = [36u8, 48, 60, 72, 84];
+    for (slot, &root) in roots.iter().enumerate() {
+        let hz = 440.0 * 2.0f32.powf((root as f32 - 69.0) / 12.0);
+        let data: Vec<f32> = (0..24000).map(|i| 0.5 * (std::f32::consts::TAU * hz * i as f32 / SR).sin()).collect();
+        e.load_sample(slot, &data, 1, SR).unwrap();
+        e.configure_sample(slot, root as f32, 1, 0, 24000).unwrap();
+    }
+    e.set_param(ALL_PARTS, OSC1_SAMPLE, 2.0);
+    let mut zones = Vec::new();
+    for _ in 0..layers {
+        zones.extend((0..5).map(|i| Zone::new(i as u16, if i == 0 { 0 } else { roots[i] - 6 }, if i == 4 { 127 } else { roots[i] + 5 }, roots[i] as f32)));
+    }
+    for part in 0..16 {
+        e.set_zones(part, &zones, 0).unwrap();
+    }
+    for i in 0..notes {
+        e.push(Event::note_on(0.0, (i % 16) as u16, 0, 36.0 + (i * 7 % 60) as f32, 0.8));
+    }
+    let mut l = [0.0f32; 128];
+    let mut r = [0.0f32; 128];
+    for _ in 0..100 {
+        e.render(&mut l, &mut r);
+    }
+    let voices = e.active_voices();
+    let blocks = SECONDS * SR as usize / 128;
+    let mut sum = 0.0f32;
+    let start = Instant::now();
+    for _ in 0..blocks {
+        e.render(&mut l, &mut r);
+        sum += l[0] + r[127];
+    }
+    let took = start.elapsed().as_secs_f64();
+    assert!(sum.is_finite());
+    assert_eq!(e.active_voices(), voices);
+    (took, voices)
+}
+
 /// Render `SECONDS` with a live input playing through part 31 with `patch`,
 /// and return how long it took, in seconds. The input is a tone and hiss,
 /// so that every effect has something to chew on; `level` 0 is silence.
@@ -133,6 +180,19 @@ fn main() {
                 );
             }
         }
+    }
+
+    // Samples: one slot for every key, a sample map, and a map with two zones a note.
+    println!("a looped sample, no filter:");
+    for (name, notes, layers) in [("one slot on every key", 64, 0), ("a map of five zones", 64, 1), ("a map, two zones a note", 32, 2), ("one slot, 32 notes", 32, 0)] {
+        let (one, _) = run_samples(1, layers);
+        let (took, voices) = run_samples(notes, layers);
+        let each = (took - one) / (notes - 1) as f64 / SECONDS as f64;
+        println!(
+            "  {name:24} {notes:2} notes, {voices:2} voices: {:6.2} ms per second of sound, {:.0} microseconds a note",
+            took / SECONDS as f64 * 1000.0,
+            each * 1.0e6
+        );
     }
 
     // The reverb by itself, which every part shares.
