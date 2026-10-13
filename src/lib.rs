@@ -23,6 +23,7 @@ pub mod math;
 pub mod osc;
 pub mod params;
 pub mod sample;
+pub mod sequencer;
 pub mod taps;
 pub mod voice;
 

@@ -67,3 +67,23 @@ fn the_document_gives_the_engines_limits() {
         assert!(DOC.contains(text), "the document no longer says: {text}");
     }
 }
+
+#[test]
+fn the_document_lists_everything_a_sequencer_can_do() {
+    let source = include_str!("../src/sequencer.rs");
+    let mut count = 0;
+    for line in source.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("pub fn ") {
+            let name = rest.split('(').next().unwrap();
+            count += 1;
+            assert!(DOC.contains(&format!("`{name}(")), "Voices::{name} is not in the document");
+        }
+    }
+    assert_eq!(count, 17);
+    for text in ["fn advance(&mut self, voices: &mut Voices<'_>) -> u32", "`Sequencer::reset`", "`Engine::set_sequencer("] {
+        assert!(DOC.contains(text), "the document no longer says: {text}");
+    }
+    for field in ["`slot`", "`position`", "`rate`", "`volume`", "`pan`"] {
+        assert!(DOC.contains(field), "Trigger's {field} is not in the document");
+    }
+}

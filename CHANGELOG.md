@@ -25,3 +25,5 @@
 - A sample played faster than it was recorded is smoothed so that it does not alias harshly (`sample.antialias`, on to begin with; off gives the raw sound of an old tracker).
 - The 24 dB filter resonates in both of its stages: its peak is as high as the 12 dB filter's at the same setting (it used to be about 3 dB lower, with only the first stage ringing).
 - Mono and legato mode remember the notes held down: letting go of the sounding note goes back to the latest one still held.
+- A hook for a sequencer inside the engine (`Sequencer`, `Engine::set_sequencer`): it is called from within the render on the exact frames it asks for, and plays voices directly: start a sample at a position and rate on a part and handle, set rate, pitch, volume, pan and position, cut, fade, step macros.
+- A voice that has finished is let go at the end of its control period, so a one-shot sample's last moments no longer depend on the size of the blocks rendered.

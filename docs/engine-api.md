@@ -994,9 +994,10 @@ change that.
   been let go or, if none has been let go, the oldest voice of all, on any
   part. (Oldest means started longest ago.) The voice taken is cut, without a click, on the
   same frame the new note starts.
-- A voice ends, and is free again, when its amplitude envelope has finished
-  its release, when its sustain level is 0 and its decay has finished, or
-  when it has nothing left to play (see one-shots).
+- A voice ends, and is free again, at the end of the control period in
+  which its amplitude envelope finishes its release, or its decay finishes
+  with a sustain level of 0, or it has nothing left to play (see one-shots),
+  or a fade reaches nothing.
 
 ## The path of the sound
 
@@ -1219,7 +1220,65 @@ engine.render(&mut left, &mut right);
   `read_levels` and `read_notes`.
 - `synths_core::params` has a constant for every parameter id (`CUTOFF`,
   `OSC1_WAVE`, ...) and the table itself (`PARAMS`).
-- A sequencer that lives inside the core (a tracker song player) drives the
-  engine the same way a host does. Before each block it works out which of
-  its ticks fall inside the block and pushes their events with the exact
-  frame of each tick; `render` then splits the block at those frames.
+
+### A sequencer inside the engine
+
+Something that plays music by itself (a tracker song player) lives inside
+the engine and is called from within `render`, on exact frames, instead of
+pushing events block by block as a host must. It implements one trait:
+
+```rust
+use synths_core::sequencer::{Sequencer, Trigger, Voices};
+
+struct Player { /* the song, where it has got to */ }
+
+impl Sequencer for Player {
+    fn advance(&mut self, voices: &mut Voices<'_>) -> u32 {
+        // One tick of the song: start, steer and stop voices.
+        voices.trigger(0, 1, &Trigger { slot: 3, position: 0.0, rate: 8363.0, volume: 1.0, pan: -0.5 });
+        voices.macro_tick(synths_core::event::ALL_PARTS);
+        882 // call me again in 882 frames
+    }
+}
+
+engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
+```
+
+- `Engine::set_sequencer(Option<Box<dyn Sequencer>>)` installs one (or takes
+  it away) and hands back the one that was there. There is one slot. It is
+  for between renders, not during one; what is handed back should be dropped
+  away from the audio thread.
+- `advance` is first called on the next frame rendered, and then on the
+  frame it asks for each time: it returns how many frames from now (0 counts
+  as 1). `render` splits its block there, so what `advance` does starts on
+  that exact frame wherever it falls in a block, and the sound is the same
+  whatever the block size. A tick that is not a whole number of frames is
+  the sequencer's to manage: return the whole part and carry the fraction.
+- On a frame that also has events from the host, the sequencer goes first
+  and the host's events after, so the host has the last word.
+- `advance` runs on the audio path: no allocating, locking or waiting.
+- `Sequencer::reset` is called by `Engine::reset` (`synths_reset`), after
+  every voice has been stopped; `advance` is then called on the next frame.
+- A sequencer keeps being called while the engine sleeps, and wakes it by
+  starting a voice.
+
+`Voices` is the engine as the sequencer sees it during `advance`:
+
+| method | what it does |
+|---|---|
+| `time()`, `sample_rate()` | The frame this call is for, and the engine's rate. |
+| `trigger(part, handle, &Trigger) -> bool` | Start a sample as the part's only voice with that handle: a voice the handle already has there is cut, without a click, on the same frame. `Trigger` gives the sample `slot`, the `position` to start at in frames, the `rate` in frames of the sample per second, and the voice's `volume` (0..4) and `pan` (-1..1). The voice uses the part's patch (envelopes, filter, macro, effects) but plays that sample as oscillator 1 whatever the patch says, so one part can play a different sample on every note. False if the slot is empty, the part does not exist or the rate is not above 0. |
+| `set_rate(part, handle, rate, glide)` | Play the handle's voices at `rate` frames of their sample per second, sliding there over `glide` seconds. A tracker turns its period into this. |
+| `set_pitch(part, handle, note, glide)`, `set_freq(part, handle, hz, glide)` | The `voice_pitch` and `voice_freq` events. |
+| `set_volume(part, handle, volume)`, `set_pan(part, handle, pan)`, `set_position(part, handle, frames)` | The `voice_volume`, `voice_pan` and `voice_position` events. |
+| `kill(part, handle)` | The `voice_kill` event: cut at once, without a click. |
+| `fade(part, handle, seconds)` | Fade the handle's voices to nothing in a straight line over `seconds`, starting on this frame, and end them there. 0 seconds is a cut. |
+| `sounding(part, handle) -> bool` | Whether any voice with that handle is still sounding on the part. |
+| `note_on(part, handle, note, velocity)`, `note_off(part, handle)` | The `note_on` and `note_off` events, for parts that play synth patches. |
+| `set_param(part, id, value, glide)` | The `param` event. |
+| `macro_tick(part)` | The `macro_tick` event: step the macros of parts with `macro.sync` on. A tracker calls it once on each of its ticks. |
+| `event(&Event)` | Carry out any event a host could send, now (its time is ignored). Events added to the engine later can be sent this way without a method of their own. |
+
+`part` may be `ALL_PARTS` wherever the matching event allows it, and in
+`set_rate`, `fade` and `sounding`. A handle of 0 addresses nothing, except
+that `trigger` and `note_on` accept it for a voice nothing will steer.

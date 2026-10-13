@@ -65,6 +65,7 @@ cargo run --example param_table        # the parameter table, as it appears in t
 | `src/voice.rs` | one note: oscillators, filter, envelopes, LFOs |
 | `src/osc.rs`, `src/sample.rs`, `src/filter.rs`, `src/env.rs`, `src/lfo.rs`, `src/macros.rs` | the parts of a voice |
 | `src/taps.rs` | the scope, the meters and the sounding notes, for a display |
+| `src/sequencer.rs` | the hook a song player uses to be called at exact frames from inside the render |
 | `src/fx.rs` | echo, reverb, chorus, distortion, bit crusher, limiter |
 
 To add a parameter, add a line to the table in `src/params.rs` with an id that has never been used, use it in the engine, then run `cargo run --example param_table` and paste the result into the document; a test fails if the two disagree.

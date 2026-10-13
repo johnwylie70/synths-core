@@ -11,6 +11,7 @@ use crate::macros::{Macro, Step, MACRO_SMOOTH, MAX_STEPS, STEP_SIZE};
 use crate::math::{hz_to_note, Rng};
 use crate::params::{self, *};
 use crate::sample::{Sample, LOOP_PINGPONG};
+use crate::sequencer::{Sequencer, Trigger, Voices};
 use crate::taps::{Taps, NOTES_SIZE};
 use crate::voice::{Start, Voice, VoiceState, CONTROL};
 
@@ -189,6 +190,10 @@ pub struct Engine {
     rms_keep: f32,
     rms_take: f32,
     notes_in: u32,
+    /// Something that plays by itself, called at exact frames from `render`.
+    sequencer: Option<Box<dyn Sequencer>>,
+    /// The frame it next wants to be called on.
+    sequencer_at: u64,
     /// Buffers for hosts that use the C interface.
     pub(crate) out_l: Box<[f32]>,
     pub(crate) out_r: Box<[f32]>,
@@ -234,6 +239,8 @@ impl Engine {
             rms_keep: (-(CONTROL as f32) / (0.1 * sr)).exp(),
             rms_take: 1.0 - (-1.0 / (0.1 * sr)).exp(),
             notes_in: 0,
+            sequencer: None,
+            sequencer_at: 0,
             out_l: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             out_r: vec![0.0; OUTPUT_FRAMES].into_boxed_slice(),
             event_buf: vec![Event::default(); EVENT_BUFFER].into_boxed_slice(),
@@ -285,6 +292,10 @@ impl Engine {
         self.master = self.globals[MASTER_VOLUME - GLOBAL_BASE];
         self.quiet = u64::MAX / 2;
         self.asleep = true;
+        self.sequencer_at = self.time;
+        if let Some(s) = self.sequencer.as_mut() {
+            s.reset();
+        }
         self.write_notes();
     }
 
@@ -780,6 +791,133 @@ impl Engine {
         }
     }
 
+    // ---- the sequencer hook ----
+
+    /// Install a sequencer (or, with `None`, take it away), and get back
+    /// the one that was there. `render` calls it on the next frame it
+    /// renders, and after that whenever the sequencer asks. Voices it has
+    /// started carry on; stop them first if they should not.
+    ///
+    /// This is not for the middle of a render, and what is handed back
+    /// should be dropped away from the audio thread, since that frees memory.
+    pub fn set_sequencer(&mut self, sequencer: Option<Box<dyn Sequencer>>) -> Option<Box<dyn Sequencer>> {
+        self.sequencer_at = self.time;
+        core::mem::replace(&mut self.sequencer, sequencer)
+    }
+
+    pub fn has_sequencer(&self) -> bool {
+        self.sequencer.is_some()
+    }
+
+    /// Call the sequencer for the frame the engine has reached.
+    fn run_sequencer(&mut self) {
+        if let Some(mut s) = self.sequencer.take() {
+            let wait = s.advance(&mut Voices::new(self));
+            self.sequencer_at = self.time + wait.max(1) as u64;
+            self.sequencer = Some(s);
+        }
+    }
+
+    /// Something has changed and something may be about to sound.
+    fn wake(&mut self) {
+        self.dirty = true;
+        self.quiet = 0;
+        self.asleep = false;
+    }
+
+    /// The note at which a sample plays at `rate` frames a second.
+    fn note_for_rate(sample: &Sample, rate: f32) -> f32 {
+        (sample.base_note + 12.0 * (rate / sample.rate).log2()).clamp(-24.0, 160.0)
+    }
+
+    /// Start a sample on a part as the only voice with its handle. See `Voices::trigger`.
+    pub(crate) fn trigger(&mut self, part: u16, handle: u32, t: &Trigger) -> bool {
+        let pi = part as usize;
+        let sample = match self.samples.get(t.slot as usize) {
+            Some(Some(s)) if pi < NUM_PARTS => s,
+            _ => return false,
+        };
+        if !(t.rate.is_finite() && t.rate > 0.0) {
+            return false;
+        }
+        let note = Engine::note_for_rate(sample, t.rate);
+        self.wake();
+        if handle != 0 {
+            for v in self.voices.iter_mut() {
+                if v.active() && v.part == part && v.handle == handle {
+                    Engine::cut(&mut self.parts, v);
+                }
+            }
+        }
+        let slot = self.take_voice();
+        self.born += 1;
+        let start = Start {
+            part,
+            handle,
+            note,
+            from: note,
+            glide: 0.0,
+            velocity: 1.0,
+            detune: 0.0,
+            pan: 0.0,
+            gain: 1.0,
+            random_phase: false,
+            seed: self.rng.next_u32(),
+            born: self.born,
+        };
+        let v = &mut self.voices[slot];
+        v.start(&start, &self.parts[pi].p, &self.samples, self.sample_rate);
+        v.use_sample(t.slot, t.position);
+        v.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 4.0) } else { 1.0 };
+        v.pan = if t.pan.is_finite() { t.pan.clamp(-1.0, 1.0) } else { 0.0 };
+        true
+    }
+
+    /// Play the handle's voices at `rate` frames of their sample a second.
+    pub(crate) fn voice_rate(&mut self, part: u16, handle: u32, rate: f32, glide: f32) {
+        if handle == 0 || !(rate.is_finite() && rate > 0.0) {
+            return;
+        }
+        self.wake();
+        let sr = self.sample_rate;
+        let glide = if glide.is_finite() { glide } else { 0.0 };
+        for v in self.voices.iter_mut() {
+            if !(v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part)) {
+                continue;
+            }
+            let slot = match self.parts.get(v.part as usize) {
+                Some(p) => v.sample_slot(&p.p),
+                None => continue,
+            };
+            if let Some(Some(sample)) = self.samples.get(slot) {
+                v.set_pitch(Engine::note_for_rate(sample, rate), glide, sr);
+            }
+        }
+    }
+
+    /// Fade the handle's voices to nothing over `seconds`, and end them.
+    pub(crate) fn voice_fade(&mut self, part: u16, handle: u32, seconds: f32) {
+        if handle == 0 {
+            return;
+        }
+        self.wake();
+        let sr = self.sample_rate;
+        for v in self.voices.iter_mut() {
+            if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
+                if seconds > 0.0 {
+                    v.fade_out(seconds, sr);
+                } else {
+                    Engine::cut(&mut self.parts, v);
+                }
+            }
+        }
+    }
+
+    /// Is any voice with this handle still sounding on the part?
+    pub(crate) fn voice_sounding(&self, part: u16, handle: u32) -> bool {
+        handle != 0 && self.voices.iter().any(|v| v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part))
+    }
+
     // ---- sound ----
 
     /// Render the next frames into `left` and `right` (any length; the
@@ -788,6 +926,11 @@ impl Engine {
         let frames = left.len().min(right.len());
         let mut done = 0;
         while done < frames {
+            // The sequencer goes first, so that a host's event for the same
+            // frame has the last word.
+            if self.sequencer.is_some() && self.sequencer_at <= self.time {
+                self.run_sequencer();
+            }
             while let Some(t) = self.queue.next_time() {
                 if t > self.time {
                     break;
@@ -817,6 +960,9 @@ impl Engine {
                 n = n.min((t - self.time).min(CONTROL as u64) as usize);
             }
             n = n.min((self.arp_at - self.time).min(CONTROL as u64) as usize);
+            if self.sequencer.is_some() {
+                n = n.min((self.sequencer_at - self.time).min(CONTROL as u64) as usize);
+            }
             if self.tick_pos == 0 && self.live_ramps > 0 {
                 self.run_ramps();
             }
@@ -942,7 +1088,10 @@ impl Engine {
                 part.bus_l[..n].fill(0.0);
                 part.bus_r[..n].fill(0.0);
             }
-            if v.render(&mut part.bus_l[..n], &mut part.bus_r[..n], &self.samples) {
+            // A voice that has finished is let go at the end of the control
+            // period, not part way through, so that the moment does not
+            // depend on how a host slices time.
+            if v.render(&mut part.bus_l[..n], &mut part.bus_r[..n], &self.samples) || n != to_tick {
                 sounding += 1;
             } else {
                 part.ended[0] += v.last[0];

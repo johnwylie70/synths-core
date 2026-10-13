@@ -65,6 +65,16 @@ pub struct Voice {
     /// Set directly on a live voice (the tracker does this).
     pub volume: f32,
     pub pan: f32,
+    /// A sample slot this voice plays as oscillator 1 whatever the patch
+    /// says, or -1 to follow the patch.
+    own_sample: i32,
+    /// A fade to nothing: the level it has reached, and how far it falls each sample.
+    fade: f32,
+    fade_step: f32,
+    /// The fade was asked for since `control` last ran.
+    fade_new: bool,
+    /// The fade is over: the voice ends.
+    faded: bool,
 
     osc: [Osc; 2],
     sub: Osc,
@@ -138,6 +148,11 @@ impl Voice {
             unison_gain: 1.0,
             volume: 1.0,
             pan: 0.0,
+            own_sample: -1,
+            fade: 1.0,
+            fade_step: 0.0,
+            fade_new: false,
+            faded: false,
             osc: [Osc::default(); 2],
             sub: Osc::default(),
             noise: Noise::new(1),
@@ -274,6 +289,28 @@ impl Voice {
         }
     }
 
+    /// Play a sample slot as oscillator 1 from `position` frames in,
+    /// whatever the part's patch says.
+    pub fn use_sample(&mut self, slot: u16, position: f64) {
+        self.own_sample = slot as i32;
+        self.players[0].start(position);
+    }
+
+    /// The sample slot oscillator 1 plays (whether or not its wave is a sample).
+    pub fn sample_slot(&self, p: &[f32; PART_PARAMS]) -> usize {
+        if self.own_sample >= 0 {
+            self.own_sample as usize
+        } else {
+            p[OSC1_SAMPLE] as usize
+        }
+    }
+
+    /// Fade to nothing over `seconds` and end there.
+    pub fn fade_out(&mut self, seconds: f32, sample_rate: f32) {
+        self.fade_step = 1.0 / (seconds * sample_rate).max(1.0);
+        self.fade_new = true;
+    }
+
     /// Jump to a position in the sample, in frames.
     pub fn set_position(&mut self, frames: f32) {
         for pl in self.players.iter_mut() {
@@ -362,6 +399,9 @@ impl Voice {
                     self.levels[0] = 0.0;
                 }
             }
+            if i == 0 && self.own_sample >= 0 {
+                wave = WAVE_SAMPLE;
+            }
             self.waves[i] = wave;
             let mut semis = p[OSC1_COARSE + b] + p[OSC1_FINE + b] * 0.01;
             if i == 1 {
@@ -369,7 +409,7 @@ impl Voice {
             }
             let keytrack = p[OSC1_KEYTRACK + b] >= 0.5;
             if wave == WAVE_SAMPLE {
-                let slot = p[OSC1_SAMPLE + b] as usize;
+                let slot = if i == 0 { self.sample_slot(p) } else { p[OSC1_SAMPLE + b] as usize };
                 self.slots[i] = slot as u16;
                 let rate = match samples.get(slot) {
                     Some(Some(s)) => {
@@ -448,6 +488,16 @@ impl Voice {
         // Loudness and pan.
         let sens = p[VELOCITY_SENS];
         let mut gain = (1.0 - sens + sens * self.velocity) * self.volume * self.unison_gain * step.volume;
+        if self.fade_step > 0.0 {
+            if self.fade_new {
+                self.fade_new = false;
+            } else {
+                self.faded = self.fade <= 0.0;
+                self.fade = (self.fade - self.fade_step * elapsed as f32).max(0.0);
+            }
+            // The level aimed at is where the fade will be when it is reached.
+            gain *= (self.fade - self.fade_step * len as f32).max(0.0);
+        }
         gain *= 1.0 - p[LFO1_AMP] * (0.5 - 0.5 * lfo[0]);
         gain *= 1.0 - p[LFO2_AMP] * (0.5 - 0.5 * lfo[1]);
         let pan = (p[PAN] + self.pan + self.unison_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
@@ -600,7 +650,7 @@ impl Voice {
         self.gain = [gl, gr];
         self.last = [last_l, last_r];
         self.since_control += n as u32;
-        sounding && !self.amp_env.finished(&self.amp_shape)
+        sounding && !self.faded && !self.amp_env.finished(&self.amp_shape)
     }
 }
 
