@@ -979,8 +979,14 @@ change that.
   takes the new note's handle and velocity.
 - **`mode` legato.** The same, but while the old note is still held the
   envelopes do not start again and the velocity does not change.
-- In both, a `note_off` matches the latest note only. There is no memory of
-  the notes held before it.
+- In both, the part remembers the notes that are held down (the last 16).
+  A `note_off` for the sounding note, while others are still held, goes back
+  to the latest of them: the voice slides there over `glide` seconds and
+  takes that note's handle and velocity, restarting its envelopes in mono
+  mode and not in legato. A `note_off` for a held note that is not the one
+  sounding just forgets it. When the last held note is let go, the voice is
+  let go. `all_notes_off`, `synths_reset` and a `note_on` in poly mode
+  forget the held notes.
 - **`glide`** in poly mode slides each new voice from the last note played
   on the part.
 - **Taking over.** When all the voices allowed (the `voices` parameter, at

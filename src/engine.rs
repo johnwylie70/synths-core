@@ -48,12 +48,38 @@ pub enum SampleError {
     Null = -4,
 }
 
+/// How many held notes a part remembers in mono and legato mode.
+const MAX_HELD: usize = 16;
+
+/// A note that is held down on a part in mono or legato mode.
+#[derive(Clone, Copy, Default)]
+struct HeldNote {
+    note: f32,
+    handle: u32,
+    velocity: f32,
+}
+
+impl HeldNote {
+    /// Does a note-off with this handle (or, with no handle, this note) mean this note?
+    #[inline]
+    fn is(&self, handle: u32, note: f32) -> bool {
+        if handle != 0 {
+            self.handle == handle
+        } else {
+            (self.note - note).abs() < 0.005
+        }
+    }
+}
+
 struct Part {
     p: [f32; PART_PARAMS],
     lfo: [FreeLfo; 2],
     /// The last note played, for glide.
     last_note: f32,
     has_note: bool,
+    /// Mono and legato: the notes held down, the latest last.
+    held: [HeldNote; MAX_HELD],
+    held_len: usize,
     /// What is left of a voice that was cut, fading out fast so it does not click.
     declick: [f32; 2],
     /// The same for a voice that ended during this chunk: it starts with the next.
@@ -78,6 +104,8 @@ impl Part {
             lfo: [FreeLfo::default(); 2],
             last_note: 0.0,
             has_note: false,
+            held: [HeldNote::default(); MAX_HELD],
+            held_len: 0,
             declick: [0.0; 2],
             ended: [0.0; 2],
             volume: p[VOLUME],
@@ -89,6 +117,21 @@ impl Part {
             bus_r: [0.0; CONTROL],
             in_use: false,
         }
+    }
+}
+
+impl Part {
+    /// Take a note out of the notes held down. With a handle, the notes with
+    /// that handle; without, the notes at that pitch.
+    fn forget(&mut self, handle: u32, note: f32) {
+        let mut kept = 0;
+        for i in 0..self.held_len {
+            if !self.held[i].is(handle, note) {
+                self.held[kept] = self.held[i];
+                kept += 1;
+            }
+        }
+        self.held_len = kept;
     }
 }
 
@@ -227,6 +270,7 @@ impl Engine {
             part.ended = [0.0; 2];
             part.next_arp = ArpSpec::NONE;
             part.has_note = false;
+            part.held_len = 0;
             part.volume = part.p[VOLUME];
         }
         for r in self.ramps.iter_mut() {
@@ -528,7 +572,18 @@ impl Engine {
         let sr = self.sample_rate;
         let glide = self.parts[pi].p[GLIDE];
         let mode = self.parts[pi].p[MODE] as u8;
-        if mode != 0 {
+        if mode == 0 {
+            self.parts[pi].held_len = 0;
+        } else {
+            // Remember the note, so that letting go of a later one comes back to it.
+            let p = &mut self.parts[pi];
+            p.forget(handle, note);
+            if p.held_len == MAX_HELD {
+                p.held.copy_within(1.., 0);
+                p.held_len -= 1;
+            }
+            p.held[p.held_len] = HeldNote { note, handle, velocity };
+            p.held_len += 1;
             // One note at a time: a voice that is already sounding moves to the new note.
             let mut found = false;
             for v in self.voices.iter_mut() {
@@ -579,6 +634,42 @@ impl Engine {
         self.parts[pi].has_note = true;
     }
 
+    /// Let go of a note on one part. In mono and legato mode, letting go of
+    /// the sounding note while others are still held goes back to the latest
+    /// of them.
+    fn note_off(&mut self, part: u16, handle: u32, note: f32) {
+        let sr = self.sample_rate;
+        let pi = part as usize;
+        if pi >= NUM_PARTS {
+            return;
+        }
+        let p = &mut self.parts[pi];
+        let mode = p.p[MODE] as u8;
+        if mode != 0 && p.held_len > 0 {
+            let was_sounding = p.held[p.held_len - 1].is(handle, note);
+            p.forget(handle, note);
+            if was_sounding && p.held_len > 0 {
+                let back = p.held[p.held_len - 1];
+                let glide = p.p[GLIDE];
+                p.last_note = back.note;
+                for v in self.voices.iter_mut() {
+                    if v.state == VoiceState::Held && v.part == part {
+                        v.replay(back.note, back.velocity, back.handle, glide, mode == 1, sr);
+                    }
+                }
+                return;
+            }
+        }
+        for v in self.voices.iter_mut() {
+            if v.state == VoiceState::Held && v.part == part {
+                let hit = if handle != 0 { v.handle == handle } else { (v.key - note).abs() < 0.005 };
+                if hit {
+                    v.release();
+                }
+            }
+        }
+    }
+
     /// Do what an event says, now.
     pub fn apply(&mut self, e: &Event) {
         self.dirty = true;
@@ -590,16 +681,20 @@ impl Engine {
         match e.kind {
             EV_NOTE_ON => self.note_on(part, e.a, e.x, e.y),
             EV_NOTE_OFF => {
-                for v in self.voices.iter_mut() {
-                    if v.state == VoiceState::Held && (all || v.part == part) {
-                        let hit = if e.a != 0 { v.handle == e.a } else { (v.key - e.x).abs() < 0.005 };
-                        if hit {
-                            v.release();
-                        }
+                if all {
+                    for i in 0..NUM_PARTS as u16 {
+                        self.note_off(i, e.a, e.x);
                     }
+                } else {
+                    self.note_off(part, e.a, e.x);
                 }
             }
             EV_ALL_NOTES_OFF => {
+                for (i, p) in self.parts.iter_mut().enumerate() {
+                    if all || i == part as usize {
+                        p.held_len = 0;
+                    }
+                }
                 for v in self.voices.iter_mut() {
                     if v.active() && (all || v.part == part) {
                         if e.a != 0 {

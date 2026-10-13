@@ -24,3 +24,4 @@
 - Samples play backwards (`osc1.reverse`, `osc2.reverse`): one-shots from their last frame, forward loops the other way round.
 - A sample played faster than it was recorded is smoothed so that it does not alias harshly (`sample.antialias`, on to begin with; off gives the raw sound of an old tracker).
 - The 24 dB filter resonates in both of its stages: its peak is as high as the 12 dB filter's at the same setting (it used to be about 3 dB lower, with only the first stage ringing).
+- Mono and legato mode remember the notes held down: letting go of the sounding note goes back to the latest one still held.
