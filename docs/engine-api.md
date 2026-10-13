@@ -1061,7 +1061,7 @@ bound.
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro and times it. The
-module is about 160 KB (62 KB gzipped).
+module is about 174 KB (68 KB gzipped).
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
 `_initialize`; the module is ready as soon as it is instantiated.
