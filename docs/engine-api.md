@@ -138,6 +138,10 @@ uint32_t       synths_song_info(const SynthsEngine *engine, uint32_t *out);
 uint32_t       synths_song_position(const SynthsEngine *engine, uint32_t *out);
 uint32_t       synths_song_patch_name(const SynthsEngine *engine, uint32_t instrument,
                                       uint8_t *out, uint32_t capacity);
+uint32_t       synths_song_synth(const SynthsEngine *engine, uint32_t instrument,
+                                 uint8_t *out, uint32_t capacity);
+int32_t        synths_song_replace(SynthsEngine *engine, const uint8_t *data, uint32_t len,
+                                   uint32_t first_slot);
 ```
 
 In WebAssembly a pointer is a `u32` offset into the module's `memory`, `float`
@@ -444,6 +448,21 @@ Copy the name of the synth patch an instrument plays into `out`, at most
 Returns the name's whole length: 0 for an instrument that plays samples, or
 when no song is loaded. See [Instruments that are synth patches](#instruments-that-are-synth-patches).
 
+**`synths_song_synth(engine, instrument, out: *mut u8, capacity) -> u32`**
+Copy what the song's JSON held under an instrument's `synth` key into `out`,
+as JSON text with no spaces: at most `capacity` bytes of UTF-8 with no zero
+byte. Returns the text's whole length, so a host can ask with a capacity of
+0 and come back with a buffer that fits; 0 for an instrument with none. The
+engine keeps this text for the host and does nothing with it. It comes
+through the packed form of a song as well.
+
+**`synths_song_replace(engine, data: *const u8, len, first_slot) -> i32`**
+Put a song in the place of the one that is loaded, for an editor whose song
+changes while it plays. It takes what `synths_song_load` takes and returns
+what it returns; if it fails, the loaded song is left as it was. See
+[Changing the song while it plays](#changing-the-song-while-it-plays). It
+allocates, so it is for between renders.
+
 ## Events
 
 ### The event record
@@ -514,7 +533,7 @@ millisecond at 48 kHz.
 | 12 | `macro_tick` | one part or all | | | |
 | 13 | `arp` | one part or all | handle, or 0 for the part's next note | steps a second | order |
 | 14 | `arp_more` | one part or all | handle, or 0 for the part's next note | | |
-| 15 | `song` | | what to do, 0 to 6 | its first number | its second number |
+| 15 | `song` | | what to do, 0 to 9 | its first number | its second number |
 | 16 | `record` | the part to record, when `y` is 1 | 0: stop, 1: start | sample slot | what to record: 0, 1 or 2 |
 
 Events 13 and 14 also use `z` and `b`; see [their descriptions](#the-arpeggio-of-a-note).
@@ -1189,6 +1208,9 @@ frame. `a` says what; `x` and `y` are its numbers.
 | 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and lets the last notes die away: a sample with an end plays to it, a sample that loops is faded out over a quarter of a second, and a synth patch's note is let go, to finish as its patch's release says. |
 | 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's own parts (32 and up), and no others, to half of this, sliding there over 20 milliseconds. A synth patch plays on a part of the host's, which the song does not touch: there the song's notes carry its volume themselves (the voice volume of each is multiplied by it), so the whole song is scaled, samples and patches alike. |
 | 6 | patch part | instrument, from 1 | part | Say which part plays an instrument that is a synth patch. |
+| 7 | mute | channel, from 0; below 0 for every channel | 0 off, 1 on | Silence a channel of the song, or let it be heard again. The song goes on playing it, so it comes back in the right place. |
+| 8 | solo | channel, from 0; below 0 for every channel | 0 off, 1 on | While any channel is soloed, only the soloed channels are heard (and of those, only the ones not muted). |
+| 9 | loop this pattern | 0 off, 1 on | | On, the song stays in the place of the order it is in and plays that pattern round and round; a jump or the pattern's end brings it back to the pattern's top (a pattern break to its row). That is not the song ending, whatever `repeat` says. Off, it carries on through the song from where it is. A `seek` while it is on moves the loop to the place sought. |
 
 In JavaScript, with the `event` function of [A host loop](#a-host-loop):
 
@@ -1226,6 +1248,39 @@ function only loads them, so a display can call it on every frame it draws,
 from any thread. A reading taken in the middle of a tick can have the new
 row with the old tick; it is for drawing a cursor, not for arithmetic.
 
+A muted channel changes over 20 milliseconds, without a click. A channel
+of samples is muted through its part's `volume`, as the song's volume is
+set; a synth patch's notes, on a part of the host's, are muted through
+their own volume, and nothing of the host's part is changed. Mutes, solos
+and the pattern loop last until they are changed or another song is
+loaded; `synths_reset` and `stop` leave them.
+
+### Changing the song while it plays
+
+An editor that plays a song through the engine hands over the whole song
+again each time it is edited, with `synths_song_replace`. What happens
+depends on how alike the two are.
+
+- **Nothing stops** if the new song has the same number of channels and the
+  same rules as the loaded one, no fewer instruments and no fewer samples,
+  and is given the same `first_slot`. The notes that are sounding carry on,
+  the player keeps its place, its tick, its speed and its tempo, and from
+  the next row it plays it reads the new song. Only the samples that have
+  changed are loaded again (a note playing one carries on in the new
+  sound). Played this way, the result is exactly what the new song would
+  have sounded like from the top, from the first row that differs. If the
+  place it had reached is not in the new song (a shorter order list or
+  pattern), it carries on from the top of the nearest place that is.
+- **Otherwise** the new song is loaded as `synths_song_load` loads it, the
+  sounding notes are cut, and what the host had set is put back: the song's
+  volume, mutes, solos, repeat, the pattern loop, the parts of its synth
+  patches, and its place, from the top of the row it was on; and it plays
+  on if it was playing. (A paused song comes back stopped at its place.)
+
+Either way `synths_song_position` goes on giving the order, pattern, row
+and tick, and `synths_song_info` and the other readers describe the new
+song. With no song loaded it is `synths_song_load`.
+
 ### Instruments that are synth patches
 
 In one of our own songs an instrument can be a synth patch in place of
@@ -1237,6 +1292,13 @@ of that instrument is then a note on that part (as `note_on` starts one),
 with the channel's handle, steered by the song: its pitch slides, its volume
 and pan change, and when the song lets the key go the patch's own release
 runs. An instrument whose patch has not been given a part is silent.
+
+A song can also carry the host's own description of the sound, under the
+instrument's `synth` key (`docs/song-format.md`): a preset's name and
+settings, or anything else. The engine does not read it. It keeps it with
+the song, through loading, saving and packing, and `synths_song_synth`
+hands it back as JSON text, so a host need not find it in the song's JSON
+itself.
 
 ### How it differs from the trackers
 
@@ -1724,11 +1786,11 @@ and there are none.)
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro, feeds it a live
 input and times it. The
-module is about 337 KB (135 KB gzipped), of which the song loaders and
-player are about 135 KB, the JSON song reader 35 KB of that, and the live
+module is about 354 KB (140 KB gzipped), of which the song loaders and
+player are about 150 KB, the JSON song reader 42 KB of that, and the live
 input, voice effects and recorder 29 KB. Two smaller
 modules can be built: `scripts/build-wasm.sh --no-json` leaves out the JSON
-reader (302 KB, 122 KB gzipped), and `--no-songs` the whole song player
+reader (312 KB, 125 KB gzipped), and `--no-songs` the whole song player
 (204 KB, 80 KB gzipped). See
 [Which kinds of song a build reads](#which-kinds-of-song-a-build-reads).
 

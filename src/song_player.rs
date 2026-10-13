@@ -69,6 +69,8 @@ pub struct Shared {
     info: [u32; INFO_SIZE],
     /// For each instrument, the name of its synth patch if it is one.
     patches: Vec<Option<String>>,
+    /// For each instrument, what its `synth` key held, as JSON text.
+    synths: Vec<Option<String>>,
     position: [AtomicU32; POSITION_SIZE],
 }
 
@@ -91,6 +93,12 @@ impl Shared {
     pub fn patch_name(&self, instrument: u32) -> Option<&str> {
         self.patches.get((instrument as usize).checked_sub(1)?)?.as_deref()
     }
+
+    /// What a host wrote under an instrument's `synth` key, as JSON text
+    /// (instruments count from 1).
+    pub fn synth(&self, instrument: u32) -> Option<&str> {
+        self.synths.get((instrument as usize).checked_sub(1)?)?.as_deref()
+    }
 }
 
 /// What one channel of the song has sounding.
@@ -102,6 +110,8 @@ struct Channel {
     patch: bool,
     /// The voice is a sample that goes round a loop, and so never ends by itself.
     looped: bool,
+    /// The channel is to be heard: not muted, and not left out by a solo.
+    heard: bool,
     rate: f64,
     volume: f32,
     pan: f32,
@@ -161,7 +171,7 @@ impl Channels for Adapter<'_, '_> {
         if was.part != own {
             self.voices.kill(was.part, handle);
         }
-        let mut now = Channel { part: own, patch: false, looped: false, rate: start.rate, volume: start.volume, pan: start.pan };
+        let mut now = Channel { part: own, patch: false, looped: false, heard: was.heard, rate: start.rate, volume: start.volume, pan: start.pan };
         match start.source {
             Source::Sample(sample) => {
                 if self.start_sample(channel, sample, start.offset, start.rate, start.volume, start.pan) {
@@ -176,7 +186,7 @@ impl Channels for Adapter<'_, '_> {
                 if (part as usize) < NUM_PARTS {
                     self.voices.kill(part, handle);
                     self.voices.note_on(part, handle, note_of_rate(start.rate) as f32, 1.0);
-                    self.voices.set_volume(part, handle, start.volume * self.volume);
+                    self.voices.set_volume(part, handle, start.volume * if was.heard { self.volume } else { 0.0 });
                     self.voices.set_pan(part, handle, start.pan);
                     now.part = part;
                     now.patch = true;
@@ -199,7 +209,7 @@ impl Channels for Adapter<'_, '_> {
     fn set_volume(&mut self, _frame: u32, channel: usize, volume: f32, ramp: u32) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.volume = volume;
-        let volume = if ch.patch { volume * self.volume } else { volume };
+        let volume = if ch.patch { volume * if ch.heard { self.volume } else { 0.0 } } else { volume };
         self.voices.ramp_volume(ch.part, channel as u32 + 1, volume, ramp);
     }
 
@@ -293,6 +303,13 @@ pub struct SongPlayer {
     repeat: bool,
     /// How loud the song is, 0..2 (the `volume` command).
     volume: f32,
+    /// The channels that are muted, and those that are soloed.
+    muted: Vec<bool>,
+    solo: Vec<bool>,
+    /// The place in the order now playing is played round and round.
+    loop_pattern: bool,
+    /// The song is a tracker module, played with those trackers' raw sound.
+    raw: bool,
     /// The part of a frame the last tick's length left over.
     carry: f64,
 }
@@ -313,13 +330,18 @@ impl SongPlayer {
         let shared = Arc::new(Shared {
             info,
             patches: song.instruments.iter().map(|i| i.patch.clone()).collect(),
+            synths: song.instruments.iter().map(|i| i.synth.clone()).collect(),
             position: core::array::from_fn(|_| AtomicU32::new(0)),
         });
         let channels = (0..song.channels())
-            .map(|c| Channel { part: first_part + c as u16, patch: false, looped: false, rate: 0.0, volume: 0.0, pan: 0.0 })
+            .map(|c| Channel { part: first_part + c as u16, patch: false, looped: false, heard: true, rate: 0.0, volume: 0.0, pan: 0.0 })
             .collect();
         let s = SongPlayer {
             patch_parts: vec![NO_PART; song.instruments.len()],
+            muted: vec![false; song.channels()],
+            solo: vec![false; song.channels()],
+            loop_pattern: false,
+            raw: false,
             song,
             player,
             shared,
@@ -374,7 +396,26 @@ impl SongPlayer {
         };
         self.player.seek(&self.song, order, row, &mut adapter);
         self.player.set_repeat(self.repeat);
+        // A pattern being played round and round: now the one sought.
+        self.player.hold_order(self.loop_pattern);
         self.carry = 0.0;
+    }
+
+    /// Bring every channel to the loudness the song's volume, the mutes
+    /// and the solos give it. A channel's own part has its `volume` set; a
+    /// synth patch's notes, on a part of the host's, carry it themselves.
+    fn set_levels(&mut self, voices: &mut Voices<'_>) {
+        let any_solo = self.solo.iter().any(|&s| s);
+        let frames = (0.02 * voices.sample_rate()) as u32;
+        for (c, ch) in self.channels.iter_mut().enumerate() {
+            ch.heard = !self.muted[c] && (!any_solo || self.solo[c]);
+            let level = if ch.heard { self.volume } else { 0.0 };
+            voices.set_param(self.first_part + c as u16, VOLUME, level * CHANNEL_GAIN, 0.02);
+            // (While paused, the notes are held at nothing.)
+            if ch.patch && self.state != STATE_PAUSED {
+                voices.ramp_volume(ch.part, c as u32 + 1, ch.volume * level, frames);
+            }
+        }
     }
 }
 
@@ -420,9 +461,14 @@ impl Sequencer for SongPlayer {
         whole as u32
     }
 
+    fn as_any(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
     fn reset(&mut self) {
         self.player.seek(&self.song, 0, 0, &mut Nowhere);
         self.player.set_repeat(self.repeat);
+        self.player.hold_order(self.loop_pattern);
         self.carry = 0.0;
         self.state = STATE_STOPPED;
         self.publish();
@@ -437,7 +483,8 @@ impl Sequencer for SongPlayer {
                     // Let the held voices go on from where they were.
                     let song_volume = self.volume;
                     self.each_voice(|part, handle, ch| {
-                        voices.set_volume(part, handle, if ch.patch { ch.volume * song_volume } else { ch.volume });
+                        let level = if ch.heard { song_volume } else { 0.0 };
+                        voices.set_volume(part, handle, if ch.patch { ch.volume * level } else { ch.volume });
                         if !ch.patch {
                             voices.set_rate(part, handle, ch.rate as f32, 0.0);
                         }
@@ -478,20 +525,21 @@ impl Sequencer for SongPlayer {
             SONG_VOLUME => {
                 let volume = if event.x.is_finite() { event.x.clamp(0.0, 2.0) } else { 1.0 };
                 self.volume = volume;
-                for c in 0..self.channels.len() {
-                    voices.set_param(self.first_part + c as u16, VOLUME, volume * CHANNEL_GAIN, 0.02);
+                self.set_levels(voices);
+            }
+            SONG_MUTE | SONG_SOLO => {
+                let list = if event.a == SONG_MUTE { &mut self.muted } else { &mut self.solo };
+                let on = event.y != 0.0;
+                if event.x < 0.0 {
+                    list.fill(on);
+                } else if let Some(slot) = list.get_mut(if event.x.is_finite() { event.x as usize } else { usize::MAX }) {
+                    *slot = on;
                 }
-                // A synth patch plays on a part of the host's, whose volume
-                // is the host's: the song's notes there carry the song's
-                // volume themselves. (While paused they are held at nothing.)
-                if self.state != STATE_PAUSED {
-                    let frames = (0.02 * voices.sample_rate()) as u32;
-                    self.each_voice(|part, handle, ch| {
-                        if ch.patch {
-                            voices.ramp_volume(part, handle, ch.volume * volume, frames);
-                        }
-                    });
-                }
+                self.set_levels(voices);
+            }
+            SONG_LOOP_PATTERN => {
+                self.loop_pattern = event.x != 0.0;
+                self.player.hold_order(self.loop_pattern);
             }
             SONG_PATCH_PART => {
                 let part = if event.y.is_finite() && event.y >= 0.0 && (event.y as usize) < NUM_PARTS { event.y as u16 } else { NO_PART };
@@ -525,19 +573,7 @@ pub fn install(engine: &mut Engine, song: Song, first_part: u16, first_slot: u16
     remove(engine);
 
     for (i, s) in song.samples.iter().enumerate() {
-        let slot = first_slot as usize + i;
-        let data = s.data.to_f32();
-        // An empty sample leaves an empty slot, which plays nothing.
-        if engine.load_sample(slot, &data, 1, C4_RATE as f32).is_err() {
-            let _ = engine.free_sample(slot);
-            continue;
-        }
-        let (mode, start, end) = match (s.loop_kind, s.loop_range()) {
-            (LoopKind::Forward, Some((a, b))) => (LOOP_FORWARD, a, b),
-            (LoopKind::PingPong, Some((a, b))) => (LOOP_PINGPONG, a, b),
-            _ => (LOOP_OFF, 0, 0),
-        };
-        let _ = engine.configure_sample(slot, 60.0, mode as u32, start, end);
+        load_slot(engine, first_slot as usize + i, s);
     }
 
     // A channel's part plays its sample as it is: full on at once, and gone
@@ -561,11 +597,128 @@ pub fn install(engine: &mut Engine, song: Song, first_part: u16, first_slot: u16
         }
     }
 
-    let player = SongPlayer::new(song, engine.sample_rate(), first_part, first_slot);
+    let mut player = SongPlayer::new(song, engine.sample_rate(), first_part, first_slot);
+    player.raw = raw;
     let shared = player.shared.clone();
     engine.song = Some(shared.clone());
     engine.set_sequencer(Some(Box::new(player)));
     Ok(shared)
+}
+
+/// Puts one of a song's samples into a sample slot.
+fn load_slot(engine: &mut Engine, slot: usize, s: &crate::song::Sample) {
+    let data = s.data.to_f32();
+    // An empty sample leaves an empty slot, which plays nothing.
+    if engine.load_sample(slot, &data, 1, C4_RATE as f32).is_err() {
+        let _ = engine.free_sample(slot);
+        return;
+    }
+    let (mode, start, end) = match (s.loop_kind, s.loop_range()) {
+        (LoopKind::Forward, Some((a, b))) => (LOOP_FORWARD, a, b),
+        (LoopKind::PingPong, Some((a, b))) => (LOOP_PINGPONG, a, b),
+        _ => (LOOP_OFF, 0, 0),
+    };
+    let _ = engine.configure_sample(slot, 60.0, mode as u32, start, end);
+}
+
+/// Puts `song` in the place of the song that is loaded, for an editor
+/// whose song changes while it plays. Returns true if the change was
+/// seamless.
+///
+/// If the new song has the same channels and rules as the old one, and no
+/// fewer instruments or samples, nothing stops: the notes that are
+/// sounding carry on, the player keeps its place, tick and tempo, and from
+/// its next row it reads the new song. Only the samples that differ are
+/// loaded again. (If its place is not in the new song, it carries on from
+/// the top of the nearest pattern that is.)
+///
+/// Otherwise the new song is installed afresh, and what the host had set
+/// is put back: its volume, mutes, solos, repeat, pattern loop and the
+/// parts of its synth patches, and its place, from the top of the row it
+/// was on, playing if it was playing. The sounding notes are cut.
+///
+/// With no song loaded this is `install`. It allocates, so it is for
+/// between renders.
+pub fn replace(engine: &mut Engine, song: Song, first_slot: u16, raw: bool) -> Result<bool, InstallError> {
+    if song.channels() > NUM_PARTS - FIRST_PART as usize {
+        return Err(InstallError::Parts);
+    }
+    if first_slot as usize + song.samples.len() > MAX_SAMPLES {
+        return Err(InstallError::Slots);
+    }
+    // What the host had set, in case the song has to be installed afresh.
+    struct Kept {
+        position: [u32; POSITION_SIZE],
+        repeat: bool,
+        volume: f32,
+        muted: Vec<bool>,
+        solo: Vec<bool>,
+        loop_pattern: bool,
+        patch_parts: Vec<u16>,
+    }
+    let mut song = Some(song);
+    let outcome = engine.with_sequencer(|engine, sequencer| {
+        let player = sequencer.as_any()?.downcast_mut::<SongPlayer>()?;
+        let new = song.as_ref()?;
+        let fits = new.channels() == player.song.channels()
+            && new.rules == player.song.rules
+            && new.instruments.len() >= player.song.instruments.len()
+            && new.samples.len() >= player.song.samples.len()
+            && first_slot == player.first_slot
+            && raw == player.raw;
+        if !fits {
+            return Some(Err(Kept {
+                position: player.shared.position(),
+                repeat: player.repeat,
+                volume: player.volume,
+                muted: player.muted.clone(),
+                solo: player.solo.clone(),
+                loop_pattern: player.loop_pattern,
+                patch_parts: player.patch_parts.clone(),
+            }));
+        }
+        let new = song.take()?;
+        for (i, s) in new.samples.iter().enumerate() {
+            if player.song.samples.get(i) != Some(s) {
+                load_slot(engine, first_slot as usize + i, s);
+            }
+        }
+        let fresh = SongPlayer::new(new, engine.sample_rate(), player.first_part, first_slot);
+        player.song = fresh.song;
+        player.shared = fresh.shared;
+        player.patch_parts.resize(player.song.instruments.len(), NO_PART);
+        player.player.retarget(&player.song);
+        player.publish();
+        Some(Ok(player.shared.clone()))
+    });
+    match outcome.flatten() {
+        Some(Ok(shared)) => {
+            engine.song = Some(shared);
+            Ok(true)
+        }
+        kept => {
+            let Some(song) = song.take() else { return Ok(false) };
+            install(engine, song, FIRST_PART, first_slot, raw)?;
+            let Some(Err(kept)) = kept else { return Ok(false) };
+            let mut send = |command: u32, x: f32, y: f32| engine.apply(&Event::song(0.0, command, x, y));
+            for (i, &part) in kept.patch_parts.iter().enumerate() {
+                send(SONG_PATCH_PART, i as f32 + 1.0, if part == NO_PART { -1.0 } else { part as f32 });
+            }
+            send(SONG_REPEAT, kept.repeat as u32 as f32, 0.0);
+            send(SONG_VOLUME, kept.volume, 0.0);
+            for (c, (&muted, &solo)) in kept.muted.iter().zip(&kept.solo).enumerate() {
+                send(SONG_MUTE, c as f32, muted as u32 as f32);
+                send(SONG_SOLO, c as f32, solo as u32 as f32);
+            }
+            let [state, order, _, row, ..] = kept.position;
+            send(SONG_SEEK, order as f32, row as f32);
+            send(SONG_LOOP_PATTERN, kept.loop_pattern as u32 as f32, 0.0);
+            if state == STATE_PLAYING {
+                send(SONG_PLAY, 0.0, 0.0);
+            }
+            Ok(false)
+        }
+    }
 }
 
 /// Takes the loaded song out of the engine: its voices are cut and its

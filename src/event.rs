@@ -37,6 +37,9 @@ pub const SONG_SEEK: u32 = 3;
 pub const SONG_REPEAT: u32 = 4;
 pub const SONG_VOLUME: u32 = 5;
 pub const SONG_PATCH_PART: u32 = 6;
+pub const SONG_MUTE: u32 = 7;
+pub const SONG_SOLO: u32 = 8;
+pub const SONG_LOOP_PATTERN: u32 = 9;
 
 /// The part number that means "every part".
 pub const ALL_PARTS: u16 = 0xFFFF;
@@ -57,7 +60,7 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_MACRO_TICK, "macro_tick", "part (65535: every part): step the macros of parts with macro.sync on"),
     (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
     (EV_ARP_MORE, "arp_more", "part; a: handle, or 0 for the part's next note; b: offsets 4-7, a signed byte each"),
-    (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part)"),
+    (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part), 7 mute (x: channel from 0, or below 0 for all; y: 0 off, 1 on), 8 solo (the same), 9 loop this pattern (x: 0 off, 1 on)"),
     (EV_RECORD, "record", "a: 0 stop, 1 start; x: sample slot (made with synths_record_buffer); y: what to record, 0 the live input, 1 a part (part: which), 2 the whole output"),
 ];
 

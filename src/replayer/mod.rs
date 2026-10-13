@@ -180,13 +180,39 @@ pub(crate) struct Visited {
     /// The order list ran out and the song went back to its restart place:
     /// the next row played is the song beginning again.
     pub wrapped: bool,
+    /// A place in the order to stay in, playing its pattern round and round.
+    pub hold: Option<usize>,
 }
 
 impl Visited {
     const ROWS: usize = crate::song::MAX_ROWS;
 
     pub fn new(orders: usize) -> Visited {
-        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false, wrapped: false }
+        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false, wrapped: false, hold: None }
+    }
+
+    /// The same record for a song that has replaced the one being played:
+    /// nothing of the new song has been played yet.
+    pub fn renewed(&self, orders: usize) -> Visited {
+        Visited { loops: self.loops, repeat: self.repeat, stopped: self.stopped, hold: self.hold.map(|h| h.min(orders.max(1) - 1)), ..Visited::new(orders) }
+    }
+
+    /// Called with the place the next row is at, before it is played. If
+    /// one place in the order is being played round and round, and the song
+    /// has just left it (off the end of its pattern, or by a jump), this
+    /// puts it back, at the top unless a pattern break named a row. Returns
+    /// true while a place is being held: its rows come round again without
+    /// the song having ended.
+    pub fn keep(&mut self, order: &mut usize, row: &mut usize, song: &Song) -> bool {
+        let Some(hold) = self.hold else { return false };
+        if *order != hold {
+            *order = hold.min(song.orders.len().saturating_sub(1));
+            if *row >= song.rows_at(*order) as usize {
+                *row = 0;
+            }
+        }
+        self.wrapped = false;
+        true
     }
 
     pub fn clear(&mut self) {
@@ -312,6 +338,35 @@ impl Player {
         match &self.core {
             Core::Pt(r) => r.visited.stopped,
             Core::Ft2(r) => r.visited.stopped,
+        }
+    }
+
+    /// Stays in the place in the order that is playing now, going round its
+    /// pattern again and again (`true`), or carries on through the song
+    /// from wherever it is (`false`).
+    pub fn hold_order(&mut self, on: bool) {
+        let order = self.position().order as usize;
+        let visited = match &mut self.core {
+            Core::Pt(r) => &mut r.visited,
+            Core::Ft2(r) => &mut r.visited,
+        };
+        if visited.hold.is_some() != on {
+            // Which rows have been played says nothing about the song's
+            // end while one pattern goes round: begin the record again.
+            visited.clear();
+        }
+        visited.hold = on.then_some(order);
+    }
+
+    /// The song being played has been replaced by `song`, which has the
+    /// same channels and rules and no fewer instruments or samples. The
+    /// player carries on from where it is, reading the new song from its
+    /// next row; if that place is not in the new song, from the top of the
+    /// nearest pattern that is.
+    pub fn retarget(&mut self, song: &Song) {
+        match &mut self.core {
+            Core::Pt(r) => r.retarget(song),
+            Core::Ft2(r) => r.retarget(song),
         }
     }
 

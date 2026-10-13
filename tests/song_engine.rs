@@ -372,8 +372,9 @@ fn the_document_describes_every_song_function_and_the_song_event() {
             assert!(doc.matches(&format!("{name}(")).count() >= 2, "{name} should be in the header and described");
         }
     }
-    assert_eq!(count, 9);
+    assert_eq!(count, 11);
     for text in [
+        "| 7 | mute |", "| 8 | solo |", "| 9 | loop this pattern |", "what to do, 0 to 9",
         "SONG_OK 0", "SONG_NULL -1", "SONG_BAD -2", "SONG_MISSING_FILE -3", "SONG_NO_PARTS -4", "SONG_NO_SLOTS -5",
         "| 0 | stop |", "| 1 | play |", "| 2 | pause |", "| 3 | seek |", "| 4 | repeat |", "| 5 | volume |", "| 6 | patch part |",
         "fn event(&mut self, event: &Event, voices: &mut Voices<'_>) -> bool",
@@ -381,6 +382,7 @@ fn the_document_describes_every_song_function_and_the_song_event() {
         assert!(doc.contains(text), "the document no longer says: {text}");
     }
     assert_eq!((SONG_STOP, SONG_PLAY, SONG_PAUSE, SONG_SEEK, SONG_REPEAT, SONG_VOLUME, SONG_PATCH_PART), (0, 1, 2, 3, 4, 5, 6));
+    assert_eq!((SONG_MUTE, SONG_SOLO, SONG_LOOP_PATTERN), (7, 8, 9));
     assert_eq!((STATE_NONE, STATE_STOPPED, STATE_PLAYING, STATE_PAUSED, POSITION_SIZE, INFO_SIZE), (0, 1, 2, 3, 10, 8));
     assert_eq!(CHANNEL_GAIN, 0.5);
 }
@@ -646,4 +648,228 @@ fn the_songs_volume_reaches_synth_patches_and_leaves_the_hosts_parts_alone() {
         assert!((half / full - 0.5).abs() < 0.02 && (double / full - 2.0).abs() < 0.08, "at {at}: {half} and {double} against {full}");
     }
     assert_eq!(level(0.0, 5000.0), 0.0);
+}
+
+#[test]
+fn a_host_can_read_back_what_it_wrote_about_an_instruments_synth() {
+    let text = held_notes("").replace(r#""patch": "my-lead""#, r#""patch": "my-lead", "synth": {"preset": "lead", "set": {"filter.cutoff": 800}}"#);
+    let wanted = r#"{"preset":"lead","set":{"filter.cutoff":800}}"#;
+    let _turn = take_turn();
+    // From the JSON, and from the packed form of it.
+    let packed_len = unsafe { synths_song_pack(text.as_ptr(), text.len() as u32) };
+    assert!(packed_len > 0);
+    let packed = unsafe { std::slice::from_raw_parts(synths_song_packed(), packed_len as usize) }.to_vec();
+    for file in [text.as_bytes(), &packed[..]] {
+        let mut engine = Engine::new(SR);
+        assert_eq!(load_in_turn(&mut engine, file, 0), SONG_OK);
+        let mut out = [0u8; 64];
+        assert_eq!(unsafe { synths_song_synth(&*engine, 2, out.as_mut_ptr(), 64) }, wanted.len() as u32);
+        assert_eq!(&out[..wanted.len()], wanted.as_bytes());
+        // A short buffer gets the start of it and is told the whole length.
+        let mut short = [0u8; 8];
+        assert_eq!(unsafe { synths_song_synth(&*engine, 2, short.as_mut_ptr(), 4) }, wanted.len() as u32);
+        assert_eq!(&short, b"{\"pr\0\0\0\0");
+        for none in [0, 1, 3, 999] {
+            assert_eq!(unsafe { synths_song_synth(&*engine, none, out.as_mut_ptr(), 64) }, 0);
+        }
+    }
+    assert_eq!(unsafe { synths_song_synth(std::ptr::null(), 2, std::ptr::null_mut(), 0) }, 0);
+}
+
+/// How loud the sample channel (part 32) and the patch channel (part 10)
+/// of `held_notes` are, a little while after `events` have been sent.
+fn two_levels(events: &[Event]) -> (f32, f32) {
+    let mut engine = Engine::new(SR);
+    assert_eq!(load(&mut engine, held_notes("").as_bytes(), 0), SONG_OK, "{}", error());
+    engine.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 10.0));
+    engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+    render(&mut engine, 4410, 256);
+    for e in events {
+        engine.push(*e);
+    }
+    // Long enough for the meters to fall to nothing where there is nothing.
+    render(&mut engine, 88200, 256);
+    let level = |part: u32| engine.taps().read_levels(part).unwrap()[2];
+    (level(32), level(10))
+}
+
+#[test]
+fn channels_of_a_song_can_be_muted_and_soloed() {
+    let song = |command: u32, channel: f32, on: f32| Event::song(0.0, command, channel, on);
+    let (sample, patch) = two_levels(&[]);
+    assert!(sample > 0.05 && patch > 0.05);
+    let near = |got: (f32, f32), want: (f32, f32)| (got.0 - want.0).abs() < 0.01 * sample && (got.1 - want.1).abs() < 0.01 * patch;
+    // Mute one or the other: a sample's channel, and a synth patch's.
+    assert!(near(two_levels(&[song(SONG_MUTE, 0.0, 1.0)]), (0.0, patch)));
+    assert!(near(two_levels(&[song(SONG_MUTE, 1.0, 1.0)]), (sample, 0.0)));
+    assert!(near(two_levels(&[song(SONG_MUTE, 1.0, 1.0), song(SONG_MUTE, 1.0, 0.0)]), (sample, patch)));
+    // Solo: only the soloed channels are heard, and a mute still counts.
+    assert!(near(two_levels(&[song(SONG_SOLO, 1.0, 1.0)]), (0.0, patch)));
+    assert!(near(two_levels(&[song(SONG_SOLO, 0.0, 1.0), song(SONG_SOLO, 1.0, 1.0)]), (sample, patch)));
+    assert!(near(two_levels(&[song(SONG_SOLO, 0.0, 1.0), song(SONG_MUTE, 0.0, 1.0)]), (0.0, 0.0)));
+    // Below 0 is every channel; a channel the song does not have is nothing.
+    assert!(near(two_levels(&[song(SONG_MUTE, -1.0, 1.0)]), (0.0, 0.0)));
+    assert!(near(two_levels(&[song(SONG_SOLO, 1.0, 1.0), song(SONG_MUTE, 0.0, 1.0), song(SONG_SOLO, -1.0, 0.0), song(SONG_MUTE, -1.0, 0.0)]), (sample, patch)));
+    assert!(near(two_levels(&[song(SONG_MUTE, 7.0, 1.0), song(SONG_SOLO, f32::NAN, 1.0)]), (sample, patch)));
+    // The song's volume and a mute work together, either way round.
+    assert!(near(two_levels(&[song(SONG_VOLUME, 0.5, 0.0), song(SONG_MUTE, 0.0, 1.0)]), (0.0, 0.5 * patch)));
+    assert!(near(two_levels(&[song(SONG_MUTE, 1.0, 1.0), song(SONG_VOLUME, 0.5, 0.0)]), (0.5 * sample, 0.0)));
+    // A note that starts while its channel is muted is silent, and is heard when the mute comes off.
+    let mut engine = Engine::new(SR);
+    assert_eq!(load(&mut engine, held_notes("").as_bytes(), 0), SONG_OK);
+    engine.push(Event::song(0.0, SONG_PATCH_PART, 2.0, 10.0));
+    engine.push(song(SONG_MUTE, 1.0, 1.0));
+    engine.push(Event::song(0.0, SONG_PLAY, 0.0, 0.0));
+    render(&mut engine, 8820, 256);
+    assert_eq!(engine.taps().read_levels(10).unwrap()[2], 0.0);
+    engine.push(song(SONG_MUTE, 1.0, 0.0));
+    render(&mut engine, 83790, 256);
+    assert!((engine.taps().read_levels(10).unwrap()[2] - patch).abs() < 0.02 * patch);
+    // Nothing of the host's own part was changed to do it.
+    assert_eq!(engine.param(10, synths_core::params::VOLUME), 1.0);
+}
+
+/// Two patterns of four rows, played one after the other: the first has a
+/// note on every row and the second is empty.
+fn two_patterns(rules: Rules) -> Song {
+    let notes = ["C-4 01 000", "E-4 01 000", "G-4 01 000", "C-5 01 000"].map(|c| cells(rules, c));
+    let notes: Vec<&str> = notes.iter().map(String::as_str).collect();
+    let empty = cells(rules, "... .. 000");
+    let mut s = song(rules, 4, vec![square(32, 1)], vec![pattern(4, &notes), pattern(4, &[&empty[..]; 4])]);
+    s.orders = vec![0, 1];
+    s
+}
+
+/// A row with something in its first channel, written for either kind of
+/// song (an XM cell has a volume column as well).
+fn cells(rules: Rules, cell: &str) -> String {
+    if rules == Rules::FastTracker2 {
+        format!("{} .. {}", &cell[..6], &cell[7..])
+    } else {
+        cell.to_string()
+    }
+}
+
+/// A pattern of four rows from four cells of the first channel.
+fn four(rules: Rules, rows: [&str; 4]) -> Pattern {
+    let rows = rows.map(|c| cells(rules, c));
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    pattern(4, &rows)
+}
+
+/// The packed form: it can hold short patterns under either set of rules.
+fn pack(song: &Song) -> Vec<u8> {
+    binary::save(song)
+}
+
+#[test]
+fn one_pattern_can_be_played_round_and_round() {
+    let row = 6 * 882;
+    let mut engine = playing(&pack(&two_patterns(Rules::ProTracker)));
+    engine.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
+    engine.push(Event::song(0.0, SONG_LOOP_PATTERN, 1.0, 0.0));
+    // Twenty rows on it is still in the first place of the order, going
+    // round its four rows, and that is not the song coming to its end.
+    let mut rows = Vec::new();
+    for _ in 0..20 {
+        render(&mut engine, row, 256);
+        let p = position(&engine);
+        assert_eq!((p[0], p[1], p[2], p[7]), (STATE_PLAYING, 0, 0, 0));
+        rows.push(p[3]);
+    }
+    assert_eq!(rows[..8], [0, 1, 2, 3, 0, 1, 2, 3]);
+    assert!(engine.active_voices() > 0);
+    // Let go (as the pattern's first row comes round once more), it plays
+    // that pattern out and carries on into the second.
+    engine.push(Event::song(0.0, SONG_LOOP_PATTERN, 0.0, 0.0));
+    render(&mut engine, row * 4, 256);
+    assert_eq!((position(&engine)[1], position(&engine)[3]), (0, 3));
+    render(&mut engine, row * 2, 256);
+    assert_eq!((position(&engine)[0], position(&engine)[1], position(&engine)[3]), (STATE_PLAYING, 1, 1));
+    // Seeking while a pattern is being looped loops the one sought.
+    engine.push(Event::song(0.0, SONG_LOOP_PATTERN, 1.0, 0.0));
+    engine.push(Event::song(0.0, SONG_SEEK, 1.0, 2.0));
+    render(&mut engine, row * 9, 256);
+    assert_eq!((position(&engine)[0], position(&engine)[1]), (STATE_PLAYING, 1));
+    // A jump out of the pattern (B00 here) does not get out either.
+    for rules in [Rules::ProTracker, Rules::FastTracker2] {
+        let mut jumping = two_patterns(rules);
+        jumping.patterns[1] = four(rules, ["... .. 000", "... .. B00", "... .. 000", "... .. 000"]);
+        let mut engine = playing(&pack(&jumping));
+        engine.push(Event::song(0.0, SONG_SEEK, 1.0, 0.0));
+        engine.push(Event::song(0.0, SONG_LOOP_PATTERN, 1.0, 0.0));
+        for _ in 0..12 {
+            render(&mut engine, row, 256);
+            assert_eq!(position(&engine)[1], 1);
+        }
+    }
+}
+
+#[test]
+fn a_song_can_be_replaced_while_it_plays_without_a_break() {
+    // The song an editor has open, and the same song after an edit to its
+    // last two rows and to the pattern after.
+    let row = 6 * 882;
+    for rules in [Rules::ProTracker, Rules::FastTracker2] {
+        let before = two_patterns(rules);
+        let mut after = two_patterns(rules);
+        after.patterns[0] = four(rules, ["C-4 01 000", "E-4 01 000", "A-4 01 000", "D-5 01 C20"]);
+        after.patterns[1] = four(rules, ["F-4 01 000", "... .. 000", "F-5 01 000", "... .. 000"]);
+        let write = pack;
+        // The edited song played from the top...
+        let mut engine = playing(&write(&after));
+        let (wanted, _) = render(&mut engine, row * 12, 256);
+        // ...and the old one, replaced by it part way through its second row.
+        let mut engine = playing(&write(&before));
+        let (mut got, _) = render(&mut engine, row + 2000, 256);
+        let file = write(&after);
+        let _turn = take_turn();
+        assert_eq!(unsafe { synths_song_replace(&mut *engine, file.as_ptr(), file.len() as u32, 0) }, SONG_OK);
+        drop(_turn);
+        let p = position(&engine);
+        assert_eq!((p[0], p[1], p[3]), (STATE_PLAYING, 0, 1));
+        got.extend(render(&mut engine, row * 11 - 2000, 256).0);
+        // Not a sample of difference: nothing stopped, and the new rows were played.
+        assert!(got == wanted, "the replaced song does not sound like the new one");
+    }
+}
+
+#[test]
+fn replacing_a_song_with_one_of_another_shape_keeps_its_place_and_settings() {
+    let mut engine = playing(&pack(&two_patterns(Rules::FastTracker2)));
+    engine.push(Event::song(0.0, SONG_VOLUME, 0.5, 0.0));
+    engine.push(Event::song(0.0, SONG_MUTE, 1.0, 1.0));
+    engine.push(Event::song(0.0, SONG_REPEAT, 0.0, 0.0));
+    render(&mut engine, 6 * 882 * 5 + 100, 256);
+    assert_eq!((position(&engine)[1], position(&engine)[3]), (1, 1));
+    // Six channels in place of four: it cannot carry straight on.
+    let mut wider = two_patterns(Rules::FastTracker2);
+    wider.channel_pan = vec![128; 6];
+    wider.patterns[1] = four(Rules::FastTracker2, ["... .. 000", "C-4 01 000", "... .. 000", "... .. 000"]);
+    let file = pack(&wider);
+    {
+        let _turn = take_turn();
+        assert_eq!(unsafe { synths_song_replace(&mut *engine, file.as_ptr(), file.len() as u32, 0) }, SONG_OK);
+    }
+    let mut info = [0u32; 8];
+    assert_eq!(unsafe { synths_song_info(&*engine, info.as_mut_ptr()) }, 8);
+    assert_eq!(info[0], 6);
+    // Still playing, from the top of the row it was on, as loud as it was set.
+    render(&mut engine, 100, 100);
+    let p = position(&engine);
+    assert_eq!((p[0], p[1], p[3], p[4]), (STATE_PLAYING, 1, 1, 0));
+    assert_eq!(engine.active_voices(), 1);
+    use synths_core::params::VOLUME;
+    render(&mut engine, 4410, 256);
+    assert!((engine.param(32, VOLUME) - 0.25).abs() < 1e-6 && engine.param(33, VOLUME) == 0.0);
+    // Repeat is still off: it stops at the end.
+    render(&mut engine, 6 * 882 * 6, 256);
+    assert_eq!(position(&engine)[0], STATE_STOPPED);
+    // With no song loaded, replacing is loading; and a bad file leaves the old song be.
+    let mut empty = Engine::new(SR);
+    let _turn = take_turn();
+    assert_eq!(unsafe { synths_song_replace(&mut *empty, file.as_ptr(), file.len() as u32, 0) }, SONG_OK);
+    assert_eq!(position(&empty)[0], STATE_STOPPED);
+    assert_eq!(unsafe { synths_song_replace(&mut *empty, b"junk".as_ptr(), 4, 0) }, SONG_BAD);
+    assert_eq!(position(&empty)[0], STATE_STOPPED);
 }

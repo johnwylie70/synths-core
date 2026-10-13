@@ -128,6 +128,21 @@ pub unsafe extern "C" fn synths_song_file(name: *const u8, name_len: u32, data: 
 /// `engine` must be a live engine or null; `data` must point to `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, len: u32, first_slot: u32) -> i32 {
+    load(engine, data, len, first_slot, false)
+}
+
+/// Put a song in the place of the one that is loaded, without stopping it
+/// if the two are alike enough: for an editor whose song changes as it
+/// plays. Takes what `synths_song_load` takes and returns what it returns.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `data` must point to `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn synths_song_replace(engine: *mut Engine, data: *const u8, len: u32, first_slot: u32) -> i32 {
+    load(engine, data, len, first_slot, true)
+}
+
+unsafe fn load(engine: *mut Engine, data: *const u8, len: u32, first_slot: u32, replace: bool) -> i32 {
     let files = FILES.lock().map(|mut f| core::mem::take(&mut *f)).unwrap_or_default();
     let (Some(engine), false) = (engine.as_mut(), data.is_null()) else { return fail(SONG_NULL, "a null pointer".to_string()) };
     let (song, raw) = match read(core::slice::from_raw_parts(data, len as usize), &files) {
@@ -139,8 +154,13 @@ pub unsafe extern "C" fn synths_song_load(engine: *mut Engine, data: *const u8, 
         return fail(SONG_NO_SLOTS, "there is no such slot".to_string());
     }
     let channels = song.channels();
-    match song_player::install(engine, song, song_player::FIRST_PART, first_slot as u16, raw) {
-        Ok(_) => fail(SONG_OK, String::new()),
+    let done = if replace {
+        song_player::replace(engine, song, first_slot as u16, raw).map(|_| ())
+    } else {
+        song_player::install(engine, song, song_player::FIRST_PART, first_slot as u16, raw).map(|_| ())
+    };
+    match done {
+        Ok(()) => fail(SONG_OK, String::new()),
         Err(InstallError::Parts) => fail(SONG_NO_PARTS, song::text::join(&["the song has ", &song::text::int(channels as i64), " channels, and the engine plays at most 32"])),
         Err(InstallError::Slots) => fail(SONG_NO_SLOTS, "the song has more samples than there are slots left".to_string()),
     }
@@ -217,13 +237,30 @@ pub unsafe extern "C" fn synths_song_position(engine: *const Engine, out: *mut u
 #[no_mangle]
 pub unsafe extern "C" fn synths_song_patch_name(engine: *const Engine, instrument: u32, out: *mut u8, capacity: u32) -> u32 {
     let name = engine.as_ref().and_then(song_player::shared).and_then(|s| s.patch_name(instrument));
-    match name {
-        Some(name) => {
+    copy_text(name, out, capacity)
+}
+
+unsafe fn copy_text(text: Option<&str>, out: *mut u8, capacity: u32) -> u32 {
+    match text {
+        Some(text) => {
             if !out.is_null() {
-                core::ptr::copy_nonoverlapping(name.as_ptr(), out, name.len().min(capacity as usize));
+                core::ptr::copy_nonoverlapping(text.as_ptr(), out, text.len().min(capacity as usize));
             }
-            name.len() as u32
+            text.len() as u32
         }
         None => 0,
     }
+}
+
+/// Copy what the song's JSON held under an instrument's `synth` key
+/// (instruments count from 1) into `out`, as JSON text: at most `capacity`
+/// bytes, with no zero byte. Returns the text's whole length in bytes: 0
+/// if the instrument has none.
+///
+/// # Safety
+/// `engine` must be a live engine or null; `out` must have room for `capacity` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn synths_song_synth(engine: *const Engine, instrument: u32, out: *mut u8, capacity: u32) -> u32 {
+    let text = engine.as_ref().and_then(song_player::shared).and_then(|s| s.synth(instrument));
+    copy_text(text, out, capacity)
 }

@@ -826,6 +826,16 @@ impl Engine {
         self.sequencer.is_some()
     }
 
+    /// Do something to the sequencer and the engine together, without
+    /// disturbing when the sequencer is next due. Not for the middle of a
+    /// render. `None` if there is no sequencer.
+    pub fn with_sequencer<R>(&mut self, f: impl FnOnce(&mut Engine, &mut dyn Sequencer) -> R) -> Option<R> {
+        let mut s = self.sequencer.take()?;
+        let result = f(self, s.as_mut());
+        self.sequencer = Some(s);
+        Some(result)
+    }
+
     /// Hand a `song` event to the sequencer, and call it at once if it asks.
     fn sequencer_event(&mut self, e: &Event) {
         if let Some(mut s) = self.sequencer.take() {

@@ -304,6 +304,15 @@ impl Replayer {
         }
     }
 
+    /// See `Player::retarget`.
+    pub fn retarget(&mut self, song: &Song) {
+        self.visited = self.visited.renewed(song.orders.len());
+        if self.order >= song.orders.len() || self.row >= song.rows_at(self.order) as usize {
+            self.order = self.order.min(song.orders.len().saturating_sub(1));
+            self.row = 0;
+        }
+    }
+
     pub fn seek(&mut self, song: &Song, order: usize, row: usize, voices: &mut dyn Voices) {
         for (c, ch) in self.channels.iter_mut().enumerate() {
             voices.stop(0, c);
@@ -348,7 +357,8 @@ impl Replayer {
             self.counter = self.speed;
         }
         if first && self.delay_left == 0 {
-            let looping = self.channels.iter().any(|ch| ch.loop_count > 0);
+            let held = self.visited.keep(&mut self.order, &mut self.row, song);
+            let looping = held || self.channels.iter().any(|ch| ch.loop_count > 0);
             if !self.visited.visit(self.order, self.row, looping) {
                 return;
             }

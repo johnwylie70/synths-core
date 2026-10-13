@@ -28,6 +28,13 @@ pub trait Sequencer: Send {
     fn event(&mut self, _event: &Event, _voices: &mut Voices<'_>) -> bool {
         false
     }
+
+    /// The sequencer as itself, for code that knows which kind it is and
+    /// wants more of it than this trait offers (the song player's song is
+    /// replaced this way). `None` unless it is written.
+    fn as_any(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
 }
 
 /// How to start a sample on a part: what a tracker channel needs for a note.
