@@ -1,8 +1,9 @@
 //! WAV files, the form a song's samples are kept in beside its JSON.
 //!
 //! Written: one channel, 8 bits (unsigned, as WAV has it) or 16. Read: PCM
-//! of 8, 16, 24 or 32 bits or 32-bit floats, any number of channels (the
-//! first is taken). Anything else in the file is skipped.
+//! of 8, 16, 24 or 32 bits or 32-bit floats, any number of channels (they
+//! are mixed down to one, each counting the same). Anything else in the
+//! file is skipped.
 
 use super::bytes::Reader;
 use super::{LoadError, SampleData, MAX_SAMPLE_FRAMES};
@@ -70,19 +71,17 @@ pub fn read(file: &[u8]) -> Result<(SampleData, u32), LoadError> {
             if channels == 0 || !matches!((kind, bits), (1, 8 | 16 | 24 | 32) | (3, 32)) {
                 return Err(bad("a kind of sound this player does not read"));
             }
-            let frames = body.chunks_exact(width * channels).take(MAX_SAMPLE_FRAMES).map(|f| f.get(..width).unwrap_or(f));
-            let data = match (kind, bits) {
-                (1, 8) => SampleData::Bits8(frames.map(|f| (f[0] ^ 0x80) as i8).collect()),
-                (1, _) => SampleData::Bits16(frames.map(|f| i16::from_le_bytes([f[width - 2], f[width - 1]])).collect()),
-                _ => SampleData::Bits16(
-                    frames
-                        .map(|f| {
-                            let x = f32::from_le_bytes([f[0], f[1], f[2], f[3]]);
-                            (x.clamp(-1.0, 1.0) * 32767.0) as i16
-                        })
-                        .collect(),
-                ),
+            // One channel's number: 8 bits as they are, anything wider as its top 16.
+            let one = |f: &[u8]| -> i64 {
+                match (kind, bits) {
+                    (1, 8) => ((f[0] ^ 0x80) as i8) as i64,
+                    (1, _) => i16::from_le_bytes([f[width - 2], f[width - 1]]) as i64,
+                    _ => (f32::from_le_bytes([f[0], f[1], f[2], f[3]]).clamp(-1.0, 1.0) * 32767.0) as i64,
+                }
             };
+            // A song's samples have one channel: more are mixed down to it.
+            let frames = body.chunks_exact(width * channels).take(MAX_SAMPLE_FRAMES).map(|f| f.chunks_exact(width).map(one).sum::<i64>() / channels as i64);
+            let data = if bits == 8 { SampleData::Bits8(frames.map(|x| x as i8).collect()) } else { SampleData::Bits16(frames.map(|x| x as i16).collect()) };
             return Ok((data, rate));
         }
     }

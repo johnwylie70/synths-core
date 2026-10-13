@@ -131,10 +131,18 @@ fn a_wav_sample_plays_at_its_own_speed_on_c4_unless_told_otherwise() {
 
 #[test]
 fn wav_files_of_other_shapes_are_read() {
-    // 8-bit stereo: the left channel is taken.
-    let mut file = wav::write(&SampleData::Bits8(vec![10, -10, 20, -20, 30, -30]), 22050);
+    // 8-bit stereo: the two channels are mixed to one, each counting half.
+    let mut file = wav::write(&SampleData::Bits8(vec![10, -10, 20, 40, -30, -50]), 22050);
     file[22] = 2;
-    assert_eq!(wav::read(&file).unwrap(), (SampleData::Bits8(vec![10, 20, 30]), 22050));
+    assert_eq!(wav::read(&file).unwrap(), (SampleData::Bits8(vec![0, 30, -40]), 22050));
+    // 16-bit stereo, and 24-bit, whose top 16 bits are kept.
+    let mut wide = wav::write(&SampleData::Bits16(vec![1000, 3000, -2000, -4000]), 44100);
+    wide[22] = 2;
+    assert_eq!(wav::read(&wide).unwrap(), (SampleData::Bits16(vec![2000, -3000]), 44100));
+    let mut deep = wav::write(&SampleData::Bits16(vec![0; 3]), 44100);
+    deep[34] = 24;
+    deep[44..50].copy_from_slice(&[0xFF, 0x34, 0x12, 0x00, 0x00, 0x80]);
+    assert_eq!(wav::read(&deep).unwrap(), (SampleData::Bits16(vec![0x1234, -32768]), 44100));
     // 32-bit float.
     let mut float = wav::write(&SampleData::Bits16(vec![0; 4]), 44100);
     float[20] = 3;
@@ -348,4 +356,112 @@ fn damaged_packed_songs_never_panic() {
         }
     }
     assert!(loaded > 1000, "{loaded}");
+}
+
+#[test]
+fn base64_reads_what_it_should_and_nothing_else() {
+    use synths_core::song::base64::{decode, encode};
+    // The examples of the standard that defines it.
+    for (plain, coded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
+        assert_eq!(decode(coded).as_deref(), Some(plain.as_bytes()), "{coded}");
+        assert_eq!(encode(plain.as_bytes()), coded);
+        // The = signs may be left off.
+        assert_eq!(decode(coded.trim_end_matches('=')).as_deref(), Some(plain.as_bytes()));
+    }
+    let every: Vec<u8> = (0..=255).collect();
+    assert_eq!(decode(&encode(&every)), Some(every.clone()));
+    // Line breaks and spaces are skipped; the web's alphabet is read too;
+    // and so is a data address.
+    assert_eq!(decode("Zm9v\r\n YmFy\n").as_deref(), Some(&b"foobar"[..]));
+    assert_eq!(decode("-_-_"), decode("+/+/"));
+    assert_eq!(decode("data:audio/wav;base64,Zm9v").as_deref(), Some(&b"foo"[..]));
+    // Anything else is refused, not guessed at.
+    for bad in ["Zm9*", "Z", "Zm9vY", "Zg==Zg", "data:audio/wav;base64", "Zm\u{e9}v"] {
+        assert_eq!(decode(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_samples_sound_can_be_in_the_json_itself_as_a_wav_file_in_base64() {
+    use synths_core::song::base64::encode;
+    let sound = SampleData::Bits16((0..1000).map(|i| (i * 30 - 15000) as i16).collect());
+    let file = wav::write(&sound, 16726);
+    let text = |data: &str, extra: &str| format!(r#"{{"format": "synths-song", "version": 1, "samples": [{{"name": "voice", "data": "{data}"{extra}}}]}}"#);
+    // The same sample as when the WAV is a file beside the song.
+    let beside = native::load(r#"{"format": "synths-song", "version": 1, "samples": [{"name": "voice", "file": "v.wav"}]}"#, &|_| Some(file.clone())).unwrap();
+    let inside = native::load(&text(&encode(&file), ""), &no_files).unwrap();
+    assert_eq!(inside, beside);
+    assert_eq!((inside.samples[0].data.clone(), inside.samples[0].relative_note), (sound.clone(), 12));
+    // As a data address, with its own tuning and a loop.
+    let song = native::load(&text(&format!("data:audio/wav;base64,{}", encode(&file)), r#", "transpose": 0, "loop": {"start": 10}"#), &no_files).unwrap();
+    assert_eq!((song.samples[0].relative_note, song.samples[0].loop_range()), (0, Some((10, 1000))));
+    // 8-bit, and stereo mixed to one channel.
+    let small = wav::write(&SampleData::Bits8(vec![5, 15, -20, -40]), 8363);
+    assert_eq!(native::load(&text(&encode(&small), ""), &no_files).unwrap().samples[0].data, SampleData::Bits8(vec![5, 15, -20, -40]));
+    let mut stereo = small.clone();
+    stereo[22] = 2;
+    assert_eq!(native::load(&text(&encode(&stereo), ""), &no_files).unwrap().samples[0].data, SampleData::Bits8(vec![10, -30]));
+    // Text that is not base64, and base64 that is not a WAV file, say so.
+    let message = |data: &str| native::load(&text(data, ""), &no_files).unwrap_err().to_string();
+    assert!(message("not base64!").contains("\"data\""), "{}", message("not base64!"));
+    assert!(message(&encode(b"RIFFjunk")).contains("WAV"));
+    assert!(native::load(&text("", "").replace("\"\"", "7"), &no_files).is_err());
+    // A WAV that claims more sound than it has is read as far as it goes.
+    let mut short = file.clone();
+    short.truncate(44 + 500);
+    assert_eq!(native::load(&text(&encode(&short), ""), &no_files).unwrap().samples[0].data.len(), 250);
+}
+
+#[test]
+fn a_song_can_be_written_as_one_json_text_and_read_back() {
+    for rules in [Rules::ProTracker, Rules::FastTracker2] {
+        let mut song = busy_song(rules);
+        song.instruments.push(Instrument { name: "lead".to_string(), patch: Some("my-lead".to_string()), synth: Some(r#"{"preset":"lead","set":{"filter.cutoff":800}}"#.to_string()), ..Default::default() });
+        let text = native::save_in_one(&song);
+        // Nothing beside it: the big sample is in the text, as "data".
+        assert!(text.contains("\"data\": \"UklGR") && !text.contains("\"file\""));
+        assert_eq!(native::load(&text, &no_files).unwrap(), song);
+        // The packed form carries the same song, sound and all.
+        assert_eq!(binary::load(&binary::save(&native::load(&text, &no_files).unwrap())).unwrap(), song);
+    }
+}
+
+#[test]
+fn what_a_host_writes_about_a_synth_sound_is_kept_and_not_read() {
+    let text = |synth: &str| format!(r#"{{"format": "synths-song", "version": 1, "instruments": [{{"name": "a", "sample": 0}}, {{"name": "lead", "patch": "p", "synth": {synth}}}], "samples": [{{"wave": [1, 2]}}]}}"#);
+    let written = r#"{ "preset": "soft lead", "set": { "filter.cutoff": 800, "osc1.wave": "saw", "amp.attack": 0.25, "deep": [1, {"x": null}, true] } }"#;
+    let song = native::load(&text(written), &no_files).unwrap();
+    // Kept as JSON, closed up, in the order it was written.
+    let kept = r#"{"preset":"soft lead","set":{"filter.cutoff":800,"osc1.wave":"saw","amp.attack":0.25,"deep":[1,{"x":null},true]}}"#;
+    assert_eq!((song.instruments[0].synth.as_deref(), song.instruments[1].synth.as_deref()), (None, Some(kept)));
+    // Through a save, as files or all in one, and through the packed form.
+    let saved = native::save(&song);
+    assert!(saved.json.contains(&format!("\"synth\": {kept}")));
+    assert_eq!(load_saved(&saved).unwrap(), song);
+    assert_eq!(native::load(&native::save_in_one(&song), &no_files).unwrap(), song);
+    let packed = binary::save(&song);
+    assert_eq!(binary::load(&packed).unwrap(), song);
+    // A packed song cut short in the middle of it still loads.
+    for cut in 1..40 {
+        assert!(binary::load(&packed[..packed.len() - cut]).is_ok());
+    }
+    // A song without any packs to the same bytes as it always did.
+    let plain = native::load(&text("null"), &no_files).unwrap();
+    assert!(plain.instruments[1].synth.is_none() && !binary::save(&plain).windows(4).any(|w| w == b"SYNT"));
+    // It need not be an object: whatever is there is the host's business.
+    assert_eq!(native::load(&text(r#""just a name""#), &no_files).unwrap().instruments[1].synth.as_deref(), Some(r#""just a name""#));
+}
+
+#[test]
+fn keys_the_reader_does_not_know_are_passed_over_wherever_they_are() {
+    let plain = r#"{"format": "synths-song", "version": 1, "channels": 2, "order": [0],
+      "patterns": [{"rows": 8, "events": [{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "maj"}]}],
+      "instruments": [{"name": "beep", "sample": 0, "volumeEnvelope": {"points": [[0, 64], [8, 0]]}, "vibrato": {"depth": 2, "rate": 9}}],
+      "samples": [{"wave": [100, -100], "loop": {"start": 0}}]}"#;
+    let extra = r##"{"format": "synths-song", "version": 1, "channels": 2, "order": [0], "editor": {"zoom": 2, "tabs": [1, 2]}, "colour": "red",
+      "patterns": [{"rows": 8, "name": "intro", "colour": [1, 2, 3], "events": [{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "maj", "selected": true, "id": "e1"}]}],
+      "instruments": [{"name": "beep", "sample": 0, "colour": "#ff0000", "folder": null, "volumeEnvelope": {"points": [[0, 64], [8, 0]], "zoom": 3}, "vibrato": {"depth": 2, "rate": 9, "shown": false}}],
+      "samples": [{"wave": [100, -100], "loop": {"start": 0, "label": "all"}, "source": {"path": "beep.wav", "trim": [0, 2]}, "notes": "hand drawn"}],
+      "tracks": [{"name": "lead", "muted": false}]}"##;
+    assert_eq!(native::load(extra, &no_files).unwrap(), native::load(plain, &no_files).unwrap());
 }

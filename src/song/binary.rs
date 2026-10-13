@@ -19,6 +19,9 @@ pub const MAGIC: &[u8; 4] = b"SYSG";
 /// The version this code writes, and the highest it reads.
 pub const VERSION: u16 = 1;
 
+/// The four bytes that begin the instruments' `synth` texts, after the samples.
+const SYNTHS: &[u8; 4] = b"SYNT";
+
 /// The length that means "no text here" (an instrument that is not a patch).
 const NO_TEXT: u16 = 0xFFFF;
 
@@ -126,6 +129,17 @@ pub fn save(song: &Song) -> Vec<u8> {
         match &s.data {
             SampleData::Bits8(v) => o.extend(v.iter().map(|&x| x as u8)),
             SampleData::Bits16(v) => o.extend(v.iter().flat_map(|x| x.to_le_bytes())),
+        }
+    }
+    // After everything a version 1 reader looks at: what hosts have written
+    // about the instruments' synth sounds, if any has. An older reader stops
+    // before this and is none the worse.
+    if song.instruments.iter().any(|i| i.synth.is_some()) {
+        o.extend_from_slice(SYNTHS);
+        for i in &song.instruments {
+            let text = i.synth.as_deref().unwrap_or("");
+            put_u32(o, text.len() as u32);
+            o.extend_from_slice(text.as_bytes());
         }
     }
     out
@@ -267,6 +281,14 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
             relative_note: relative as i8,
             pan: (flags & 8 != 0).then_some(pan),
         });
+    }
+
+    if r.left() >= 4 && r.take(4) == SYNTHS {
+        for ins in song.instruments.iter_mut() {
+            let len = r.u32_le() as usize;
+            let text = core::str::from_utf8(r.take(len)).unwrap_or("");
+            ins.synth = (!text.is_empty()).then(|| text.to_string());
+        }
     }
 
     song.tidy();

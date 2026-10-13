@@ -1,6 +1,6 @@
 # The song format
 
-A song is one JSON document. It is meant to be read and changed by hand in a text editor, compared line by line between two versions, and written by a program without a library. Samples that are too big to write as numbers live beside it as ordinary WAV files.
+A song is one JSON document. It is meant to be read and changed by hand in a text editor, compared line by line between two versions, and written by a program without a library. Samples that are too big to write as numbers live beside it as ordinary WAV files, or inside it as base64 text when the song has to be one file.
 
 The code is `src/song/native.rs`; the model it loads into is `src/song/mod.rs`. MOD and XM files load into the same model, so anything they can say, a song can say.
 
@@ -176,6 +176,7 @@ An instrument is what a cell's `ins` names. It is either samples or a synth patc
 | `sample` | The sample every key plays. | |
 | `zones` | For an instrument with several samples: a list of `{"from": "C-0", "to": "B-3", "sample": 0}`, each giving the sample for a run of keys. Keys in no zone play nothing. | |
 | `patch` | The name of a synth patch to play in place of samples. The player does not look inside it: it hands the name to whatever makes the sound. | |
+| `synth` | What a host wants to remember about the synth sound: by convention `{"preset": "name", "set": {"setting": value, ...}}`, a preset to start from and the settings changed from it. It belongs to the host. A reader keeps it, whatever it is, and writes it back (closed up, with no spaces); the engine hands it to the host with `synths_song_synth`. | |
 | `volumeEnvelope`, `panEnvelope` | Envelopes, below. | none |
 | `vibrato` | The instrument's own vibrato: `{"wave": "sine", "sweep": 0, "depth": 4, "rate": 20}`. `wave` is `"sine"`, `"square"`, `"ramp-up"` or `"ramp-down"`; `sweep` is how many ticks it takes to reach full depth. | none |
 | `fadeout` | How fast the note fades after key off, 0 to 65535. 0 never fades; 32768 fades in one tick. | 0 |
@@ -191,15 +192,18 @@ An instrument with no envelope is silenced at once by key off. A synth patch is 
 | `name` | A name to show. | `""` |
 | `wave` | The sound, as a list of numbers from -128 to 127: for small hand-drawn waves. | |
 | `file` | The sound, as the path of a WAV file beside the song. | |
+| `data` | The sound, as a whole WAV file in base64 text: for a song that is all one file. | |
 | `volume` | 0 to 64. | 64 |
 | `pan` | 0 (left) to 255 (right). Left out, the sample plays where its channel is panned. | the channel's |
 | `loop` | `{"start": 0, "length": 32, "kind": "forward"}`, in frames; `kind` is `"forward"` or `"pingpong"` (there and back). `length` left out means to the end. | no loop |
 | `transpose` | Semitones to add to every note. | see below |
 | `finetune` | Finer tuning: 128 to the semitone, -128 to 127. | see below |
 
-A sample has one of `wave` and `file`. A WAV file can be 8, 16, 24 or 32 bits or 32-bit floating point; if it has more than one channel, the first is used.
+A sample has one of `wave`, `file` and `data` (a reader that finds more than one takes `file`, then `data`). A WAV file can be 8, 16, 24 or 32 bits or 32-bit floating point; 8 bits stay 8 and the rest become 16. If it has more than one channel they are mixed down to one, each counting the same, because a song's samples have one channel.
 
-If neither `transpose` nor `finetune` is given, a `file` sample is tuned so that C-4 plays it at the speed it was recorded at: drop in any WAV and it sounds right on C-4. A `wave` sample with neither plays at 8363 frames a second on C-4, so a wave of 32 numbers sounds at about 261 Hz, middle C.
+`data` is the bytes of the WAV file in base64: the usual alphabet (`+` and `/`) or the web's (`-` and `_`), with or without the `=` signs at the end; spaces and line breaks in it are skipped, and it may begin as a data address does (`data:audio/wav;base64,`). Anything else in it is a mistake, and the song is refused with a message that names `"data"`. It is a third bigger than the file, and it makes the song one thing to keep, send and store.
+
+If neither `transpose` nor `finetune` is given, a `file` or `data` sample is tuned so that C-4 plays it at the speed it was recorded at: drop in any WAV and it sounds right on C-4. A `wave` sample with neither plays at 8363 frames a second on C-4, so a wave of 32 numbers sounds at about 261 Hz, middle C.
 
 ### Sample files
 
@@ -207,7 +211,7 @@ A writer names a sample file after what is in it: `samples/` and the first 16 he
 
 A reader takes any path; it does not check the name against the contents, so a sample edited by hand still loads.
 
-To share a song, zip the JSON with its `samples` folder.
+To share a song, zip the JSON with its `samples` folder, or write it as one file: `native::save_in_one` writes every sample that would have been a file as `data`, and nothing beside the JSON.
 
 ## The packed form
 
@@ -283,11 +287,20 @@ An envelope is `u8` flags (bit 0 on, bit 1 has a sustain point, bit 2 has a loop
 | `u32` × 3 | Frames of sound, the loop's start, the loop's length. |
 | sound | One signed number for each frame: a byte each, or two for 16-bit. |
 
+**Then, only if an instrument has a `synth`**
+
+| bytes | |
+|---|---|
+| 4 | The letters `SYNT`. |
+| `u32`, bytes × instruments | For each instrument in turn, the length of its `synth` as JSON text and then the text; a length of 0 for an instrument with none. |
+
+This comes after everything a reader of the first layout looks at, so such a reader loads the song without it, and a song with no `synth` packs to the same bytes as before.
+
 A reader takes a file that ends early as far as it goes, treats counts and lengths that the bytes cannot back up as smaller, and never fails on a damaged one: what does not make sense is left out.
 
 ## What is not in version 1
 
-- Stereo samples (the first channel is taken).
+- Stereo samples (the channels are mixed to one).
 - Mixer and effect settings beyond panning.
 - A separate order list for each channel.
 - A packed binary form. The JSON is made so that one can be derived from it mechanically: notes, instruments and effects all have a number form as well as a text one.

@@ -8,6 +8,8 @@
 //!
 //! `docs/song-format.md` describes the JSON form of this model.
 
+#[cfg(feature = "json")]
+pub mod base64;
 pub mod binary;
 pub mod bytes;
 #[cfg(feature = "json")]
@@ -480,6 +482,10 @@ pub struct Instrument {
     /// Set when the instrument is a synth patch and not samples: the name of
     /// the patch. The replayer hands it to the voices untouched.
     pub patch: Option<String>,
+    /// What a host has written about the instrument's synth sound (the
+    /// `synth` key of a song's JSON), as JSON text. The engine does not
+    /// look inside it: it keeps it, and hands it back when asked.
+    pub synth: Option<String>,
 }
 
 impl Instrument {

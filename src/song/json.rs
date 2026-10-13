@@ -53,6 +53,52 @@ impl Value {
     }
 }
 
+impl Value {
+    /// The value as JSON text again, with no spaces or line breaks.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out);
+        out
+    }
+
+    fn write(&self, out: &mut String) {
+        match self {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => match self.as_i64() {
+                Some(whole) => out.push_str(&super::text::int(whole)),
+                // JSON has no way to write a number that is not finite.
+                None if !n.is_finite() => out.push_str("null"),
+                // Exactly: this is a host's number, and not ours to round.
+                None => out.push_str(&n.to_string()),
+            },
+            Value::String(s) => out.push_str(&quote(s)),
+            Value::Array(items) => {
+                out.push('[');
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    v.write(out);
+                }
+                out.push(']');
+            }
+            Value::Object(pairs) => {
+                out.push('{');
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&quote(k));
+                    out.push(':');
+                    v.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
 /// How deep arrays and objects may nest.
 const MAX_DEPTH: usize = 64;
 

@@ -137,6 +137,9 @@ fn write_instrument(o: &mut Out, i: &Instrument) {
     if let Some(patch) = &i.patch {
         o.key("patch").quoted(patch);
     }
+    if let Some(synth) = &i.synth {
+        o.key("synth").s(synth);
+    }
     let first = i.keymap.first().copied().unwrap_or(NO_SAMPLE);
     if !i.keymap.is_empty() && first != NO_SAMPLE && i.keymap.iter().all(|&k| k == first) {
         o.key("sample").n(first as i64);
@@ -232,7 +235,7 @@ fn write_event(o: &mut Out, e: &Event) {
     o.s("}");
 }
 
-fn write_sample(o: &mut Out, s: &Sample, blobs: &mut Vec<Blob>) {
+fn write_sample(o: &mut Out, s: &Sample, blobs: Option<&mut Vec<Blob>>) {
     o.s("{\"name\": ").quoted(&s.name);
     match &s.data {
         SampleData::Bits8(v) if v.len() <= INLINE_FRAMES => {
@@ -241,10 +244,18 @@ fn write_sample(o: &mut Out, s: &Sample, blobs: &mut Vec<Blob>) {
         data => {
             let rate = c4_rate(s.relative_note, s.finetune).round().clamp(1.0, 4.0e9) as u32;
             let file = wav::write(data, rate);
-            let name = text::join(&["samples/", &hex(&sha256(&file))[..16], ".wav"]);
-            o.key("file").quoted(&name);
-            if !blobs.iter().any(|b| b.name == name) {
-                blobs.push(Blob { name, data: file });
+            match blobs {
+                Some(blobs) => {
+                    let name = text::join(&["samples/", &hex(&sha256(&file))[..16], ".wav"]);
+                    o.key("file").quoted(&name);
+                    if !blobs.iter().any(|b| b.name == name) {
+                        blobs.push(Blob { name, data: file });
+                    }
+                }
+                // All in one file: the WAV goes in as base64 text.
+                None => {
+                    o.key("data").quoted(&super::base64::encode(&file));
+                }
             }
         }
     }
@@ -267,6 +278,18 @@ fn write_sample(o: &mut Out, s: &Sample, blobs: &mut Vec<Blob>) {
 /// Writes a song as JSON and sample files.
 pub fn save(song: &Song) -> Saved {
     let mut blobs: Vec<Blob> = Vec::new();
+    let json = write(song, Some(&mut blobs));
+    Saved { json, blobs }
+}
+
+/// Writes a song as one JSON text with nothing beside it: the samples too
+/// big to be lists of numbers go in as WAV files in base64 (`"data"`).
+/// It is a third bigger than the files would be, and is one thing to keep.
+pub fn save_in_one(song: &Song) -> String {
+    write(song, None)
+}
+
+fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
     let mut out = Out(String::new());
     let o = &mut out;
     o.s("{\n  \"format\": \"").s(FORMAT).s("\",\n  \"version\": ").n(VERSION);
@@ -305,10 +328,10 @@ pub fn save(song: &Song) -> Saved {
     o.s(",\n  \"samples\": [");
     for (i, s) in song.samples.iter().enumerate() {
         o.s(if i == 0 { "\n    " } else { ",\n    " });
-        write_sample(o, s, &mut blobs);
+        write_sample(o, s, blobs.as_deref_mut());
     }
     o.s(if song.samples.is_empty() { "]\n}\n" } else { "\n  ]\n}\n" });
-    Saved { json: out.0, blobs }
+    out.0
 }
 
 // ---------------------------------------------------------------- reading
@@ -608,6 +631,12 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
             let (data, rate) = wav::read(&bytes)?;
             sample.data = data;
             tuning = tuning_for(rate as f64);
+        } else if let Some(data) = text(s, "data")? {
+            // The WAV file itself, as base64 text: a song all in one file.
+            let bytes = super::base64::decode(data).ok_or_else(|| bad("a sample's \"data\" must be a WAV file as base64 text"))?;
+            let (data, rate) = wav::read(&bytes)?;
+            sample.data = data;
+            tuning = tuning_for(rate as f64);
         } else {
             let wave = list(s, "wave")?;
             let mut data = Vec::with_capacity(wave.len());
@@ -652,6 +681,8 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
         let Some(ins) = song.instruments.last_mut() else { break };
         ins.name = text(i, "name")?.unwrap_or("").to_string();
         ins.patch = text(i, "patch")?.map(str::to_string);
+        // A host's own description of the synth sound: kept, not read.
+        ins.synth = i.get("synth").filter(|v| **v != Value::Null).map(Value::to_text);
         if i.get("sample").is_some() {
             ins.keymap = vec![int(i, "sample", 0, last_sample, 0)? as u16; 96];
         }
