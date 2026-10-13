@@ -129,6 +129,42 @@ new Float32Array(memory.buffer, ptr, frames).fill(0.5);
 if (x.synths_sample_load(engine, 0, ptr, frames, 1, SR) !== 0) throw new Error('the sample did not load');
 x.synths_free(ptr);
 
+// A live input, as a microphone would be fed in: a 440 Hz tone goes into the
+// engine's input buffer block by block, is recorded as it arrives, and
+// comes out an octave higher through the pitch shifter of the input's part.
+x.synths_reset(engine);
+const RECORD = 16, VOICE = table.params.find((p) => p.name === 'input.part').default;
+if (x.synths_record_buffer(engine, 1, 4800, 1) !== 0) throw new Error('no room to record into');
+const then = x.synths_time(engine);
+push([
+  [then, PARAM, VOICE, id['fx.pitch'], 12],
+  [then, RECORD, 0, 1, 1, 0],
+]);
+const heard = new Float32Array(SR);
+for (let done = 0; done < SR; done += 128) {
+  const input = new Float32Array(memory.buffer, x.synths_input_left(engine), 128);
+  for (let i = 0; i < 128; i++) input[i] = 0.5 * Math.sin((2 * Math.PI * 440 * (done + i)) / SR);
+  const n = x.synths_render_io(engine, 128, 1);
+  heard.set(new Float32Array(memory.buffer, x.synths_output_left(engine), n), done);
+}
+let up = 0;
+for (let i = 24001; i < SR; i++) if (heard[i - 1] < 0 && heard[i] >= 0) up++;
+const state = x.synths_alloc(16);
+x.synths_record_read(engine, state);
+const [recording, , recorded, room] = new Uint32Array(memory.buffer, state, 4);
+const tape = x.synths_alloc(4800 * 4);
+const read = x.synths_sample_read(engine, 1, 0, tape, 4800);
+const taped = new Float32Array(memory.buffer, tape, 4800);
+const expected = Math.fround(0.5 * Math.sin((2 * Math.PI * 440 * 4799) / SR));
+console.log(`a live input: 440 Hz in, ${up * 2} Hz out through the pitch shifter; ${recorded} of ${room} frames recorded, ${table.voice_presets.length} voice presets`);
+if (up !== 440 || recording !== 0 || recorded !== 4800 || read !== 4800 || x.synths_sample_frames(engine, 1) !== 4800 || taped[4799] !== expected) {
+  console.error('the live input did not come through as it should');
+  process.exit(1);
+}
+[state, tape].forEach((p) => x.synths_free(p));
+x.synths_sample_free(engine, 1);
+push([[x.synths_time(engine), PARAM, VOICE, id['fx.pitch'], 0]]);
+
 // Time a busy engine: 64 voices with everything on, 10 seconds of sound.
 x.synths_reset(engine);
 const busy = [
