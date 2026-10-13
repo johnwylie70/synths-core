@@ -171,6 +171,58 @@ impl<'a> Voices<'a> {
         }
     }
 
+    /// Start a chord: several notes at once on one part under one handle,
+    /// each `offsets` semitones from `note` (the note itself is 0, and is
+    /// only played if it is listed; at most 8). The handle then means the
+    /// chord: its volume, pan and pitch move every note of it, each keeping
+    /// its place in the chord, and `note_off` lets them all go. It takes a
+    /// voice for each note (times the part's unison).
+    pub fn chord(&mut self, part: u16, handle: u32, note: f32, velocity: f32, offsets: &[i8]) {
+        self.arp(part, 0, -1.0, crate::arp::ORDER_TOGETHER, offsets);
+        self.note_on(part, handle, note, velocity);
+    }
+
+    /// Change the notes and the order of the handle's arpeggio, and its
+    /// rate unless that is 0, as the `arp_notes` event does: from its next
+    /// step, without starting the pattern again.
+    pub fn arp_notes(&mut self, part: u16, handle: u32, rate: f32, order: u8, offsets: &[i8]) {
+        self.engine.apply(&Event::arp_notes(0.0, part, handle, rate, order, offsets));
+        if offsets.len() > 4 {
+            self.engine.apply(&Event::arp_more(0.0, part, handle, &offsets[4..]));
+        }
+    }
+
+    /// Set how the handle's arpeggio plays, as the `arp_style` event does:
+    /// `gate` is how much of each step a note is held (0: one note whose
+    /// pitch jumps), `octaves` how many octaves the pattern runs through,
+    /// `swing` how far every second step is put back, and `levels` how hard
+    /// each step is struck (0: all full).
+    pub fn arp_style(&mut self, part: u16, handle: u32, gate: f32, octaves: u8, swing: f32, levels: u32) {
+        self.engine.apply(&Event::arp_style(0.0, part, handle, gate, octaves, swing, levels));
+    }
+
+    /// Have the handle's arpeggio keep time with the `tempo` parameter, so
+    /// many `steps` to a beat (0: go by its own rate again).
+    pub fn arp_beat(&mut self, part: u16, handle: u32, steps: f32) {
+        self.engine.apply(&Event::arp_beat(0.0, part, handle, steps));
+    }
+
+    /// Take the next step of the handle's arpeggio now, lasting `frames`
+    /// frames (0: as long as the last): for an arpeggio with no clock of
+    /// its own (a rate below 0), which a sequencer steps in its own time.
+    pub fn arp_step(&mut self, part: u16, handle: u32, frames: f32) {
+        self.engine.apply(&Event::arp_step(0.0, part, handle, frames));
+    }
+
+    /// Have the handle's arpeggiator play a sample slot as oscillator 1 of
+    /// every note it strikes, from `position` frames in, whatever the part's
+    /// patch says: `trigger`, for the notes of an arpeggio or a chord.
+    /// `None` goes back to the patch. Send it after the arpeggio is given
+    /// and before its first step.
+    pub fn arp_sample(&mut self, part: u16, handle: u32, slot: Option<u16>, position: f64) {
+        self.engine.arp_sample(part, handle, slot, position);
+    }
+
     /// Fade the handle's voices to nothing in a straight line over `seconds`
     /// and end them there. The handle still steers them until then.
     pub fn fade(&mut self, part: u16, handle: u32, seconds: f32) {

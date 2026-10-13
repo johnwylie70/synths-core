@@ -17,6 +17,7 @@ use crate::taps::{Taps, NOTES_SIZE};
 use crate::voice::{Start, Voice, VoiceState, CONTROL};
 use crate::zones::{Picks, Zone, ZoneError, ZoneMaps};
 
+mod arps;
 mod io;
 
 /// How many voices can sound at once.
@@ -186,8 +187,11 @@ pub struct Engine {
     asleep: bool,
     /// Something has sounded in this control period.
     tick_loud: bool,
-    /// The frame of the next arpeggio step of any voice.
+    /// The frame of the next arpeggio step of any voice or arpeggiator.
     arp_at: u64,
+    /// The arpeggiators, and the number the last one made was given.
+    arps: Box<[arps::Arpeggiator]>,
+    arp_ids: u16,
     /// What a display reads: scope, meters, sounding notes.
     pub(crate) taps: Box<Taps>,
     /// The song that is loaded, as a host may read it while sound is made.
@@ -247,6 +251,8 @@ impl Engine {
             asleep: true,
             tick_loud: false,
             arp_at: u64::MAX,
+            arps: vec![arps::Arpeggiator::NONE; crate::arp::MAX_ARPEGGIATORS].into_boxed_slice(),
+            arp_ids: 0,
             taps: Box::new(Taps::new(NUM_PARTS)),
             #[cfg(feature = "songs")]
             song: None,
@@ -304,6 +310,7 @@ impl Engine {
         }
         self.live_ramps = 0;
         self.zones.rewind_all();
+        self.arp_reset();
         self.queue.clear();
         self.delay.clear();
         self.reverb.clear();
@@ -635,6 +642,9 @@ impl Engine {
         }
         let note = note.clamp(-24.0, 160.0);
         let velocity = if velocity.is_finite() { velocity.clamp(0.0, 1.0) } else { 1.0 };
+        if self.parts[pi].next_arp.wants_arpeggiator() {
+            return self.arp_begin(part, handle, note, velocity);
+        }
         let sr = self.sample_rate;
         let glide = self.parts[pi].p[GLIDE];
         let mode = self.parts[pi].p[MODE] as u8;
@@ -742,6 +752,7 @@ impl Engine {
         if pi >= NUM_PARTS {
             return;
         }
+        self.arp_note_off(part, handle, note);
         let p = &mut self.parts[pi];
         let mode = p.p[MODE] as u8;
         if mode != 0 && p.held_len > 0 {
@@ -796,6 +807,7 @@ impl Engine {
                 }
             }
             EV_ALL_NOTES_OFF => {
+                self.arp_end_part(part);
                 for (i, p) in self.parts.iter_mut().enumerate() {
                     if all || i == part as usize {
                         p.held_len = 0;
@@ -825,7 +837,13 @@ impl Engine {
                     }
                 }
             }
+            EV_ARP_STYLE | EV_ARP_BEAT | EV_ARP_NOTES | EV_ARP_STEP => {
+                self.arp_event(e);
+            }
             EV_ARP | EV_ARP_MORE => {
+                if self.arp_event(e) {
+                    return;
+                }
                 let first = e.kind == EV_ARP;
                 if e.a == 0 {
                     // For the next note of the part.
@@ -859,15 +877,24 @@ impl Engine {
                 if e.a == 0 || (e.kind != EV_VOICE_KILL && !e.x.is_finite()) {
                     return;
                 }
+                // An arpeggiator with the handle is told too, for the notes it has yet to strike.
+                match e.kind {
+                    EV_VOICE_PITCH => self.arp_root(part, e.a, e.x.clamp(-24.0, 160.0)),
+                    EV_VOICE_FREQ if e.x > 0.0 => self.arp_root(part, e.a, hz_to_note(e.x).clamp(-24.0, 160.0)),
+                    EV_VOICE_VOLUME => self.arp_level(part, e.a, false, e.x.clamp(0.0, 4.0)),
+                    EV_VOICE_PAN => self.arp_level(part, e.a, true, e.x.clamp(-1.0, 1.0)),
+                    EV_VOICE_KILL => self.arp_end(part, e.a, false),
+                    _ => {}
+                }
                 for v in self.voices.iter_mut() {
                     if !(v.active() && v.handle == e.a && (all || v.part == part)) {
                         continue;
                     }
                     match e.kind {
-                        EV_VOICE_PITCH => v.set_pitch(e.x.clamp(-24.0, 160.0), e.y, sr),
+                        EV_VOICE_PITCH => v.set_pitch((e.x + v.arp.shift).clamp(-24.0, 160.0), e.y, sr),
                         EV_VOICE_FREQ => {
                             if e.x > 0.0 {
-                                v.set_pitch(hz_to_note(e.x).clamp(-24.0, 160.0), e.y, sr);
+                                v.set_pitch((hz_to_note(e.x) + v.arp.shift).clamp(-24.0, 160.0), e.y, sr);
                             }
                         }
                         EV_VOICE_VOLUME => v.slide_volume(e.x.clamp(0.0, 4.0), 0.0),
@@ -961,6 +988,7 @@ impl Engine {
         let note = Engine::note_for_rate(sample, t.rate);
         self.wake();
         if handle != 0 {
+            self.arp_end(part, handle, false);
             for v in self.voices.iter_mut() {
                 if v.active() && v.part == part && v.handle == handle {
                     Engine::cut(&mut self.parts, v);
@@ -997,6 +1025,9 @@ impl Engine {
             return;
         }
         self.wake();
+        if rate > 0.0 {
+            self.arp_rate(part, handle, rate);
+        }
         let sr = self.sample_rate;
         let glide = if glide.is_finite() { glide } else { 0.0 };
         for v in self.voices.iter_mut() {
@@ -1013,7 +1044,7 @@ impl Engine {
                 None => continue,
             };
             if let Some(Some(sample)) = self.samples.get(slot) {
-                v.set_pitch(Engine::note_for_rate(sample, rate), glide, sr);
+                v.set_pitch((Engine::note_for_rate(sample, rate) + v.arp.shift).clamp(-24.0, 160.0), glide, sr);
             }
         }
     }
@@ -1037,6 +1068,7 @@ impl Engine {
             return;
         }
         self.wake();
+        self.arp_level(part, handle, pan, if pan { value.clamp(-1.0, 1.0) } else { value.clamp(0.0, 4.0) });
         for v in self.voices.iter_mut() {
             if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
                 if pan {
@@ -1054,6 +1086,7 @@ impl Engine {
             return;
         }
         self.wake();
+        self.arp_end(part, handle, false);
         let sr = self.sample_rate;
         for v in self.voices.iter_mut() {
             if v.active() && v.handle == handle && (part == ALL_PARTS || v.part == part) {
@@ -1112,7 +1145,7 @@ impl Engine {
                         next = next.min(v.arp.next_frame());
                     }
                 }
-                self.arp_at = next;
+                self.arp_at = next.min(self.run_arps());
             }
             let mut n = (frames - done).min(CONTROL - self.tick_pos);
             if let Some(t) = self.queue.next_time() {
@@ -1168,7 +1201,8 @@ impl Engine {
             if !v.active() {
                 continue;
             }
-            let note = (v.current_note() + 0.5).clamp(0.0, 127.0) as usize;
+            // (With an arpeggio, the note it is on at this moment.)
+            let note = (v.current_note() + v.arp.offset + 0.5).clamp(0.0, 127.0) as usize;
             if let Some(b) = bits.get_mut(v.part as usize) {
                 let (word, bit) = (note / 32, 1u32 << (note % 32));
                 if v.state == VoiceState::Held {

@@ -252,6 +252,18 @@ impl Voice {
         self.note_target
     }
 
+    /// How hard the note was struck, 0..1.
+    #[inline]
+    pub fn velocity(&self) -> f32 {
+        self.velocity
+    }
+
+    /// Has the voice yet to make any sound?
+    #[inline]
+    pub fn unheard(&self) -> bool {
+        self.fresh
+    }
+
     fn read_shapes(&mut self, p: &[f32; PART_PARAMS], sample_rate: f32) {
         self.amp_shape = EnvShape::new(&p[AMP_ATTACK..AMP_ATTACK + 5], sample_rate);
         if self.zone_release >= 0.0 {

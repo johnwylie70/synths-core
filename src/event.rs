@@ -23,6 +23,10 @@ pub const EV_ARP: u16 = 13;
 pub const EV_ARP_MORE: u16 = 14;
 pub const EV_SONG: u16 = 15;
 pub const EV_RECORD: u16 = 16;
+pub const EV_ARP_STYLE: u16 = 17;
+pub const EV_ARP_BEAT: u16 = 18;
+pub const EV_ARP_NOTES: u16 = 19;
+pub const EV_ARP_STEP: u16 = 20;
 
 /// What a `record` event records (its `y`).
 pub const RECORD_INPUT: u32 = 0;
@@ -58,10 +62,14 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_VOICE_POSITION, "voice_position", "part; a: handle; x: sample position in frames"),
     (EV_VOICE_KILL, "voice_kill", "part; a: handle"),
     (EV_MACRO_TICK, "macro_tick", "part (65535: every part): step the macros of parts with macro.sync on"),
-    (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
+    (EV_ARP, "arp", "part; a: handle, or 0 for the part's next note; x: steps a second (0: 50, below 0: one a macro_tick); y: order 0 up, 1 down, 2 up-down, 3 as given, 4 random, 5 up-down with the ends twice, 6 all together; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
     (EV_ARP_MORE, "arp_more", "part; a: handle, or 0 for the part's next note; b: offsets 4-7, a signed byte each"),
     (EV_SONG, "song", "a: 0 stop, 1 play, 2 pause, 3 seek (x: order, y: row), 4 repeat (x: 0 off, 1 on), 5 volume (x: 0..2), 6 patch part (x: instrument from 1, y: part), 7 mute (x: channel from 0, or below 0 for all; y: 0 off, 1 on), 8 solo (the same), 9 loop this pattern (x: 0 off, 1 on)"),
     (EV_RECORD, "record", "a: 0 stop, 1 start; x: sample slot (made with synths_record_buffer); y: what to record, 0 the live input, 1 a part (part: which), 2 the whole output"),
+    (EV_ARP_STYLE, "arp_style", "part; a: handle, or 0 for the part's next note; x: gate, 0.05..1 of a step each note is held (0: nothing is struck, the pitch jumps); y: octaves, 1..4; z: swing, 0..0.75 of a step; b: how hard each step is struck, four bits a step (0: all full)"),
+    (EV_ARP_BEAT, "arp_beat", "part; a: handle, or 0 for the part's next note; x: steps to a beat of the tempo parameter, 0.01..64 (0: go by the arp event's rate)"),
+    (EV_ARP_NOTES, "arp_notes", "part; a: handle, or 0 for the part's next note; x: steps a second (0: as it was, below 0: one an arp_step); y: order; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
+    (EV_ARP_STEP, "arp_step", "part; a: handle; x: how long the step is to last, in frames (0: as long as the last)"),
 ];
 
 /// One event, exactly as it is laid out in memory (little-endian).
@@ -139,6 +147,25 @@ impl Event {
             *b = *o as u8;
         }
         Event { time, kind: EV_ARP_MORE, part, a: handle, x: 0.0, y: 0.0, z: 0.0, b: u32::from_le_bytes(bytes) }
+    }
+    /// The style of an arpeggio: how much of each step a note is held
+    /// (`gate`, 0 for a pitch that jumps), how many octaves it runs through,
+    /// its swing, and how hard each step is struck (`levels`, 0 for all full).
+    pub fn arp_style(time: f64, part: u16, handle: u32, gate: f32, octaves: u8, swing: f32, levels: u32) -> Event {
+        Event { time, kind: EV_ARP_STYLE, part, a: handle, x: gate, y: octaves as f32, z: swing, b: levels }
+    }
+    /// An arpeggio that keeps time with the `tempo` parameter: so many steps to a beat.
+    pub fn arp_beat(time: f64, part: u16, handle: u32, steps: f32) -> Event {
+        Event::new(time, EV_ARP_BEAT, part, handle, steps, 0.0)
+    }
+    /// The notes and order of an arpeggio (and its rate, unless that is 0),
+    /// changed in step: `arp`, without starting the pattern again.
+    pub fn arp_notes(time: f64, part: u16, handle: u32, rate: f32, order: u8, offsets: &[i8]) -> Event {
+        Event { kind: EV_ARP_NOTES, ..Event::arp(time, part, handle, rate, order, offsets) }
+    }
+    /// The next step of an arpeggio that steps when told, lasting `frames`.
+    pub fn arp_step(time: f64, part: u16, handle: u32, frames: f32) -> Event {
+        Event::new(time, EV_ARP_STEP, part, handle, frames, 0.0)
     }
     /// A command for the song player (`SONG_...`), with its two numbers.
     pub fn song(time: f64, command: u32, x: f32, y: f32) -> Event {

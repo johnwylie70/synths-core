@@ -249,6 +249,9 @@ param_table! {
     // ---- more of the reverb ----
     222, REVERB_PREDELAY, "reverb.predelay", Float, 0, 0.2, 0, "seconds", "", "A gap before the reverb starts, on top of the type's own: it keeps a sound clear of its own reverb.";
     223, REVERB_LOW_CUT, "reverb.low_cut", Float, 20, 1000, 120, "hz", "", "Bass below this is kept out of the reverb, so that it does not turn to mud.";
+
+    // ---- time ----
+    224, TEMPO, "tempo", Float, 20, 999, 120, "bpm", "", "Beats a minute, for arpeggios that count their steps in beats. A change is taken up at each arpeggio's next step.";
 }
 
 // Offsets inside a group of parameters that repeats.

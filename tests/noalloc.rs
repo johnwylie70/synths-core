@@ -52,6 +52,60 @@ fn the_counter_counts() {
 }
 
 #[test]
+fn arpeggios_and_chords_never_touch_the_allocator() {
+    use synths_core::arp::*;
+    let mut e = Engine::new(SR);
+    let (mut l, mut r) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+    let before = calls();
+    e.set_param(0, TEMPO, 140.0);
+    e.set_param(1, UNISON, 3.0);
+    e.set_param(ALL_PARTS, AMP_RELEASE, 0.4);
+    let mut all_taken = true;
+    let mut push = |ev: Event| all_taken &= e.push(ev);
+    // Struck in sixteenths over two octaves, swung and accented; stabs; a
+    // pitch that jumps at random; a chord of eight; a voice's own arpeggio
+    // given octaves as it sounds.
+    push(Event::arp_notes(0.0, 0, 0, 0.0, ORDER_UP_DOWN, &[0, 3, 7, 10]));
+    push(Event::arp_style(0.0, 0, 0, 0.5, 2, 0.2, 0xF8F8));
+    push(Event::arp_beat(0.0, 0, 0, 4.0));
+    push(Event::note_on(0.0, 0, 1, 48.0, 0.8));
+    push(Event::arp(100.0, 1, 0, 12.0, ORDER_TOGETHER, &[0, 4, 7]));
+    push(Event::arp_style(100.0, 1, 0, 0.3, 1, 0.0, 0));
+    push(Event::note_on(100.0, 1, 2, 60.0, 0.5));
+    push(Event::arp_notes(200.0, 2, 0, 40.0, ORDER_RANDOM, &[0, 5, 7]));
+    push(Event::arp_style(200.0, 2, 0, 0.0, 3, 0.0, 0));
+    push(Event::note_on(200.0, 2, 3, 72.0, 0.5));
+    let mut eight = Event::arp(300.0, 3, 0, -1.0, ORDER_TOGETHER, &[0, 3, 7, 10]);
+    eight.z = 8.0;
+    push(eight);
+    push(Event::arp_more(300.0, 3, 0, &[12, 15, 19, 22]));
+    push(Event::note_on(300.0, 3, 4, 36.0, 0.3));
+    push(Event::note_on(400.0, 4, 5, 64.0, 0.5));
+    push(Event::arp(400.0, 4, 5, 50.0, ORDER_UP, &[0, 4, 7]));
+    push(Event::arp_style(9000.0, 4, 5, 0.0, 2, 0.0, 0));
+    for i in 0..40 {
+        let at = 5000.0 + 3000.0 * i as f64;
+        push(Event::arp_notes(at, 0, 1, 0.0, (i % 7) as u8, &[0, 4, 7, 12][..2 + i % 3]));
+        push(Event::arp_notes(at + 500.0, 3, 4, 0.0, ORDER_TOGETHER, &[0, 5, 9]));
+        push(Event::arp_step(at + 500.0, 3, 4, 2000.0));
+        push(Event::param(at + 1000.0, 0, TEMPO, 100.0 + 3.0 * i as f32, 0.0));
+        push(Event::voice_pitch(at + 1500.0, 1, 2, 60.0 + (i % 5) as f32, 0.0));
+    }
+    for (part, handle) in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)] {
+        push(Event::note_off(130000.0, part, handle, 0.0));
+    }
+    assert!(all_taken);
+    let mut most = 0;
+    for block in [128usize, 1, 4096, 77, 128, 128, 2048].into_iter().cycle().take(220) {
+        e.render(&mut l[..block], &mut r[..block]);
+        most = most.max(e.active_voices());
+    }
+    let after = calls();
+    assert_eq!(after - before, 0, "the allocator was called {} times", after - before);
+    assert!(most >= 20 && e.time() > 180000 && e.active_voices() == 0 && e.active_arpeggiators() == 0, "{most} {}", e.active_voices());
+}
+
+#[test]
 fn an_engine_is_about_as_big_as_the_document_says() {
     // "About 2.6 MB at 48 kHz": the echo's two seconds and the reverb are more than half of it.
     let before = BYTES.with(|c| c.get());
