@@ -1,0 +1,46 @@
+{
+  "format": "synths-song",
+  "version": 2,
+  "title": "Chords and Arps",
+  "rules": "ft2",
+  "slides": "linear",
+  "speed": 6,
+  "tempo": 138,
+  "channels": 4,
+  "pan": [128, 128, 80, 176],
+  "order": [0],
+  "patterns": [
+    {"rows": 64, "events": [
+      {"row": 0, "ch": 0, "note": "A-3", "ins": 1, "arp": {"chord": "min", "rate": "1/16", "order": "up", "octaves": 2, "gate": 0.5}},
+      {"row": 0, "ch": 1, "note": "A-3", "ins": 2, "vol": 40, "chord": "min"},
+      {"row": 0, "ch": 2, "note": "A-2", "ins": 3, "vol": 24, "arp": {"chord": "min", "hz": 50}},
+      {"row": 8, "ch": 3, "note": "E-5", "ins": 3, "vol": 16, "fx": "037"},
+      {"row": 12, "ch": 3, "note": "off"},
+      {"row": 16, "ch": 0, "note": "F-3", "ins": 1, "arp": {"chord": "maj", "rate": "1/16", "order": "up", "octaves": 2, "gate": 0.5}},
+      {"row": 16, "ch": 1, "note": "F-3", "ins": 2, "vol": 40, "chord": "maj7"},
+      {"row": 16, "ch": 2, "note": "F-2", "ins": 3, "vol": 24, "arp": {"chord": "maj", "hz": 50}},
+      {"row": 24, "ch": 0, "arp": {"chord": "maj7", "rate": "1/16", "order": "updown", "octaves": 2, "gate": 0.5}},
+      {"row": 32, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj", "rate": "1/8t", "order": "down", "octaves": 2, "gate": 0.8, "accent": [15, 8, 8]}},
+      {"row": 32, "ch": 1, "note": "C-4", "ins": 2, "vol": 40, "chord": "add9"},
+      {"row": 32, "ch": 2, "note": "C-3", "ins": 3, "vol": 24, "arp": {"chord": "maj", "perTick": 1, "order": "updown"}},
+      {"row": 32, "ch": 3, "fx": "F96"},
+      {"row": 40, "ch": 3, "note": "G-5", "ins": 3, "vol": 16, "fx": "047"},
+      {"row": 44, "ch": 3, "note": "off"},
+      {"row": 48, "ch": 0, "note": "G-3", "ins": 1, "arp": {"chord": "7", "rate": "1/16", "order": "together", "gate": 0.3, "swing": 0.2}},
+      {"row": 48, "ch": 1, "note": "G-3", "ins": 2, "vol": 40, "chord": ["G-3", "B-3", "D-4", "F-4"]},
+      {"row": 48, "ch": 2, "note": "G-2", "ins": 3, "vol": 24, "arp": {"chord": "7", "rate": "1/32", "style": "slide"}},
+      {"row": 60, "ch": 0, "note": "off"},
+      {"row": 60, "ch": 2, "arp": "off"},
+      {"row": 62, "ch": 1, "note": "off"},
+      {"row": 62, "ch": 2, "note": "off"}
+    ]}
+  ],
+  "instruments": [
+    {"name": "lead", "patch": "lead"},
+    {"name": "pad", "patch": "pad"},
+    {"name": "square", "sample": 0}
+  ],
+  "samples": [
+    {"name": "square", "wave": [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100], "loop": {"start": 0, "length": 32}}
+  ]
+}

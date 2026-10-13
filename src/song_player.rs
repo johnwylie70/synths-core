@@ -718,6 +718,7 @@ impl SongPlayer {
             }
         }
         self.publish();
+        self.tick_length = length;
         self.carry += length;
         let whole = self.carry.floor();
         self.carry -= whole;

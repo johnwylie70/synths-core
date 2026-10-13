@@ -495,7 +495,10 @@ impl Engine {
                 a.strike_at = NEVER;
                 a.due = now as f64;
             } else if spec.period(sr, tempo) == 0.0 {
-                a.due = f64::INFINITY;
+                // No clock. (One that has yet to begin still takes its first step.)
+                if a.step > 0 {
+                    a.due = f64::INFINITY;
+                }
             } else if !a.due.is_finite() {
                 // It has been given a clock: the next step is a step from now.
                 a.due = now as f64 + spec.period(sr, tempo);
