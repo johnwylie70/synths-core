@@ -8,9 +8,10 @@
 //! passes a low cut, a pre-delay and four all-pass filters a side (Schroeder,
 //! 1962) that smear a click into a burst; a few early reflections are tapped
 //! from the pre-delay. In the loop each line has a filter that makes treble
-//! (and, by a different amount, bass) die away at its own rate, an all-pass
-//! filter that thickens the echoes, and a length that drifts slowly by a
-//! fraction of a millisecond, which keeps any one pitch from ringing on.
+//! (and, by a different amount, bass) die away at its own rate and an
+//! all-pass filter that thickens the echoes, and every other line's length
+//! drifts slowly by a few hundredths of a millisecond, which keeps any one
+//! pitch from ringing on without being heard as a chorus.
 //!
 //! The fifth type is a spring: a long chain of all-pass filters in a loop
 //! with a delay, as in a spring tank, where the high part of a sound travels
