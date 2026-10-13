@@ -50,6 +50,7 @@ cargo build --release --target aarch64-apple-ios    # makes target/aarch64-apple
 
 ```
 cargo run --release --example demo     # renders eleven short phrases to target/demo/*.wav
+cargo run --release --example reverb   # a click, a stab and a chord through each type of the reverb, to target/demo/reverb-*.wav
 cargo run --release --example bench    # how many voices this machine plays in real time
 cargo run --example param_table        # the parameter table, as it appears in the document
 ```
@@ -66,7 +67,8 @@ cargo run --example param_table        # the parameter table, as it appears in t
 | `src/osc.rs`, `src/sample.rs`, `src/filter.rs`, `src/env.rs`, `src/lfo.rs`, `src/macros.rs` | the parts of a voice |
 | `src/taps.rs` | the scope, the meters and the sounding notes, for a display |
 | `src/sequencer.rs` | the hook a song player uses to be called at exact frames from inside the render |
-| `src/fx.rs` | echo, reverb, chorus, distortion, bit crusher, limiter |
+| `src/fx.rs` | echo, chorus, distortion, bit crusher, limiter |
+| `src/reverb.rs` | the reverb and its types |
 
 To add a parameter, add a line to the table in `src/params.rs` with an id that has never been used, use it in the engine, then run `cargo run --example param_table` and paste the result into the document; a test fails if the two disagree.
 
