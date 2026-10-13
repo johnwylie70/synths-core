@@ -39,6 +39,8 @@ pub mod song_player;
 pub mod taps;
 pub mod voice;
 pub mod voicefx;
+pub mod zones;
+pub mod zones_abi;
 
 pub use engine::Engine;
 pub use event::Event;

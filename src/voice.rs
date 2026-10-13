@@ -10,7 +10,8 @@ use crate::macros::{Macro, MacroPlayer, STEP_NOISE};
 use crate::math::{fast_sin, note_to_hz, semis_to_ratio, Rng, PI};
 use crate::osc::{Noise, Osc, NOISE_LFSR};
 use crate::params::*;
-use crate::sample::{Player, Sample};
+use crate::sample::{Loop, Player, Sample, LOOP_OFF};
+use crate::zones::{Zone, ZONE_FIXED_PITCH, ZONE_LOOP_OWN, ZONE_ONE_SHOT};
 
 /// The engine works out slow-moving values (pitch, filter, loudness) once
 /// every this many samples and slides smoothly between them.
@@ -91,6 +92,23 @@ pub struct Voice {
     fade_new: bool,
     /// The fade is over: the voice ends.
     faded: bool,
+    /// What the zone of a sample map changes for this voice (`use_zone`).
+    /// The key its sample was recorded at, or not a number for the base
+    /// note of the sample's slot, as it is for a voice with no zone.
+    zone_root: f32,
+    /// Tuning in semitones, loudness and pan.
+    zone_tune: f32,
+    zone_gain: f32,
+    zone_pan: f32,
+    /// Its own release time in seconds, or below 0 for the part's.
+    zone_release: f32,
+    /// The pitch does not follow the note.
+    zone_fixed: bool,
+    /// The sample plays to its end whatever the key does.
+    one_shot: bool,
+    /// Its own loop, unless the mode is `ZONE_LOOP_OWN`.
+    zone_loop_mode: u8,
+    zone_loop: [u32; 2],
 
     osc: [Osc; 2],
     sub: Osc,
@@ -175,6 +193,15 @@ impl Voice {
             fade_step: 0.0,
             fade_new: false,
             faded: false,
+            zone_root: f32::NAN,
+            zone_tune: 0.0,
+            zone_gain: 1.0,
+            zone_pan: 0.0,
+            zone_release: -1.0,
+            zone_fixed: false,
+            one_shot: false,
+            zone_loop_mode: ZONE_LOOP_OWN,
+            zone_loop: [0; 2],
             osc: [Osc::default(); 2],
             sub: Osc::default(),
             noise: Noise::new(1),
@@ -227,6 +254,9 @@ impl Voice {
 
     fn read_shapes(&mut self, p: &[f32; PART_PARAMS], sample_rate: f32) {
         self.amp_shape = EnvShape::new(&p[AMP_ATTACK..AMP_ATTACK + 5], sample_rate);
+        if self.zone_release >= 0.0 {
+            self.amp_shape.set_release(self.zone_release, sample_rate);
+        }
         self.filter_shape = EnvShape::new(&p[FENV_ATTACK..FENV_ATTACK + 5], sample_rate);
         self.mod_shape = EnvShape::new(&p[MENV_ATTACK..MENV_ATTACK + 5], sample_rate);
     }
@@ -258,7 +288,7 @@ impl Voice {
             };
             let offset = p[OSC1_START + i * OSC_STRIDE] as f64 * frames;
             match samples.get(slot) {
-                Some(Some(sm)) if p[OSC1_REVERSE + i] >= 0.5 => self.players[i].start_reversed(sm, offset),
+                Some(Some(sm)) if p[OSC1_REVERSE + i] >= 0.5 => self.players[i].start_reversed(sm, &sm.own_loop(), offset),
                 _ => self.players[i].start(offset),
             }
         }
@@ -304,6 +334,10 @@ impl Voice {
     pub fn release(&mut self) {
         if self.state == VoiceState::Held {
             self.state = VoiceState::Released;
+            if self.one_shot {
+                // It has been let go, and plays on to the end of its sample.
+                return;
+            }
             self.macro_player.release();
             self.amp_env.gate_off(&self.amp_shape);
             self.filter_env.gate_off(&self.filter_shape);
@@ -316,6 +350,51 @@ impl Voice {
     pub fn use_sample(&mut self, slot: u16, position: f64) {
         self.own_sample = slot as i32;
         self.players[0].start(position);
+    }
+
+    /// Play a zone of the part's sample map as oscillator 1: its sample,
+    /// tuned, turned up or down and panned as the zone says, with `gain`
+    /// more on top (a crossfade's share). For a voice that has just been
+    /// started. The voice keeps the zone for as long as it lasts, whatever
+    /// its pitch does afterwards.
+    pub fn use_zone(&mut self, z: &Zone, gain: f32, p: &[f32; PART_PARAMS], samples: &[Option<Sample>], sample_rate: f32) {
+        self.own_sample = z.slot as i32;
+        self.zone_root = z.root;
+        self.zone_tune = z.tune * 0.01;
+        self.zone_gain = z.volume * gain;
+        self.zone_pan = z.pan;
+        self.zone_release = z.release;
+        self.zone_fixed = z.flags & ZONE_FIXED_PITCH != 0;
+        self.one_shot = z.flags & ZONE_ONE_SHOT != 0;
+        self.zone_loop_mode = z.loop_mode;
+        self.zone_loop = [z.loop_start, z.loop_end];
+        if z.release >= 0.0 {
+            self.amp_shape.set_release(z.release, sample_rate);
+        }
+        match samples.get(z.slot as usize) {
+            Some(Some(sm)) => {
+                let offset = z.start as f64 + p[OSC1_START] as f64 * sm.frames as f64;
+                if p[OSC1_REVERSE] >= 0.5 {
+                    self.players[0].start_reversed(sm, &self.loop_of(sm), offset);
+                } else {
+                    self.players[0].start(offset);
+                }
+            }
+            _ => self.players[0].start(0.0),
+        }
+    }
+
+    /// The loop oscillator 1 plays in a sample: the sample's own, unless
+    /// the voice's zone has another, or none.
+    #[inline]
+    fn loop_of(&self, s: &Sample) -> Loop {
+        if self.one_shot {
+            Loop { mode: LOOP_OFF, start: 0, end: 0 }
+        } else if self.zone_loop_mode == ZONE_LOOP_OWN {
+            s.own_loop()
+        } else {
+            s.fit_loop(self.zone_loop_mode - 1, self.zone_loop[0], self.zone_loop[1])
+        }
     }
 
     /// The sample slot oscillator 1 plays (whether or not its wave is a sample).
@@ -497,7 +576,16 @@ impl Voice {
                         if i == 0 && s.channels == 2 {
                             self.stereo = true;
                         }
-                        let n = if keytrack { self.note - s.base_note } else { 0.0 };
+                        // A zone of a sample map has its own root key and tuning.
+                        let zone = i == 0 && (self.zone_fixed || self.zone_tune != 0.0 || !self.zone_root.is_nan());
+                        let n = if zone {
+                            let root = if self.zone_root.is_nan() { s.base_note } else { self.zone_root };
+                            (if keytrack && !self.zone_fixed { self.note - root } else { 0.0 }) + self.zone_tune
+                        } else if keytrack {
+                            self.note - s.base_note
+                        } else {
+                            0.0
+                        };
                         s.rate * inv_sr * semis_to_ratio((n + bend + semis).clamp(-120.0, 120.0))
                     }
                     _ => 0.0,
@@ -586,7 +674,7 @@ impl Voice {
         let volume = towards(self.volume, self.volume_to, self.volume_step * len as f32);
         let own_pan = towards(self.pan, self.pan_to, self.pan_step * len as f32);
         let sens = p[VELOCITY_SENS];
-        let mut gain = (1.0 - sens + sens * self.velocity) * volume * self.unison_gain * step.volume;
+        let mut gain = (1.0 - sens + sens * self.velocity) * volume * self.unison_gain * step.volume * self.zone_gain;
         if self.fade_step > 0.0 {
             if self.fade_new {
                 self.fade_new = false;
@@ -599,7 +687,7 @@ impl Voice {
         }
         gain *= 1.0 - p[LFO1_AMP] * (0.5 - 0.5 * lfo[0]);
         gain *= 1.0 - p[LFO2_AMP] * (0.5 - 0.5 * lfo[1]);
-        let pan = (p[PAN] + own_pan + self.unison_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
+        let pan = (p[PAN] + own_pan + self.unison_pan + self.zone_pan + lfo_sum(LFO1_PAN)).clamp(-1.0, 1.0);
         let (gl, gr) = if self.stereo {
             // A stereo sample keeps both sides at full until it is panned.
             ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
@@ -642,8 +730,12 @@ impl Voice {
             match samples.get(self.slots[0] as usize) {
                 Some(Some(s)) => {
                     if need1 {
-                        self.players[0].render(s, a, if stereo { Some(&mut *b) } else { None });
+                        let lp = self.loop_of(s);
+                        self.players[0].render(s, &lp, a, if stereo { Some(&mut *b) } else { None });
                         sounding |= l1 > 0.0 && !self.players[0].ended;
+                    } else if self.one_shot {
+                        // Nothing is playing it, so nothing would ever end it.
+                        self.players[0].ended = true;
                     }
                 }
                 _ => self.players[0].ended = true,
@@ -666,7 +758,7 @@ impl Voice {
             if self.waves[1] == WAVE_SAMPLE {
                 match samples.get(self.slots[1] as usize) {
                     Some(Some(s)) => {
-                        self.players[1].render(s, t, None);
+                        self.players[1].render(s, &s.own_loop(), t, None);
                         have2 = true;
                         sounding |= !self.players[1].ended;
                     }
@@ -757,6 +849,10 @@ impl Voice {
         self.gain = [gl, gr];
         self.last = [last_l, last_r];
         self.since_control += n as u32;
+        // A one-shot zone is over when its sample is, whatever else the patch has sounding.
+        if self.one_shot && self.players[0].ended {
+            sounding = false;
+        }
         sounding && !self.faded && !self.amp_env.finished(&self.amp_shape)
     }
 }

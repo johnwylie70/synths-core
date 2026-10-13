@@ -335,7 +335,7 @@ pub fn table_json() -> String {
     let mut s = String::with_capacity(16 * 1024);
     let _ = write!(
         s,
-        "{{\"version\":\"{}\",\"abi\":{},\"limits\":{{\"voices\":{},\"parts\":{},\"samples\":{},\"event_size\":{},\"event_buffer\":{},\"event_queue\":{},\"output_frames\":{},\"macro_steps\":{},\"scope_master\":{},\"scope_part\":{}}},",
+        "{{\"version\":\"{}\",\"abi\":{},\"limits\":{{\"voices\":{},\"parts\":{},\"samples\":{},\"event_size\":{},\"event_buffer\":{},\"event_queue\":{},\"output_frames\":{},\"macro_steps\":{},\"scope_master\":{},\"scope_part\":{},\"zone_size\":{},\"zones_part\":{},\"zones_total\":{},\"zone_layers\":{}}},",
         crate::VERSION,
         crate::ABI_VERSION,
         e::MAX_VOICES,
@@ -347,7 +347,11 @@ pub fn table_json() -> String {
         e::OUTPUT_FRAMES,
         crate::macros::MAX_STEPS,
         crate::taps::SCOPE_MASTER,
-        crate::taps::SCOPE_PART
+        crate::taps::SCOPE_PART,
+        crate::zones::ZONE_SIZE,
+        crate::zones::ZONES_PER_PART,
+        crate::zones::ZONES_TOTAL,
+        crate::zones::MAX_LAYERS
     );
     s.push_str("\"events\":[");
     for (i, (id, name, help)) in crate::event::EVENT_TYPES.iter().enumerate() {

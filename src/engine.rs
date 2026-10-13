@@ -15,6 +15,7 @@ use crate::sample::{Sample, LOOP_PINGPONG};
 use crate::sequencer::{Sequencer, Trigger, Voices};
 use crate::taps::{Taps, NOTES_SIZE};
 use crate::voice::{Start, Voice, VoiceState, CONTROL};
+use crate::zones::{Picks, Zone, ZoneError, ZoneMaps};
 
 mod io;
 
@@ -163,6 +164,8 @@ pub struct Engine {
     parts: Box<[Part]>,
     globals: [f32; GLOBAL_PARAMS],
     samples: Box<[Option<Sample>]>,
+    /// The parts' sample maps.
+    zones: ZoneMaps,
     queue: Queue,
     ramps: Box<[Ramp]>,
     live_ramps: usize,
@@ -225,6 +228,7 @@ impl Engine {
             parts: (0..NUM_PARTS).map(|_| Part::new()).collect(),
             globals,
             samples: (0..MAX_SAMPLES).map(|_| None).collect(),
+            zones: ZoneMaps::new(),
             queue: Queue::new(QUEUE_CAPACITY),
             ramps: vec![Ramp::default(); MAX_RAMPS].into_boxed_slice(),
             live_ramps: 0,
@@ -299,6 +303,7 @@ impl Engine {
             r.live = false;
         }
         self.live_ramps = 0;
+        self.zones.rewind_all();
         self.queue.clear();
         self.delay.clear();
         self.reverb.clear();
@@ -382,6 +387,40 @@ impl Engine {
                 Ok(())
             }
         }
+    }
+
+    // ---- sample maps ----
+
+    /// Give a part its sample map, replacing any it had: a list of zones,
+    /// each a sample slot for a range of keys and velocities (see
+    /// `zones::Zone`). No zones takes the map away. `flags` is
+    /// `zones::MAP_SILENT_OUTSIDE` or 0. Notes already sounding keep the
+    /// zones they started with. It asks for no memory.
+    pub fn set_zones(&mut self, part: usize, zones: &[Zone], flags: u32) -> Result<(), SampleError> {
+        self.set_zones_with(part, zones.len(), flags, |i| zones[i])
+    }
+
+    /// `set_zones`, with zone `i` of `len` read by `zone(i)`.
+    pub fn set_zones_with(&mut self, part: usize, len: usize, flags: u32, zone: impl Fn(usize) -> Zone) -> Result<(), SampleError> {
+        self.zones.set_with(part, len, flags, zone).map_err(|e| match e {
+            ZoneError::BadPart => SampleError::BadSlot,
+            ZoneError::TooMany | ZoneError::BadSlot => SampleError::BadFormat,
+        })
+    }
+
+    /// A part's zones as the engine holds them, in the order they were given.
+    pub fn zones(&self, part: usize) -> &[Zone] {
+        self.zones.zones(part)
+    }
+
+    /// A part's map flags.
+    pub fn zone_flags(&self, part: usize) -> u32 {
+        self.zones.flags(part)
+    }
+
+    /// Does a new note on this part go by its sample map?
+    fn mapped(&self, part: usize) -> bool {
+        !self.zones.zones(part).is_empty() && self.parts[part].p[OSC1_WAVE] as u8 == WAVE_SAMPLE
     }
 
     // ---- macros ----
@@ -611,49 +650,82 @@ impl Engine {
             }
             p.held[p.held_len] = HeldNote { note, handle, velocity };
             p.held_len += 1;
-            // One note at a time: a voice that is already sounding moves to the new note.
-            let mut found = false;
-            for v in self.voices.iter_mut() {
-                if v.active() && v.part == part {
-                    v.replay(note, velocity, handle, glide, mode == 1, sr);
-                    found = true;
+            if mode == 1 && self.mapped(pi) {
+                // Mono, with a sample map: the new note has zones of its
+                // own, so the sounding voices make way for new ones.
+                self.cut_part(part, false);
+            } else {
+                // One note at a time: a voice that is already sounding moves to the new note.
+                let mut found = false;
+                for v in self.voices.iter_mut() {
+                    if v.active() && v.part == part {
+                        v.replay(note, velocity, handle, glide, mode == 1, sr);
+                        found = true;
+                    }
+                }
+                if found {
+                    self.parts[pi].last_note = note;
+                    return;
                 }
             }
-            if found {
-                self.parts[pi].last_note = note;
-                return;
+        }
+        self.start_note(part, handle, note, velocity);
+    }
+
+    /// Cut the voices of a part (or only those still held), without a click.
+    fn cut_part(&mut self, part: u16, held_only: bool) {
+        for v in self.voices.iter_mut() {
+            if v.active() && v.part == part && (!held_only || v.state == VoiceState::Held) {
+                Engine::cut(&mut self.parts, v);
             }
         }
+    }
+
+    /// Start the voices of a new note: one for each unison voice, and with
+    /// a sample map that many for each zone the note plays.
+    fn start_note(&mut self, part: u16, handle: u32, note: f32, velocity: f32) {
+        let pi = part as usize;
+        let sr = self.sample_rate;
+        let glide = self.parts[pi].p[GLIDE];
+        let mapped = self.mapped(pi);
+        let picks = if mapped { self.zones.pick(pi, note, velocity) } else { Picks::default() };
+        let layers = if mapped { picks.count } else { 1 };
         let unison = (self.parts[pi].p[UNISON] as usize).clamp(1, 8);
         let from = if self.parts[pi].has_note { self.parts[pi].last_note } else { note };
-        for i in 0..unison {
-            let spread = if unison > 1 { i as f32 / (unison - 1) as f32 * 2.0 - 1.0 } else { 0.0 };
-            let slot = self.take_voice();
-            self.born += 1;
-            let p = &self.parts[pi].p;
-            let start = Start {
-                part,
-                handle,
-                note,
-                from,
-                glide: if from != note { glide } else { 0.0 },
-                velocity,
-                detune: spread * p[UNISON_DETUNE] * 0.01,
-                pan: spread * p[UNISON_SPREAD],
-                gain: 1.0 / (unison as f32).sqrt(),
-                random_phase: unison > 1,
-                seed: self.rng.next_u32(),
-                born: self.born,
-            };
-            self.voices[slot].start(&start, p, &self.samples, sr);
-            // An arpeggio that was waiting for this note.
-            let arp = self.parts[pi].next_arp;
-            if arp.count > 0 {
-                let v = &mut self.voices[slot];
-                let mut rng = v.rng;
-                v.arp.set(&arp, self.time, sr, &mut rng);
-                v.rng = rng;
-                self.arp_at = self.time;
+        for layer in 0..layers {
+            for i in 0..unison {
+                let spread = if unison > 1 { i as f32 / (unison - 1) as f32 * 2.0 - 1.0 } else { 0.0 };
+                let slot = self.take_voice();
+                self.born += 1;
+                let p = &self.parts[pi].p;
+                let start = Start {
+                    part,
+                    handle,
+                    note,
+                    from,
+                    glide: if from != note { glide } else { 0.0 },
+                    velocity,
+                    detune: spread * p[UNISON_DETUNE] * 0.01,
+                    pan: spread * p[UNISON_SPREAD],
+                    gain: 1.0 / (unison as f32).sqrt(),
+                    random_phase: unison > 1,
+                    seed: self.rng.next_u32(),
+                    born: self.born,
+                };
+                self.voices[slot].start(&start, p, &self.samples, sr);
+                if mapped {
+                    let zone = self.zones.zone(picks.index[layer]);
+                    self.voices[slot].use_zone(&zone, picks.gain[layer], p, &self.samples, sr);
+                }
+                // An arpeggio that was waiting for this note.
+                let arp = self.parts[pi].next_arp;
+                if arp.count > 0 {
+                    let v = &mut self.voices[slot];
+                    let mut rng = v.rng;
+                    v.arp.set(&arp, self.time, sr, &mut rng);
+                    v.rng = rng;
+                    self.arp_at = self.time;
+                }
             }
         }
         self.parts[pi].next_arp = ArpSpec::NONE;
@@ -678,6 +750,13 @@ impl Engine {
             if was_sounding && p.held_len > 0 {
                 let back = p.held[p.held_len - 1];
                 let glide = p.p[GLIDE];
+                if mode == 1 && self.mapped(pi) {
+                    // With a sample map the note gone back to has zones of its own.
+                    self.cut_part(part, true);
+                    self.start_note(part, back.handle, back.note, back.velocity);
+                    return;
+                }
+                let p = &mut self.parts[pi];
                 p.last_note = back.note;
                 for v in self.voices.iter_mut() {
                     if v.state == VoiceState::Held && v.part == part {

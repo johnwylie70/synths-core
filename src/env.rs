@@ -44,6 +44,12 @@ impl EnvShape {
         }
     }
 
+    /// Give the release another length, in seconds.
+    pub fn set_release(&mut self, seconds: f32, sample_rate: f32) {
+        self.release = (seconds.max(0.0) * sample_rate + 0.5) as u32;
+        self.inv_release = if self.release > 0 { 1.0 / self.release as f32 } else { 0.0 };
+    }
+
     #[inline]
     fn bend(&self, x: f32) -> f32 {
         x / (x + self.warp * (1.0 - x))

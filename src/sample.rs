@@ -4,6 +4,14 @@ pub const LOOP_OFF: u8 = 0;
 pub const LOOP_FORWARD: u8 = 1;
 pub const LOOP_PINGPONG: u8 = 2;
 
+/// A loop: which way it goes round, its first frame, and one past its last.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Loop {
+    pub mode: u8,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// A loaded sample.
 pub struct Sample {
     /// The sound, one number per channel per frame (left, right, left, ...).
@@ -32,14 +40,30 @@ impl Sample {
         }
     }
 
+    /// The sample's own loop, as a voice plays it.
+    #[inline]
+    pub fn own_loop(&self) -> Loop {
+        Loop { mode: self.looping(), start: self.loop_start, end: self.loop_end }
+    }
+
+    /// A loop of someone else's choosing, brought inside this sample: an
+    /// end past the last frame is brought back to it, and a loop with no
+    /// frames in it is no loop.
+    #[inline]
+    pub fn fit_loop(&self, mode: u8, start: u32, end: u32) -> Loop {
+        let end = end.min(self.frames);
+        let start = start.min(end);
+        Loop { mode: if end > start { mode.min(LOOP_PINGPONG) } else { LOOP_OFF }, start, end }
+    }
+
     /// The frame at index `v`, where `v` counts on past the end of the loop as
     /// if the loop were laid out end to end.
     #[inline]
-    fn fetch(&self, mut v: i64, ch: usize, mode: u8, looped: bool) -> f32 {
-        let ls = self.loop_start as i64;
-        let le = self.loop_end as i64;
+    fn fetch(&self, mut v: i64, ch: usize, lp: &Loop, looped: bool) -> f32 {
+        let ls = lp.start as i64;
+        let le = lp.end as i64;
         let len = le - ls;
-        match mode {
+        match lp.mode {
             LOOP_FORWARD => {
                 if v >= le {
                     v = ls + (v - le) % len;
@@ -113,18 +137,18 @@ impl Player {
 
     /// Start a note that plays backwards, `offset` frames in from where it
     /// would otherwise begin: the last frame of a one-shot, or the end of a loop.
-    pub fn start_reversed(&mut self, s: &Sample, offset: f64) {
+    pub fn start_reversed(&mut self, s: &Sample, lp: &Loop, offset: f64) {
         let offset = if offset.is_finite() && offset > 0.0 { offset } else { 0.0 };
-        match s.looping() {
+        match lp.mode {
             LOOP_OFF => self.start((s.frames as f64 - 1.0 - offset).max(0.0)),
             LOOP_FORWARD => {
-                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                let (ls, le) = (lp.start as f64, lp.end as f64);
                 self.start(le - 1.0 - offset % (le - ls));
                 self.looped = true;
             }
             _ => {
                 // The way back is the second half of a ping-pong loop.
-                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                let (ls, le) = (lp.start as f64, lp.end as f64);
                 self.start(le + offset % (le - ls));
                 self.looped = true;
             }
@@ -134,15 +158,15 @@ impl Player {
     /// Bring the position back inside the sample or its loop. `back` is true
     /// when the position is moving towards the start.
     #[inline]
-    fn wrap(&mut self, s: &Sample, mode: u8, back: bool) {
-        match mode {
+    fn wrap(&mut self, s: &Sample, lp: &Loop, back: bool) {
+        match lp.mode {
             LOOP_OFF => {
                 if self.pos >= s.frames as f64 || self.pos < 0.0 {
                     self.ended = true;
                 }
             }
             LOOP_FORWARD => {
-                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                let (ls, le) = (lp.start as f64, lp.end as f64);
                 if back {
                     if self.pos < ls {
                         self.pos = le - (ls - self.pos) % (le - ls);
@@ -159,7 +183,7 @@ impl Player {
                 }
             }
             _ => {
-                let (ls, le) = (s.loop_start as f64, s.loop_end as f64);
+                let (ls, le) = (lp.start as f64, lp.end as f64);
                 let span = 2.0 * (le - ls);
                 if self.pos >= le {
                     self.wrapped |= !self.looped;
@@ -176,11 +200,11 @@ impl Player {
     /// The sample at the position, from a smooth curve through the four
     /// frames around it.
     #[inline]
-    fn read(&self, s: &Sample, mode: u8, plain_end: i64) -> (f32, f32) {
+    fn read(&self, s: &Sample, lp: &Loop, plain_end: i64) -> (f32, f32) {
         let stereo = s.channels == 2;
         let ip = self.pos as i64;
         let f = (self.pos - ip as f64) as f32;
-        if ip >= 1 && ip < plain_end && (!self.looped || ip > s.loop_start as i64) {
+        if ip >= 1 && ip < plain_end && (!self.looped || ip > lp.start as i64) {
             // The four frames are plain neighbours.
             let at = ip as usize - 1;
             if stereo {
@@ -196,20 +220,20 @@ impl Player {
                 (l, l)
             }
         } else {
-            let lp = self.looped;
+            let round = self.looped;
             let l = cubic(
-                s.fetch(ip - 1, 0, mode, lp),
-                s.fetch(ip, 0, mode, lp),
-                s.fetch(ip + 1, 0, mode, lp),
-                s.fetch(ip + 2, 0, mode, lp),
+                s.fetch(ip - 1, 0, lp, round),
+                s.fetch(ip, 0, lp, round),
+                s.fetch(ip + 1, 0, lp, round),
+                s.fetch(ip + 2, 0, lp, round),
                 f,
             );
             let r = if stereo {
                 cubic(
-                    s.fetch(ip - 1, 1, mode, lp),
-                    s.fetch(ip, 1, mode, lp),
-                    s.fetch(ip + 1, 1, mode, lp),
-                    s.fetch(ip + 2, 1, mode, lp),
+                    s.fetch(ip - 1, 1, lp, round),
+                    s.fetch(ip, 1, lp, round),
+                    s.fetch(ip + 1, 1, lp, round),
+                    s.fetch(ip + 2, 1, lp, round),
                     f,
                 )
             } else {
@@ -225,13 +249,13 @@ impl Player {
     /// what is too high to survive the speeding up, which would otherwise
     /// fold back down as harsh tones that were never in the sample.
     #[inline]
-    fn read_wide(&self, s: &Sample, mode: u8, width: f32) -> (f32, f32) {
+    fn read_wide(&self, s: &Sample, lp: &Loop, width: f32) -> (f32, f32) {
         let stereo = s.channels == 2;
         let lo = (self.pos - width as f64).ceil() as i64;
         let hi = (self.pos + width as f64).floor() as i64;
         let inv = 1.0 / width;
-        let limit = if mode == LOOP_OFF { s.frames as i64 } else { s.loop_end as i64 };
-        let floor = if self.looped { s.loop_start as i64 } else { 0 };
+        let limit = if lp.mode == LOOP_OFF { s.frames as i64 } else { lp.end as i64 };
+        let floor = if self.looped { lp.start as i64 } else { 0 };
         let (mut l, mut r, mut total) = (0.0f32, 0.0f32, 0.0f32);
         if lo >= floor && hi < limit {
             let mut d = (lo as f64 - self.pos) as f32 * inv;
@@ -255,12 +279,12 @@ impl Player {
                 }
             }
         } else {
-            let lp = self.looped;
+            let round = self.looped;
             for j in lo..=hi {
                 let weight = 1.0 - ((j as f64 - self.pos) as f32 * inv).abs();
-                l += s.fetch(j, 0, mode, lp) * weight;
+                l += s.fetch(j, 0, lp, round) * weight;
                 if stereo {
-                    r += s.fetch(j, 1, mode, lp) * weight;
+                    r += s.fetch(j, 1, lp, round) * weight;
                 }
                 total += weight;
             }
@@ -274,16 +298,17 @@ impl Player {
     }
 
     /// Write the next samples into `left` (and `right`, if given; without it
-    /// a stereo sample is mixed to one channel).
-    pub fn render(&mut self, s: &Sample, left: &mut [f32], mut right: Option<&mut [f32]>) {
-        let mode = s.looping();
+    /// a stereo sample is mixed to one channel). `lp` is the loop to play:
+    /// the sample's own, or another that fits inside it.
+    pub fn render(&mut self, s: &Sample, lp: &Loop, left: &mut [f32], mut right: Option<&mut [f32]>) {
+        let mode = lp.mode;
         let stereo = s.channels == 2;
         // A ping-pong loop already goes both ways: there, playing backwards
         // only changes where the note starts.
         let back = self.reverse && mode != LOOP_PINGPONG;
-        self.wrap(s, mode, back);
+        self.wrap(s, lp, back);
         // Below this, the four frames around the position are plain neighbours.
-        let plain_end = if mode == LOOP_OFF { s.frames as i64 } else { s.loop_end as i64 } - 2;
+        let plain_end = if mode == LOOP_OFF { s.frames as i64 } else { lp.end as i64 } - 2;
         for i in 0..left.len() {
             if self.ended {
                 self.tail = [self.tail[0] * 0.97, self.tail[1] * 0.97];
@@ -297,17 +322,17 @@ impl Player {
                 continue;
             }
             let (l, r) = if self.antialias && self.inc > 1.0 {
-                let wide = self.read_wide(s, mode, self.inc.min(WIDEST));
+                let wide = self.read_wide(s, lp, self.inc.min(WIDEST));
                 if self.inc < 2.0 {
                     // Up to an octave above its own speed, cross over gradually.
                     let mix = self.inc - 1.0;
-                    let fine = self.read(s, mode, plain_end);
+                    let fine = self.read(s, lp, plain_end);
                     (fine.0 + (wide.0 - fine.0) * mix, fine.1 + (wide.1 - fine.1) * mix)
                 } else {
                     wide
                 }
             } else {
-                self.read(s, mode, plain_end)
+                self.read(s, lp, plain_end)
             };
             match right.as_deref_mut() {
                 Some(rb) => {
@@ -319,7 +344,7 @@ impl Player {
             self.inc += self.dinc;
             let step = self.inc.max(0.0) as f64;
             self.pos += if back { -step } else { step };
-            self.wrap(s, mode, back);
+            self.wrap(s, lp, back);
             if self.ended {
                 self.tail = [l, r];
             }
