@@ -138,6 +138,13 @@ pub trait Voices {
     /// Voices that ignore this play the chord's root alone.
     fn set_arpeggio(&mut self, _frame: u32, _channel: usize, _arpeggio: Option<&Arpeggio>) {}
 
+    /// What else the channel's event on this row says: the number of one
+    /// of the song's extras (a glide, a bend, a vibrato, a gate), or 0 for
+    /// nothing. It comes on every row, for every channel, before anything
+    /// else the row does to the channel. Voices that ignore it play the
+    /// song without those.
+    fn set_extra(&mut self, _frame: u32, _channel: usize, _extra: u16) {}
+
     /// ProTracker only: the sample to carry on with when the one playing
     /// next reaches its end or the end of its loop (at once if it has
     /// already ended). The new sample starts at its loop and repeats it; if

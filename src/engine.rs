@@ -199,6 +199,8 @@ pub struct Engine {
     beat: f64,
     beat_frame: u64,
     beat_rate: f64,
+    /// The tempo a playing song has, which is the beat's while it plays; 0 for none.
+    pub(crate) song_tempo: f32,
     /// The parts' trance gates.
     gates: Box<[crate::gate::Gate]>,
     /// The patterns of steps hosts have set for arpeggios to follow.
@@ -267,6 +269,7 @@ impl Engine {
             beat: 0.0,
             beat_frame: 0,
             beat_rate: 0.0,
+            song_tempo: 0.0,
             gates: vec![crate::gate::Gate::new(); NUM_PARTS].into_boxed_slice(),
             patterns: vec![crate::arp::Pattern::NONE; crate::arp::PATTERN_SLOTS].into_boxed_slice(),
             taps: Box::new(Taps::new(NUM_PARTS)),
@@ -329,6 +332,7 @@ impl Engine {
         self.arp_reset();
         self.beat = 0.0;
         self.beat_frame = self.time;
+        self.song_tempo = 0.0;
         self.gates.iter_mut().for_each(|g| g.clear());
         self.queue.clear();
         self.delay.clear();
@@ -1243,7 +1247,7 @@ impl Engine {
     /// How far one frame moves the beat.
     #[inline]
     fn beat_per_frame(&self) -> f64 {
-        self.globals[TEMPO - GLOBAL_BASE] as f64 / (60.0 * self.sample_rate as f64)
+        self.tempo() as f64 / (60.0 * self.sample_rate as f64)
     }
 
     /// Let a meter fall back by one control period.

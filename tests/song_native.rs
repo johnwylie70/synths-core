@@ -322,7 +322,7 @@ fn a_chord_is_its_notes_together_and_an_arp_is_its_notes_one_at_a_time() {
     let chord = |row: u16| p.chord(row, 0).unwrap();
     let note = |division, feel| ArpRate::Note(NoteLength { division, feel });
     let strike = Arp::SIXTEENTHS;
-    assert_eq!(strike, Arp { rate: note(16, Feel::Plain), order: ArpOrder::Up, style: ArpStyle::Strike, gate: 0.5, octaves: 1, swing: 0.0, accents: 0 });
+    assert_eq!(strike, Arp { rate: note(16, Feel::Plain), order: ArpOrder::Up, style: ArpStyle::Strike, gate: 0.5, octaves: 1, swing: 0.0, accents: 0, pattern: 0 });
     // The four notes together.
     assert_eq!(chord(0), Chord::new(&[0, 3, 7, 10]));
     assert_eq!(chord(0).arp, None);

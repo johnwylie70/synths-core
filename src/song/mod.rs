@@ -244,12 +244,15 @@ pub struct Arp {
     /// for full and 0 for a rest, as long as its last level that is not 0.
     /// 0 for every step at full.
     pub accents: u32,
+    /// The pattern of steps it follows in place of its order: a number
+    /// from 1 into the song's `arp_patterns`, or 0 for none.
+    pub pattern: u8,
 }
 
 impl Arp {
     /// What a `chord` meant before chords and arpeggios were told apart,
     /// and still the Commodore 64's chord: one voice, a step a tick, upwards.
-    pub const FAST: Arp = Arp { rate: ArpRate::PerTick(1.0), order: ArpOrder::Up, style: ArpStyle::Slide, gate: 0.5, octaves: 1, swing: 0.0, accents: 0 };
+    pub const FAST: Arp = Arp { rate: ArpRate::PerTick(1.0), order: ArpOrder::Up, style: ArpStyle::Slide, gate: 0.5, octaves: 1, swing: 0.0, accents: 0, pattern: 0 };
 
     /// A player's arpeggio: a new note each sixteenth, upwards, held for
     /// half its step.
@@ -264,6 +267,7 @@ impl Arp {
             && (self.order as u8) <= ArpOrder::Random as u8
             && self.octaves <= 1
             && self.swing == 0.0
+            && self.pattern == 0
     }
 
     /// The accents as a list: each step's level, 0 to 15.
@@ -378,6 +382,138 @@ impl Chord {
     }
 }
 
+/// A length of time in a song.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Time {
+    /// A note length, counting four rows to the beat.
+    Note(NoteLength),
+    Rows(f32),
+    Ticks(f32),
+    Seconds(f32),
+}
+
+impl Time {
+    /// How many ticks it lasts, in a song with `speed` ticks to the row at
+    /// `tempo` beats a minute.
+    pub fn ticks(&self, speed: u16, tempo: u16) -> f64 {
+        let ticks = match *self {
+            Time::Note(length) => speed as f64 * length.rows(),
+            Time::Rows(n) => speed as f64 * n as f64,
+            Time::Ticks(n) => n as f64,
+            Time::Seconds(n) => n as f64 * tempo as f64 / 2.5,
+        };
+        if ticks.is_finite() {
+            ticks.clamp(0.0, 1.0e6)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// The shape of a bend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BendShape {
+    /// The pitch goes from the note to so far from it, and stays.
+    #[default]
+    To,
+    /// The note starts so far from its pitch and comes to it.
+    Scoop,
+    /// The pitch goes so far from the note and comes back.
+    Dip,
+    /// The pitch goes so far from wherever it is now, and stays: a slide.
+    Slide,
+}
+
+/// A bend of a note's pitch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bend {
+    pub shape: BendShape,
+    /// Semitones, up or down; fractions allowed.
+    pub to: f32,
+    /// How long it takes.
+    pub over: Time,
+}
+
+impl Bend {
+    const SIXTEENTH: Time = Time::Note(NoteLength { division: 16, feel: Feel::Plain });
+    const EIGHTH: Time = Time::Note(NoteLength { division: 8, feel: Feel::Plain });
+    /// A quick rise into the note from two semitones below.
+    pub const SCOOP: Bend = Bend { shape: BendShape::Scoop, to: -2.0, over: Bend::SIXTEENTH };
+    /// A fall-off: down five semitones over an eighth.
+    pub const FALL: Bend = Bend { shape: BendShape::To, to: -5.0, over: Bend::EIGHTH };
+    /// Down a semitone and back, over an eighth.
+    pub const DIP: Bend = Bend { shape: BendShape::Dip, to: -1.0, over: Bend::EIGHTH };
+}
+
+/// A vibrato on a note: so many semitones each way, so many times a
+/// second, beginning after a delay. A depth of 0 stops one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vibrato {
+    pub depth: f32,
+    pub rate: f32,
+    pub delay: Time,
+}
+
+impl Vibrato {
+    /// The vibrato of a held lead note: a third of a semitone, six times a
+    /// second, once the note has sounded for an eighth.
+    pub const LEAD: Vibrato = Vibrato { depth: 0.3, rate: 6.0, delay: Bend::EIGHTH };
+    pub const OFF: Vibrato = Vibrato { depth: 0.0, rate: 6.0, delay: Time::Ticks(0.0) };
+}
+
+/// A trance gate: the sound chopped in a pattern of steps in time with the song.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gate {
+    /// A level for each step, 0 (closed) to 1 (open); 1 to 32 of them.
+    pub levels: Vec<f32>,
+    /// How long a step is.
+    pub rate: NoteLength,
+    /// How far a closed step closes, 0 to 1.
+    pub depth: f32,
+    /// How long it takes to open or close, in seconds, 0.001 to 0.5.
+    pub smooth: f32,
+    /// How far every second step is put back, 0 to 0.75 of a step.
+    pub swing: f32,
+    /// The echo and reverb are sent the gated sound (so that they ring through the gaps).
+    pub sends: bool,
+    /// The steps open on the left and the right by turns.
+    pub stereo: bool,
+}
+
+impl Gate {
+    /// A gate with these levels and everything else as it is unless said: sixteenths, all the way closed.
+    pub fn new(levels: &[f32]) -> Gate {
+        Gate { levels: levels.iter().take(32).copied().collect(), rate: NoteLength { division: 16, feel: Feel::Plain }, depth: 1.0, smooth: 0.008, swing: 0.0, sends: true, stereo: false }
+    }
+}
+
+/// What an event does to its channel's gate.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GateChange {
+    /// No gate, whatever the instrument has.
+    Off,
+    /// The instrument's own gate again, if it has one.
+    Instrument,
+    On(Gate),
+}
+
+/// The rest of what an event can say, beyond its cell and its chord: kept
+/// in a list of the song's, since few events say any of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Extra {
+    /// The note does not start afresh: the channel's sounding note slides to it over this time.
+    pub glide: Option<Time>,
+    pub bend: Option<Bend>,
+    pub vibrato: Option<Vibrato>,
+    pub gate: Option<GateChange>,
+}
+
+impl Extra {
+    pub fn is_empty(&self) -> bool {
+        *self == Extra::default()
+    }
+}
+
 /// A cell and where it is in its pattern, with the chord or arpeggio it
 /// starts or stops, if any.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -386,12 +522,15 @@ pub struct Event {
     pub channel: u8,
     pub cell: Cell,
     pub chord: Option<Chord>,
+    /// What else it says (a glide, a bend, a vibrato, a gate): a number
+    /// from 1 into the song's `extras`, or 0 for nothing.
+    pub extra: u16,
 }
 
 impl Event {
     /// True if the event says nothing at all.
     pub fn is_empty(&self) -> bool {
-        self.cell.is_empty() && self.chord.is_none()
+        self.cell.is_empty() && self.chord.is_none() && self.extra == 0
     }
 }
 
@@ -415,14 +554,26 @@ impl Pattern {
     /// Puts a cell in the pattern, replacing what was there; an empty cell
     /// removes it. A chord at that place stays.
     pub fn set(&mut self, row: u16, channel: u8, cell: Cell) {
-        let chord = self.chord(row, channel);
-        self.put(Event { row, channel, cell, chord });
+        let (chord, extra) = (self.chord(row, channel), self.extra(row, channel));
+        self.put(Event { row, channel, cell, chord, extra });
     }
 
     /// Sets or removes the chord at a place, leaving its cell as it is.
     pub fn set_chord(&mut self, row: u16, channel: u8, chord: Option<Chord>) {
-        let cell = self.cell(row, channel);
-        self.put(Event { row, channel, cell, chord });
+        let (cell, extra) = (self.cell(row, channel), self.extra(row, channel));
+        self.put(Event { row, channel, cell, chord, extra });
+    }
+
+    /// Sets what else the event at a place says: a number from 1 into the
+    /// song's `extras` (see `Song::add_extra`), or 0 for nothing.
+    pub fn set_extra(&mut self, row: u16, channel: u8, extra: u16) {
+        let (cell, chord) = (self.cell(row, channel), self.chord(row, channel));
+        self.put(Event { row, channel, cell, chord, extra });
+    }
+
+    /// The number of the extra at a row and channel, or 0.
+    pub fn extra(&self, row: u16, channel: u8) -> u16 {
+        self.find(row, channel).map_or(0, |i| self.events[i].extra)
     }
 
     fn put(&mut self, event: Event) {
@@ -633,6 +784,8 @@ pub struct Instrument {
     /// `synth` key of a song's JSON), as JSON text. The engine does not
     /// look inside it: it keeps it, and hands it back when asked.
     pub synth: Option<String>,
+    /// A trance gate its notes are played through, if it has one.
+    pub gate: Option<Gate>,
 }
 
 impl Instrument {
@@ -690,6 +843,10 @@ pub struct Song {
     /// Instrument 1 in a cell is `instruments[0]`.
     pub instruments: Vec<Instrument>,
     pub samples: Vec<Sample>,
+    /// The patterns of steps the song's arpeggios follow: `Arp::pattern` 1 is the first.
+    pub arp_patterns: Vec<crate::arp::Pattern>,
+    /// What events say beyond a cell and a chord: `Event::extra` 1 is the first.
+    pub extras: Vec<Extra>,
 }
 
 impl Default for Song {
@@ -706,6 +863,8 @@ impl Default for Song {
             patterns: Vec::new(),
             instruments: Vec::new(),
             samples: Vec::new(),
+            arp_patterns: Vec::new(),
+            extras: Vec::new(),
         }
     }
 }
@@ -724,6 +883,47 @@ impl Song {
     /// plays as 64 empty rows, as the trackers do.
     pub fn rows_at(&self, order: usize) -> u16 {
         self.pattern_at(order).map_or(64, |p| p.rows.max(1))
+    }
+
+    /// What an event says beyond its cell and chord, by its number.
+    pub fn extra(&self, number: u16) -> Option<&Extra> {
+        self.extras.get((number as usize).checked_sub(1)?)
+    }
+
+    /// The number of this extra in the song's list, adding it if it is not
+    /// there (0 for one that says nothing, or when the list is full).
+    pub fn add_extra(&mut self, extra: Extra) -> u16 {
+        if extra.is_empty() {
+            return 0;
+        }
+        let at = self.extras.iter().position(|x| *x == extra).unwrap_or_else(|| {
+            self.extras.push(extra);
+            self.extras.len() - 1
+        });
+        if at < u16::MAX as usize {
+            at as u16 + 1
+        } else {
+            0
+        }
+    }
+
+    /// The number of this pattern in the song's list, adding it if it is
+    /// not there (0 when the list is full).
+    pub fn add_arp_pattern(&mut self, pattern: crate::arp::Pattern) -> u8 {
+        let at = self.arp_patterns.iter().position(|p| *p == pattern).unwrap_or_else(|| {
+            self.arp_patterns.push(pattern);
+            self.arp_patterns.len() - 1
+        });
+        if at < 255 {
+            at as u8 + 1
+        } else {
+            0
+        }
+    }
+
+    /// The pattern an arpeggio follows, if it follows one.
+    pub fn arp_pattern(&self, arp: &Arp) -> Option<&crate::arp::Pattern> {
+        self.arp_patterns.get((arp.pattern as usize).checked_sub(1)?)
     }
 
     /// The instrument with this number (counted from 1).
@@ -751,8 +951,19 @@ impl Song {
         self.tempo = self.tempo.clamp(32, 255);
         self.speed = self.speed.clamp(1, 31);
         let channels = self.channels();
+        let (extras, patterns) = (self.extras.len(), self.arp_patterns.len());
         for p in &mut self.patterns {
             p.rows = p.rows.clamp(1, MAX_ROWS as u16);
+            for e in &mut p.events {
+                if e.extra as usize > extras {
+                    e.extra = 0;
+                }
+                if let Some(Chord { arp: Some(arp), .. }) = &mut e.chord {
+                    if arp.pattern as usize > patterns {
+                        arp.pattern = 0;
+                    }
+                }
+            }
             p.tidy(channels);
         }
         let samples = self.samples.len();

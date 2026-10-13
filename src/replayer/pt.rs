@@ -245,6 +245,7 @@ impl Replayer {
         for c in 0..self.channels.len() {
             let event = next.next_if(|e| e.channel as usize == c);
             let cell = event.map_or(Cell::default(), |e| e.cell);
+            voices.set_extra(frame, c, event.map_or(0, |e| e.extra));
             let chord_changed = chord_after_row(&mut self.channels[c].chord, event.and_then(|e| e.chord), cell, self.speed, self.tempo);
             self.channels[c].started = false;
             self.play_cell(song, c, cell, frame, voices);

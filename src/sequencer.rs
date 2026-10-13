@@ -243,6 +243,14 @@ impl<'a> Voices<'a> {
         self.engine.apply(&Event::clock(0.0, beat));
     }
 
+    /// Say what tempo the music has, in beats a minute, for as long as
+    /// this sequencer is playing it: arpeggios counted in beats and the
+    /// trance gates go by it, in place of the `tempo` parameter (which is
+    /// left as the host set it). 0 gives the beat back to the parameter.
+    pub fn set_tempo(&mut self, beats_a_minute: f32) {
+        self.engine.song_tempo = if beats_a_minute.is_finite() { beats_a_minute.clamp(0.0, 999.0) } else { 0.0 };
+    }
+
     /// Give the handle's voices a vibrato, as the `voice_vibrato` event
     /// does: `depth` semitones each way at `rate` Hz, after `delay` seconds.
     pub fn set_vibrato(&mut self, part: u16, handle: u32, depth: f32, rate: f32, delay: f32) {

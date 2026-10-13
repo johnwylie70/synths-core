@@ -188,10 +188,137 @@ fn write_instrument(o: &mut Out, i: &Instrument) {
     if i.fadeout != 0 {
         o.key("fadeout").n(i.fadeout as i64);
     }
+    if let Some(gate) = &i.gate {
+        o.key("gate");
+        write_gate(o, gate);
+    }
     o.s("}");
 }
 
-fn write_event(o: &mut Out, e: &Event) {
+/// A time: a note length as text, or `{"rows": 2}`, `{"ticks": 3}`, `{"seconds": 0.5}`.
+fn write_time(o: &mut Out, time: &Time) {
+    let (key, n) = match *time {
+        Time::Note(length) => {
+            o.quoted(&length.name());
+            return;
+        }
+        Time::Rows(n) => ("rows", n),
+        Time::Ticks(n) => ("ticks", n),
+        Time::Seconds(n) => ("seconds", n),
+    };
+    o.s("{\"").s(key).s("\": ");
+    text::push_number(&mut o.0, n as f64);
+    o.s("}");
+}
+
+fn write_bend(o: &mut Out, bend: &Bend) {
+    let slide = bend.shape == BendShape::Slide;
+    o.key(if slide { "slide" } else { "bend" });
+    let named = [("scoop", Bend::SCOOP), ("fall", Bend::FALL), ("dip", Bend::DIP)].into_iter().find(|(_, b)| b == bend);
+    if let Some((name, _)) = named {
+        o.s("\"").s(name).s("\"");
+    } else if slide && bend.over == Time::Rows(1.0) {
+        text::push_number(&mut o.0, bend.to as f64);
+    } else {
+        o.s("{");
+        match bend.shape {
+            BendShape::Scoop => o.s("\"shape\": \"scoop\", "),
+            BendShape::Dip => o.s("\"shape\": \"dip\", "),
+            _ => o,
+        };
+        o.s("\"to\": ");
+        text::push_number(&mut o.0, bend.to as f64);
+        o.key("over");
+        write_time(o, &bend.over);
+        o.s("}");
+    }
+}
+
+/// A gate: its pattern alone when everything else is as it is by default.
+fn write_gate(o: &mut Out, g: &Gate) {
+    let plain = Gate::new(&g.levels);
+    let pattern = |o: &mut Out| match crate::gate::to_text(&g.levels) {
+        Some(text) => {
+            o.quoted(&text);
+        }
+        None => {
+            o.s("[");
+            for (i, level) in g.levels.iter().enumerate() {
+                o.s(if i > 0 { ", " } else { "" });
+                text::push_number(&mut o.0, *level as f64);
+            }
+            o.s("]");
+        }
+    };
+    if *g == plain {
+        return pattern(o);
+    }
+    o.s("{\"pattern\": ");
+    pattern(o);
+    let number = |o: &mut Out, key: &str, n: f32| {
+        o.key(key);
+        text::push_number(&mut o.0, n as f64);
+    };
+    if g.rate != plain.rate {
+        o.key("rate").quoted(&g.rate.name());
+    }
+    if g.depth != plain.depth {
+        number(o, "depth", g.depth);
+    }
+    if g.smooth != plain.smooth {
+        number(o, "smooth", g.smooth);
+    }
+    if g.swing != 0.0 {
+        number(o, "swing", g.swing);
+    }
+    if !g.sends {
+        o.key("sends").s("false");
+    }
+    if g.stereo {
+        o.key("stereo").s("true");
+    }
+    o.s("}");
+}
+
+/// An arpeggio's pattern: as its text when text can say it, or step by step.
+fn write_arp_pattern(o: &mut Out, pattern: &crate::arp::Pattern) {
+    use crate::arp::{STEP_SLIDE, STEP_TIE};
+    if let Some(text) = pattern.to_text() {
+        o.quoted(&text);
+        return;
+    }
+    o.s("[");
+    for (i, step) in pattern.steps().iter().enumerate() {
+        o.s(if i > 0 { ", " } else { "" });
+        if step.is_rest() && step.octave == 0 && step.shape == 0 && step.flags == 0 {
+            o.s("\"-\"");
+        } else if step.note == 0 && step.flags == STEP_TIE && step.octave == 0 && step.shape == 0 {
+            o.s("\"_\"");
+        } else {
+            o.s("{\"note\": ").n(step.note as i64);
+            if step.octave != 0 {
+                o.key("octave").n(step.octave as i64);
+            }
+            if step.shape & 15 != 0 {
+                o.key("level").n((step.shape & 15) as i64);
+            }
+            if step.shape >> 4 != 0 {
+                o.key("gate");
+                text::push_number(&mut o.0, (step.shape >> 4).min(10) as f64 / 10.0);
+            }
+            if step.flags & STEP_SLIDE != 0 {
+                o.key("slide").s("true");
+            }
+            if step.flags & STEP_TIE != 0 {
+                o.key("tie").s("true");
+            }
+            o.s("}");
+        }
+    }
+    o.s("]");
+}
+
+fn write_event(o: &mut Out, e: &Event, song: &Song) {
     let c = e.cell;
     o.s("{\"row\": ").n(e.row as i64).key("ch").n(e.channel as i64);
     if c.note != NOTE_NONE {
@@ -218,7 +345,15 @@ fn write_event(o: &mut Out, e: &Event) {
             o.s("\"");
         }
     }
-    if c.effect != 0 || c.param != 0 {
+    if c.effect == fx::TONE_PORTA {
+        // A glide to the note, at the speed the channel last had or at this one.
+        o.key("glide");
+        if c.param == 0 {
+            o.s("true");
+        } else {
+            o.n(c.param as i64);
+        }
+    } else if c.effect != 0 || c.param != 0 {
         o.key("fx").s("\"");
         o.0.push(effect_letter(c.effect));
         text::push_hex(&mut o.0, c.param as u32, 2, true);
@@ -266,7 +401,49 @@ fn write_event(o: &mut Out, e: &Event) {
             if arp.accents != 0 {
                 o.key("accent").list(arp.accent_list().into_iter().map(|x| x as i64));
             }
+            if let Some(pattern) = song.arp_pattern(&arp) {
+                o.key("pattern");
+                write_arp_pattern(o, pattern);
+            }
             o.s("}");
+        }
+    }
+    if let Some(x) = song.extra(e.extra) {
+        if let Some(glide) = &x.glide {
+            o.key("glide");
+            write_time(o, glide);
+        }
+        if let Some(bend) = &x.bend {
+            write_bend(o, bend);
+        }
+        if let Some(v) = &x.vibrato {
+            o.key("vibrato");
+            if *v == Vibrato::LEAD {
+                o.s("true");
+            } else if v.depth == 0.0 {
+                o.s("false");
+            } else {
+                o.s("{\"depth\": ");
+                text::push_number(&mut o.0, v.depth as f64);
+                o.key("rate");
+                text::push_number(&mut o.0, v.rate as f64);
+                o.key("delay");
+                write_time(o, &v.delay);
+                o.s("}");
+            }
+        }
+        match &x.gate {
+            None => {}
+            Some(GateChange::Off) => {
+                o.key("gate").s("\"off\"");
+            }
+            Some(GateChange::Instrument) => {
+                o.key("gate").s("\"instrument\"");
+            }
+            Some(GateChange::On(gate)) => {
+                o.key("gate");
+                write_gate(o, gate);
+            }
         }
     }
     o.s("}");
@@ -330,7 +507,7 @@ fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
     let mut out = Out(String::new());
     let o = &mut out;
     // A song with no chord in it says nothing an older reader would get wrong.
-    let chords = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some()));
+    let chords = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some() || e.extra != 0)) || song.instruments.iter().any(|i| i.gate.is_some());
     o.s("{\n  \"format\": \"").s(FORMAT).s("\",\n  \"version\": ").n(if chords { VERSION } else { 1 });
     o.s(",\n  \"title\": ").quoted(&song.title);
     o.s(",\n  \"rules\": ").s(if song.rules == Rules::ProTracker { "\"protracker\"" } else { "\"ft2\"" });
@@ -351,7 +528,7 @@ fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
         o.s("    {\"rows\": ").n(p.rows as i64).s(", \"events\": [");
         for (j, e) in p.events.iter().enumerate() {
             o.s(if j == 0 { "\n      " } else { ",\n      " });
-            write_event(o, e);
+            write_event(o, e, song);
         }
         o.s(if p.events.is_empty() { "]}" } else { "\n    ]}" });
     }
@@ -543,7 +720,7 @@ fn read_order(name: &str, key: &str, known: &[(&str, ArpOrder)]) -> Result<ArpOr
 }
 
 /// An arpeggio as an event's `arp` has it: `{"chord": ..., "rate": "1/16", ...}`.
-fn read_arp(v: &Value, cell: &mut Cell) -> Result<Chord, LoadError> {
+fn read_arp(v: &Value, cell: &mut Cell, patterns: &mut Vec<crate::arp::Pattern>) -> Result<Chord, LoadError> {
     if !matches!(v, Value::Object(_)) {
         return invalid("\"arp\" must be {\"chord\": ..., \"rate\": \"1/16\", ...} or \"off\"");
     }
@@ -585,15 +762,216 @@ fn read_arp(v: &Value, cell: &mut Cell) -> Result<Chord, LoadError> {
             _ => return invalid("an arp's \"accent\" must be up to 8 levels from 0 (a rest) to 15 (full), the last not 0"),
         }
     }
+    if let Some(p) = v.get("pattern").filter(|p| **p != Value::Null) {
+        if v.get("order").is_some() || v.get("accent").is_some() {
+            return invalid("an arp's \"pattern\" takes the place of its \"order\" and \"accent\": give the pattern alone");
+        }
+        let pattern = read_arp_pattern(p)?;
+        let at = patterns.iter().position(|x| *x == pattern).unwrap_or_else(|| {
+            patterns.push(pattern);
+            patterns.len() - 1
+        });
+        if at >= 255 {
+            return invalid("a song can have at most 255 different arp patterns");
+        }
+        arp.pattern = at as u8 + 1;
+    }
     chord.arp = Some(arp);
     Ok(chord)
+}
+
+/// An arpeggio's pattern: its text (or the name of a built-in one), or a
+/// list of steps, each a chord note's number, "-" (a rest), "_" (a tie) or
+/// `{"note": 3, "octave": 1, "level": 15, "gate": 0.3, "slide": true}`.
+fn read_arp_pattern(v: &Value) -> Result<crate::arp::Pattern, LoadError> {
+    use crate::arp::{Pattern, PatternStep, MAX_PATTERN, PATTERN_HELP, STEP_SLIDE, STEP_TIE};
+    let bad = || invalid_text(text::join(&["an arp's \"pattern\": ", PATTERN_HELP, "; or a list of steps"]));
+    match v {
+        Value::String(s) => Pattern::parse(s).or_else(|_| bad()),
+        Value::Array(items) if !items.is_empty() && items.len() <= MAX_PATTERN => {
+            let mut steps = Vec::with_capacity(items.len());
+            for item in items {
+                let mut step = PatternStep::default();
+                match item {
+                    Value::String(s) if s == "-" || s == "." => {}
+                    Value::String(s) if s == "_" => step.flags = STEP_TIE,
+                    Value::Object(_) => {
+                        step.note = int(item, "note", -32, 32, 0)? as i8;
+                        step.octave = int(item, "octave", -3, 3, 0)? as i8;
+                        let gate = number(item, "gate", 0.1, 1.0)?.map_or(0, |g| (g * 10.0).round() as u8);
+                        step.shape = int(item, "level", 0, 15, 0)? as u8 | gate << 4;
+                        if item.get("slide") == Some(&Value::Bool(true)) {
+                            step.flags |= STEP_SLIDE;
+                        }
+                        if item.get("tie") == Some(&Value::Bool(true)) {
+                            step.flags |= STEP_TIE;
+                        }
+                    }
+                    n => match n.as_i64() {
+                        Some(n) if (-32..=32).contains(&n) => step.note = n as i8,
+                        _ => return bad(),
+                    },
+                }
+                steps.push(step);
+            }
+            Ok(Pattern::new(&steps))
+        }
+        _ => bad(),
+    }
+}
+
+/// A length of time: a note length ("1/16", "1/8t", "1/4."), or
+/// `{"rows": n}`, `{"ticks": n}` or `{"seconds": n}`.
+fn read_time(v: &Value, key: &str) -> Result<Time, LoadError> {
+    let bad = || invalid_text(text::join(&["\"", key, "\" takes a time: a note length like \"1/16\", \"1/8t\" or \"1/4.\", or {\"rows\": n}, {\"ticks\": n} or {\"seconds\": n}"]));
+    match v {
+        Value::String(s) => NoteLength::parse(s).map(Time::Note).ok_or(()).or_else(|_| bad()),
+        Value::Object(fields) if fields.len() == 1 => match (number(v, "rows", 0.0, 1024.0)?, number(v, "ticks", 0.0, 8192.0)?, number(v, "seconds", 0.0, 600.0)?) {
+            (Some(n), None, None) => Ok(Time::Rows(n)),
+            (None, Some(n), None) => Ok(Time::Ticks(n)),
+            (None, None, Some(n)) => Ok(Time::Seconds(n)),
+            _ => bad(),
+        },
+        _ => bad(),
+    }
+}
+
+/// How far a bend goes: semitones, or a note name measured from the event's note.
+fn read_bend_to(v: &Value, cell: &Cell) -> Result<f32, LoadError> {
+    match v {
+        Value::String(_) if (1..=NOTE_MAX).contains(&cell.note) => match read_note(v) {
+            Ok(n) if (1..=NOTE_MAX).contains(&n) => Ok(n as f32 - cell.note as f32),
+            _ => invalid("a bend's \"to\" must be semitones (a number from -96 to 96) or a note name"),
+        },
+        Value::String(_) => invalid("a bend to a note name needs the event to have a \"note\""),
+        n => match n.as_f64() {
+            Some(n) if (-96.0..=96.0).contains(&n) => Ok(n as f32),
+            _ => invalid("a bend's \"to\" must be semitones (a number from -96 to 96) or a note name"),
+        },
+    }
+}
+
+/// A gate: its pattern as text (or a built-in pattern's name), or
+/// `{"pattern": ..., "rate": "1/16", "depth": 1, "smooth": 0.008, "swing": 0, "sends": true, "stereo": false}`.
+fn read_gate(v: &Value) -> Result<Gate, LoadError> {
+    let bad = || invalid_text(text::join(&["a \"gate\": ", crate::gate::GATE_HELP, "; or a list of levels from 0 to 1"]));
+    let pattern = |p: &Value| -> Result<Gate, LoadError> {
+        match p {
+            Value::String(s) => crate::gate::parse(s).map(|(levels, n)| Gate::new(&levels[..n])).or_else(|_| bad()),
+            Value::Array(items) if !items.is_empty() && items.len() <= 32 => {
+                let mut levels = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_f64() {
+                        Some(x) if (0.0..=1.0).contains(&x) => levels.push(x as f32),
+                        _ => return bad(),
+                    }
+                }
+                Ok(Gate::new(&levels))
+            }
+            _ => bad(),
+        }
+    };
+    let Value::Object(_) = v else { return pattern(v) };
+    let Some(p) = v.get("pattern") else { return invalid("a \"gate\" needs a \"pattern\"") };
+    let mut gate = pattern(p)?;
+    if let Some(rate) = v.get("rate") {
+        gate.rate = match rate.as_str().and_then(NoteLength::parse) {
+            Some(length) => length,
+            None => return invalid("a gate's \"rate\" must be a note length: \"1/1\" to \"1/64\", with t for a triplet or a dot for dotted"),
+        };
+    }
+    gate.depth = number(v, "depth", 0.0, 1.0)?.unwrap_or(1.0);
+    gate.smooth = match v.get("smooth") {
+        Some(Value::String(s)) if s == "hard" => 0.001,
+        _ => number(v, "smooth", 0.001, 0.5)?.unwrap_or(0.008),
+    };
+    gate.swing = number(v, "swing", 0.0, 0.75)?.unwrap_or(0.0);
+    gate.sends = v.get("sends") != Some(&Value::Bool(false));
+    gate.stereo = v.get("stereo") == Some(&Value::Bool(true));
+    Ok(gate)
+}
+
+/// What else an event says: `glide`, `bend`, `slide`, `vibrato`, `gate`.
+/// A plain glide (true, or a tracker's speed) is the cell's own effect.
+fn read_extra(e: &Value, cell: &mut Cell) -> Result<Extra, LoadError> {
+    let mut x = Extra::default();
+    match e.get("glide") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(v @ (Value::Bool(true) | Value::Number(_))) => {
+            let speed = match v.as_i64() {
+                None => 0,
+                Some(n) if (1..=255).contains(&n) => n as u8,
+                Some(_) => return invalid("\"glide\" as a number is a tracker's glide speed, 1 to 255; or give true, or a time like \"1/16\""),
+            };
+            if cell.effect != 0 || cell.param != 0 {
+                return invalid("an event has \"glide\": true (or a speed) or an \"fx\", not both: that glide is the effect 3xx");
+            }
+            (cell.effect, cell.param) = (fx::TONE_PORTA, speed);
+        }
+        Some(v) => x.glide = Some(read_time(v, "glide")?),
+    }
+    let shaped = |shape: &str| match shape {
+        "scoop" => Some(Bend::SCOOP),
+        "fall" => Some(Bend::FALL),
+        "dip" => Some(Bend::DIP),
+        "to" => Some(Bend { shape: BendShape::To, to: 0.0, over: Bend::FALL.over }),
+        _ => None,
+    };
+    let no_shape = || invalid("a \"bend\" is \"scoop\", \"fall\" or \"dip\", or {\"to\": semitones or a note, \"over\": a time}, with \"shape\" if it is a scoop or a dip");
+    match e.get("bend") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) => x.bend = Some(shaped(s).filter(|_| s != "to").map_or_else(no_shape, Ok)?),
+        Some(v @ Value::Object(_)) => {
+            let mut bend = match v.get("shape") {
+                None => Bend { shape: BendShape::To, to: f32::NAN, over: Bend::FALL.over },
+                Some(shape) => shape.as_str().and_then(shaped).map_or_else(no_shape, Ok)?,
+            };
+            if let Some(to) = v.get("to") {
+                bend.to = read_bend_to(to, cell)?;
+            }
+            if bend.to.is_nan() {
+                return invalid("a \"bend\" needs a \"to\": how far, in semitones, or the note to bend to");
+            }
+            if let Some(over) = v.get("over") {
+                bend.over = read_time(over, "over")?;
+            }
+            x.bend = Some(bend);
+        }
+        Some(_) => return no_shape().map(|_| x),
+    }
+    match e.get("slide") {
+        None | Some(Value::Null) => {}
+        Some(_) if x.bend.is_some() => return invalid("an event has a \"bend\" or a \"slide\", not both"),
+        Some(v @ Value::Object(_)) => {
+            let Some(to) = v.get("to") else { return invalid("a \"slide\" needs a \"to\": how far, in semitones") };
+            let over = v.get("over").map_or(Ok(Time::Rows(1.0)), |t| read_time(t, "over"))?;
+            x.bend = Some(Bend { shape: BendShape::Slide, to: read_bend_to(to, cell)?, over });
+        }
+        Some(v) => x.bend = Some(Bend { shape: BendShape::Slide, to: read_bend_to(v, cell)?, over: Time::Rows(1.0) }),
+    }
+    match e.get("vibrato") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(on)) => x.vibrato = Some(if *on { Vibrato::LEAD } else { Vibrato::OFF }),
+        Some(v @ Value::Object(_)) => {
+            let delay = v.get("delay").map_or(Ok(Vibrato::LEAD.delay), |t| read_time(t, "delay"))?;
+            x.vibrato = Some(Vibrato { depth: number(v, "depth", 0.0, 12.0)?.unwrap_or(Vibrato::LEAD.depth), rate: number(v, "rate", 0.1, 40.0)?.unwrap_or(Vibrato::LEAD.rate), delay });
+        }
+        Some(_) => return invalid("an event's \"vibrato\" is true, false, or {\"depth\": semitones, \"rate\": times a second, \"delay\": a time}"),
+    }
+    match e.get("gate") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) if s == "off" => x.gate = Some(GateChange::Off),
+        Some(Value::String(s)) if s == "instrument" => x.gate = Some(GateChange::Instrument),
+        Some(v) => x.gate = Some(GateChange::On(read_gate(v)?)),
+    }
+    Ok(x)
 }
 
 /// What an event says of chords: `chord`, its notes together; `arp`, its
 /// notes one at a time; or, from a song written before the two were told
 /// apart (version 1, or `chordSpeed`, `chordHz` or `chordOrder` beside the
 /// chord), a `chord` that is the fast one-voice arpeggio.
-fn read_chord(e: &Value, cell: &mut Cell, version: i64) -> Result<Option<Chord>, LoadError> {
+fn read_chord(e: &Value, cell: &mut Cell, version: i64, patterns: &mut Vec<crate::arp::Pattern>) -> Result<Option<Chord>, LoadError> {
     if e.get("arp").is_none() && e.get("chord").is_none() {
         return Ok(None);
     }
@@ -605,7 +983,7 @@ fn read_chord(e: &Value, cell: &mut Cell, version: i64) -> Result<Option<Chord>,
         (Some(_), Some(_)) => invalid("an event has a \"chord\" (its notes together) or an \"arp\" (one at a time), not both: an arp's notes are its own \"chord\""),
         (Some(_), None) if old => invalid("\"chordSpeed\", \"chordHz\" and \"chordOrder\" go with \"chord\"; an \"arp\" has \"perTick\", \"hz\" and \"order\" of its own"),
         (Some(v), None) | (None, Some(v)) if off(v) => Ok(Some(Chord::OFF)),
-        (Some(v), None) => read_arp(v, cell).map(Some),
+        (Some(v), None) => read_arp(v, cell, patterns).map(Some),
         (None, Some(v)) => {
             let mut chord = read_notes(v, cell)?;
             if old || version < 2 {
@@ -701,6 +1079,7 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
         }
     }
 
+    let (mut arp_patterns, mut extras) = (Vec::new(), Vec::new());
     let patterns = list(v, "patterns")?;
     if patterns.len() > MAX_PATTERNS {
         return invalid("a song can have at most 256 patterns");
@@ -721,10 +1100,26 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
             if let Some(effect) = e.get("fx") {
                 (cell.effect, cell.param) = read_effect(effect)?;
             }
-            let chord = read_chord(e, &mut cell, version)?;
-            pattern.events.push(Event { row, channel, cell, chord });
+            let chord = read_chord(e, &mut cell, version, &mut arp_patterns)?;
+            let x = read_extra(e, &mut cell)?;
+            let extra = if x.is_empty() {
+                0
+            } else {
+                let at = extras.iter().position(|y| *y == x).unwrap_or_else(|| {
+                    extras.push(x);
+                    extras.len() - 1
+                });
+                if at >= u16::MAX as usize {
+                    return invalid("a song can have at most 65535 different glides, bends, vibratos and gates");
+                }
+                at as u16 + 1
+            };
+            pattern.events.push(Event { row, channel, cell, chord, extra });
         }
     }
+
+    song.arp_patterns = arp_patterns;
+    song.extras = extras;
 
     let orders = list(v, "order")?;
     if orders.len() > MAX_ORDERS {
@@ -840,6 +1235,9 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
             };
         }
         ins.fadeout = int(i, "fadeout", 0, 65535, 0)? as u16;
+        if let Some(gate) = i.get("gate").filter(|g| **g != Value::Null) {
+            ins.gate = Some(read_gate(gate)?);
+        }
     }
 
     Ok(())

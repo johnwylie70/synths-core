@@ -180,7 +180,7 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
                     param: b[3],
                 };
                 if !cell.is_empty() {
-                    pattern.events.push(Event { row: row as u16, channel: ch as u8, cell, chord: None });
+                    pattern.events.push(Event { row: row as u16, channel: ch as u8, cell, chord: None, extra: 0 });
                 }
             }
         }

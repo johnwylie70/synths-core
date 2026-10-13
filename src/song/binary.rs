@@ -25,6 +25,41 @@ pub const VERSION: u16 = 2;
 const CHORD_NONE: u8 = 0;
 const CHORD_OLD: u8 = 1;
 const CHORD_NEW: u8 = 2;
+/// Added to it: the number of the event's extra follows (a `u16`).
+const HAS_EXTRA: u8 = 4;
+/// The order byte of an arpeggio that follows a pattern: its number is where the accents would be.
+const ORDER_PATTERN: u8 = 7;
+
+/// The lists after the samples, each begun by its four letters.
+const ARP_PATTERNS: &[u8; 4] = b"ARPP";
+const EXTRAS: &[u8; 4] = b"XTRA";
+const GATES: &[u8; 4] = b"IGAT";
+
+fn put_f32(out: &mut Vec<u8>, x: f32) {
+    out.extend_from_slice(&x.to_le_bytes());
+}
+
+fn put_time(out: &mut Vec<u8>, time: &Time) {
+    let (kind, length, value) = match *time {
+        Time::Note(length) => (0u8, length, 0.0),
+        Time::Rows(n) => (1, NoteLength { division: 0, feel: Feel::Plain }, n),
+        Time::Ticks(n) => (2, NoteLength { division: 0, feel: Feel::Plain }, n),
+        Time::Seconds(n) => (3, NoteLength { division: 0, feel: Feel::Plain }, n),
+    };
+    out.extend_from_slice(&[kind, length.division, length.feel as u8, 0]);
+    put_f32(out, value);
+}
+
+fn put_gate(out: &mut Vec<u8>, g: &Gate) {
+    let n = g.levels.len().min(32);
+    out.extend_from_slice(&[n as u8, g.sends as u8 | (g.stereo as u8) << 1, g.rate.division, g.rate.feel as u8]);
+    put_f32(out, g.depth);
+    put_f32(out, g.smooth);
+    put_f32(out, g.swing);
+    for &level in &g.levels[..n] {
+        put_f32(out, level);
+    }
+}
 
 /// Can version 1's record say this chord? It can say "off", and an
 /// arpeggio of one voice timed in ticks or seconds with nothing newer.
@@ -77,7 +112,7 @@ pub fn save(song: &Song) -> Vec<u8> {
     let mut out = Vec::new();
     let o = &mut out;
     o.extend_from_slice(MAGIC);
-    let new = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some_and(|c| !fits_old(&c))));
+    let new = song.patterns.iter().any(|p| p.events.iter().any(|e| e.extra != 0 || e.chord.is_some_and(|c| !fits_old(&c)))) || song.instruments.iter().any(|i| i.gate.is_some());
     put_u16(o, if new { 2 } else { 1 });
     let flags = (song.rules == Rules::ProTracker) as u16 | ((song.frequency_table == FrequencyTable::Amiga) as u16) << 1;
     put_u16(o, flags);
@@ -104,7 +139,11 @@ pub fn save(song: &Song) -> Vec<u8> {
                 Some(chord) if fits_old(chord) => CHORD_OLD,
                 Some(_) => CHORD_NEW,
             };
-            o.extend_from_slice(&[e.channel, kind, c.note, c.instrument, c.volume, c.effect, c.param]);
+            let extra = if e.extra != 0 { HAS_EXTRA } else { 0 };
+            o.extend_from_slice(&[e.channel, kind | extra, c.note, c.instrument, c.volume, c.effect, c.param]);
+            if e.extra != 0 {
+                put_u16(o, e.extra);
+            }
             let Some(chord) = e.chord else { continue };
             let arp = chord.arp.unwrap_or(Arp::FAST);
             let (unit, rate, length) = match arp.rate {
@@ -119,12 +158,13 @@ pub fn save(song: &Song) -> Vec<u8> {
                 o.extend_from_slice(&rate.to_le_bytes());
             } else {
                 let length = length.unwrap_or(NoteLength { division: 0, feel: Feel::Plain });
-                o.extend_from_slice(&[count, chord.arp.is_some() as u8, arp.order as u8, arp.style as u8]);
+                let order = if arp.pattern != 0 { ORDER_PATTERN } else { arp.order as u8 };
+                o.extend_from_slice(&[count, chord.arp.is_some() as u8, order, arp.style as u8]);
                 o.extend_from_slice(&[unit, length.division, length.feel as u8, arp.octaves]);
                 o.extend_from_slice(&rate.to_le_bytes());
                 o.extend_from_slice(&arp.gate.to_le_bytes());
                 o.extend_from_slice(&arp.swing.to_le_bytes());
-                put_u32(o, arp.accents);
+                put_u32(o, if arp.pattern != 0 { arp.pattern as u32 } else { arp.accents });
             }
             o.extend(chord.offsets.iter().map(|&x| x as u8));
         }
@@ -177,6 +217,53 @@ pub fn save(song: &Song) -> Vec<u8> {
             o.extend_from_slice(text.as_bytes());
         }
     }
+    // Then what version 2 added, each list only if there is something in it.
+    if !song.arp_patterns.is_empty() {
+        o.extend_from_slice(ARP_PATTERNS);
+        put_u16(o, song.arp_patterns.len() as u16);
+        for p in &song.arp_patterns {
+            o.push(p.len);
+            o.extend(p.steps().iter().flat_map(|s| [s.note as u8, s.flags, s.octave as u8, s.shape]));
+        }
+    }
+    if !song.extras.is_empty() {
+        o.extend_from_slice(EXTRAS);
+        put_u16(o, song.extras.len() as u16);
+        for x in &song.extras {
+            o.push(x.glide.is_some() as u8 | (x.bend.is_some() as u8) << 1 | (x.vibrato.is_some() as u8) << 2 | (x.gate.is_some() as u8) << 3);
+            if let Some(glide) = &x.glide {
+                put_time(o, glide);
+            }
+            if let Some(bend) = &x.bend {
+                o.extend_from_slice(&[bend.shape as u8, 0, 0, 0]);
+                put_f32(o, bend.to);
+                put_time(o, &bend.over);
+            }
+            if let Some(vibrato) = &x.vibrato {
+                put_f32(o, vibrato.depth);
+                put_f32(o, vibrato.rate);
+                put_time(o, &vibrato.delay);
+            }
+            match &x.gate {
+                None => {}
+                Some(GateChange::Off) => o.push(0),
+                Some(GateChange::Instrument) => o.push(1),
+                Some(GateChange::On(gate)) => {
+                    o.push(2);
+                    put_gate(o, gate);
+                }
+            }
+        }
+    }
+    if song.instruments.iter().any(|i| i.gate.is_some()) {
+        o.extend_from_slice(GATES);
+        for i in &song.instruments {
+            o.push(i.gate.is_some() as u8);
+            if let Some(gate) = &i.gate {
+                put_gate(o, gate);
+            }
+        }
+    }
     out
 }
 
@@ -207,6 +294,28 @@ fn get_envelope(r: &mut Reader) -> Envelope {
 
 fn get_f32(r: &mut Reader) -> f32 {
     f32::from_le_bytes([r.u8(), r.u8(), r.u8(), r.u8()])
+}
+
+fn get_length(division: u8, feel: u8) -> NoteLength {
+    NoteLength { division: if division.is_power_of_two() && division <= 64 { division } else { 16 }, feel: [Feel::Plain, Feel::Triplet, Feel::Dotted][feel.min(2) as usize] }
+}
+
+fn get_time(r: &mut Reader) -> Time {
+    let [kind, division, feel, _] = [r.u8(), r.u8(), r.u8(), r.u8()];
+    let value = within(get_f32(r), 0.0, 1.0e4, 0.0);
+    match kind {
+        1 => Time::Rows(value),
+        2 => Time::Ticks(value),
+        3 => Time::Seconds(value),
+        _ => Time::Note(get_length(division, feel)),
+    }
+}
+
+fn get_gate(r: &mut Reader) -> Gate {
+    let [n, flags, division, feel] = [r.u8(), r.u8(), r.u8(), r.u8()];
+    let (depth, smooth, swing) = (within(get_f32(r), 0.0, 1.0, 1.0), within(get_f32(r), 0.001, 0.5, 0.008), within(get_f32(r), 0.0, 0.75, 0.0));
+    let levels = (0..n.min(32)).map(|_| within(get_f32(r), 0.0, 1.0, 0.0)).collect();
+    Gate { levels, rate: get_length(division, feel), depth, smooth, swing, sends: flags & 1 != 0, stereo: flags & 2 != 0 }
 }
 
 /// A number from the file, kept only if it makes sense.
@@ -250,6 +359,9 @@ fn get_chord(r: &mut Reader, full: bool) -> Chord {
         arp.gate = within(get_f32(r), 0.05, 1.0, Arp::FAST.gate);
         arp.swing = within(get_f32(r), 0.0, 0.75, 0.0);
         arp.accents = r.u32_le();
+        if how == ORDER_PATTERN {
+            (arp.order, arp.pattern, arp.accents) = (ArpOrder::Up, arp.accents.min(255) as u8, 0);
+        }
         chord.count = count.min(MAX_CHORD as u8);
         chord.arp = (is_arp != 0 && count != 0).then_some(arp);
     } else {
@@ -312,8 +424,10 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
             let row = r.u16_le();
             let [channel, has_chord, note, instrument, volume, effect, param] = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8(), r.u8(), r.u8()];
             let cell = Cell { note: if note > NOTE_OFF { 0 } else { note }, instrument, volume, effect: effect.min(fx::MAX), param };
+            let extra = if has_chord & HAS_EXTRA != 0 { r.u16_le() } else { 0 };
+            let has_chord = has_chord & 3;
             let chord = (has_chord != CHORD_NONE).then(|| get_chord(&mut r, has_chord == CHORD_NEW));
-            pattern.events.push(Event { row, channel, cell, chord });
+            pattern.events.push(Event { row, channel, cell, chord, extra });
         }
         song.patterns.push(pattern);
     }
@@ -362,11 +476,52 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
         });
     }
 
-    if r.left() >= 4 && r.take(4) == SYNTHS {
-        for ins in song.instruments.iter_mut() {
-            let len = r.u32_le() as usize;
-            let text = core::str::from_utf8(r.take(len)).unwrap_or("");
-            ins.synth = (!text.is_empty()).then(|| text.to_string());
+    while r.left() >= 4 {
+        let tag = r.take(4);
+        if tag == SYNTHS {
+            for ins in song.instruments.iter_mut() {
+                let len = r.u32_le() as usize;
+                let text = core::str::from_utf8(r.take(len)).unwrap_or("");
+                ins.synth = (!text.is_empty()).then(|| text.to_string());
+            }
+        } else if tag == ARP_PATTERNS {
+            // (Each list is bounded by what is left of the file.)
+            for _ in 0..(r.u16_le() as usize).min(255).min(r.left()) {
+                let len = (r.u8() as usize).min(crate::arp::MAX_PATTERN);
+                song.arp_patterns.push(crate::arp::Pattern::from_bytes(r.take(len * 4)));
+            }
+        } else if tag == EXTRAS {
+            for _ in 0..(r.u16_le() as usize).min(r.left()) {
+                let mask = r.u8();
+                let mut x = Extra::default();
+                if mask & 1 != 0 {
+                    x.glide = Some(get_time(&mut r));
+                }
+                if mask & 2 != 0 {
+                    let shape = [BendShape::To, BendShape::Scoop, BendShape::Dip, BendShape::Slide][(r.u8() & 3) as usize];
+                    r.skip(3);
+                    x.bend = Some(Bend { shape, to: within(get_f32(&mut r), -96.0, 96.0, 0.0), over: get_time(&mut r) });
+                }
+                if mask & 4 != 0 {
+                    x.vibrato = Some(Vibrato { depth: within(get_f32(&mut r), 0.0, 12.0, 0.0), rate: within(get_f32(&mut r), 0.0, 40.0, 6.0), delay: get_time(&mut r) });
+                }
+                if mask & 8 != 0 {
+                    x.gate = Some(match r.u8() {
+                        0 => GateChange::Off,
+                        1 => GateChange::Instrument,
+                        _ => GateChange::On(get_gate(&mut r)),
+                    });
+                }
+                song.extras.push(x);
+            }
+        } else if tag == GATES {
+            for ins in song.instruments.iter_mut() {
+                if r.u8() != 0 {
+                    ins.gate = Some(get_gate(&mut r));
+                }
+            }
+        } else {
+            break;
         }
     }
 

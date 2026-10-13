@@ -22,7 +22,7 @@ use crate::params::*;
 use crate::replayer::{note_of_rate, Arpeggio, Player, Source, Start, Voices as Channels};
 use crate::sample::{LOOP_FORWARD, LOOP_OFF, LOOP_PINGPONG};
 use crate::sequencer::{Sequencer, Trigger, Voices};
-use crate::song::{ArpOrder, ArpRate, ArpStyle, LoopKind, Rules, Song, C4_RATE};
+use crate::song::{ArpOrder, ArpRate, ArpStyle, BendShape, GateChange, LoopKind, Rules, Song, Time, C4_RATE};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::Arc;
 
@@ -127,6 +127,33 @@ struct Channel {
     arpeggiator: bool,
     /// How that arpeggiator is stepped, if it steps at all.
     stepper: Option<Stepper>,
+    /// What else this row's event says: the number of one of the song's extras, until it is done.
+    extra: u16,
+    /// How far a bend has moved the note from the pitch the song gives it, in semitones.
+    bend: f32,
+    /// A bend that is under way.
+    bending: Option<Bending>,
+    /// The instrument the note is of, from 0 (`u16::MAX` for none).
+    instrument: u16,
+    /// The gate an event put on the channel: the extra that has it, or 0
+    /// to go by the instrument; and whether an event switched the gate off.
+    gate_from: u16,
+    gate_off: bool,
+    /// The gate has to be set again, and the part it was last set on.
+    gate_due: bool,
+    gated: u16,
+}
+
+/// A bend in the song's time: where the pitch goes next and how long each leg takes.
+#[derive(Clone, Copy)]
+struct Bending {
+    /// Each leg: how far from the note it ends, the time it takes, and how much of that time.
+    legs: [(f32, Time, f64); 2],
+    count: u8,
+    at: u8,
+    /// When the next leg begins, in ticks from the start of the tick being played.
+    next: f64,
+    counting: bool,
 }
 
 /// The steps of a channel's arpeggio, which the player takes in the song's time.
@@ -145,7 +172,27 @@ const ON_THE_TICK: f64 = 1.0e-4;
 
 impl Channel {
     fn new(part: u16) -> Channel {
-        Channel { part, patch: false, looped: false, heard: true, rate: 0.0, volume: 0.0, pan: 0.0, slot: None, fresh: false, arpeggiator: false, stepper: None }
+        Channel {
+            part,
+            patch: false,
+            looped: false,
+            heard: true,
+            rate: 0.0,
+            volume: 0.0,
+            pan: 0.0,
+            slot: None,
+            fresh: false,
+            arpeggiator: false,
+            stepper: None,
+            extra: 0,
+            bend: 0.0,
+            bending: None,
+            instrument: u16::MAX,
+            gate_from: 0,
+            gate_off: false,
+            gate_due: false,
+            gated: NO_PART,
+        }
     }
 }
 
@@ -161,11 +208,22 @@ struct Adapter<'a, 'b> {
     /// synth patches: their parts are the host's, so it is their own
     /// volume that carries it.
     volume: f32,
+    /// For each sample, the first instrument that plays it.
+    owners: &'a [u16],
+    /// Ticks in a row, beats a minute and frames in a tick, as the last tick left them.
+    speed: u16,
+    tempo: u16,
+    tick_length: f64,
 }
 
 impl Adapter<'_, '_> {
     fn own_part(&self, channel: usize) -> u16 {
         self.first_part + channel as u16
+    }
+
+    /// How many seconds a time in the song lasts just now.
+    fn seconds(&self, time: &Time) -> f32 {
+        (time.ticks(self.speed, self.tempo) * self.tick_length / self.voices.sample_rate() as f64) as f32
     }
 
     /// Start a sample on a channel's own part; false if nothing is there to play.
@@ -202,11 +260,50 @@ impl Channels for Adapter<'_, '_> {
         let Some(&was) = self.channels.get(channel) else { return };
         let handle = channel as u32 + 1;
         let own = self.own_part(channel);
+        let instrument = match start.source {
+            Source::Patch(i) => i as u16,
+            Source::Sample(s) => self.owners.get(s).copied().unwrap_or(u16::MAX),
+        };
+        // A glide: the note that is sounding is not started again; it
+        // slides to this one. (With nothing sounding, the note just starts.)
+        if let Some(time) = self.song.extra(was.extra).and_then(|x| x.glide) {
+            let seconds = self.seconds(&time);
+            let patch_part = match start.source {
+                Source::Patch(i) => self.patch_parts.get(i).copied().unwrap_or(NO_PART),
+                Source::Sample(_) => NO_PART,
+            };
+            let same = if was.patch { patch_part == was.part } else { patch_part == NO_PART && matches!(start.source, Source::Sample(_)) };
+            if same && self.voices.sounding(was.part, handle) {
+                if was.patch {
+                    self.voices.set_pitch(was.part, handle, note_of_rate(start.rate) as f32, seconds);
+                    self.voices.set_volume(was.part, handle, start.volume * if was.heard { self.volume } else { 0.0 });
+                } else {
+                    self.voices.set_rate(was.part, handle, start.rate as f32, seconds);
+                    self.voices.set_volume(was.part, handle, start.volume);
+                }
+                self.voices.set_pan(was.part, handle, start.pan);
+                self.channels[channel] = Channel { rate: start.rate, volume: start.volume, pan: start.pan, bend: 0.0, bending: None, instrument, gate_due: true, ..was };
+                return;
+            }
+        }
         // A channel plays one thing: whatever it had on another part goes.
         if was.part != own {
             self.voices.kill(was.part, handle);
         }
-        let mut now = Channel { heard: was.heard, rate: start.rate, volume: start.volume, pan: start.pan, fresh: true, ..Channel::new(own) };
+        let mut now = Channel {
+            heard: was.heard,
+            rate: start.rate,
+            volume: start.volume,
+            pan: start.pan,
+            fresh: true,
+            extra: was.extra,
+            instrument,
+            gate_from: was.gate_from,
+            gate_off: was.gate_off,
+            gate_due: true,
+            gated: was.gated,
+            ..Channel::new(own)
+        };
         match start.source {
             Source::Sample(sample) => {
                 if self.start_sample(channel, sample, start.offset, start.rate, start.volume, start.pan) {
@@ -235,10 +332,11 @@ impl Channels for Adapter<'_, '_> {
     fn set_rate(&mut self, _frame: u32, channel: usize, rate: f64) {
         let Some(ch) = self.channels.get_mut(channel) else { return };
         ch.rate = rate;
+        // (A bend that has moved the note stays on top of what the song does to its pitch.)
         if ch.patch {
-            self.voices.set_pitch(ch.part, channel as u32 + 1, note_of_rate(rate) as f32, 0.0);
+            self.voices.set_pitch(ch.part, channel as u32 + 1, note_of_rate(rate) as f32 + ch.bend, 0.0);
         } else {
-            self.voices.set_rate(ch.part, channel as u32 + 1, rate as f32, 0.0);
+            self.voices.set_rate(ch.part, channel as u32 + 1, (rate * (ch.bend as f64 / 12.0).exp2()) as f32, 0.0);
         }
     }
 
@@ -303,6 +401,7 @@ impl Channels for Adapter<'_, '_> {
                 };
                 self.voices.arp_notes(was.part, handle, -1.0, order(a.order), a.offsets());
                 self.voices.arp_style(was.part, handle, if style == ArpStyle::Strike { gate } else { 0.0 }, octaves, swing, accents);
+                self.voices.arp_pattern(was.part, handle, a.arp.and_then(|arp| self.song.arp_pattern(&arp)));
                 if let Some((slot, position)) = was.slot.filter(|_| !was.patch) {
                     self.voices.arp_sample(was.part, handle, Some(slot), position);
                 }
@@ -325,6 +424,18 @@ impl Channels for Adapter<'_, '_> {
             }
         }
         self.channels[channel] = now;
+    }
+
+    fn set_extra(&mut self, _frame: u32, channel: usize, extra: u16) {
+        let Some(ch) = self.channels.get_mut(channel) else { return };
+        ch.extra = extra;
+        match self.song.extra(extra).and_then(|x| x.gate.as_ref()) {
+            None => return,
+            Some(GateChange::Off) => (ch.gate_from, ch.gate_off) = (0, true),
+            Some(GateChange::Instrument) => (ch.gate_from, ch.gate_off) = (0, false),
+            Some(GateChange::On(_)) => (ch.gate_from, ch.gate_off) = (extra, false),
+        }
+        ch.gate_due = true;
     }
 
     fn queue(&mut self, _frame: u32, channel: usize, sample: Option<usize>) {
@@ -396,6 +507,11 @@ pub struct SongPlayer {
     tick_length: f64,
     /// The tempo of the tick being played, to notice when it changes.
     tempo: u16,
+    /// Ticks in a row as the last tick left them, and what the engine was last told the tempo is.
+    speed: u16,
+    told: f32,
+    /// For each sample, the first instrument that plays it.
+    owners: Vec<u16>,
 }
 
 impl SongPlayer {
@@ -438,7 +554,12 @@ impl SongPlayer {
             into: 0,
             tick_length: 0.0,
             tempo: 0,
+            speed: 0,
+            told: 0.0,
+            owners: Vec::new(),
         };
+        let mut s = s;
+        s.find_owners();
         s.publish();
         s
     }
@@ -471,6 +592,7 @@ impl SongPlayer {
     }
 
     fn seek(&mut self, order: usize, row: usize, voices: &mut Voices<'_>) {
+        self.ungate(voices);
         let mut adapter = Adapter {
             voices,
             song: &self.song,
@@ -479,6 +601,10 @@ impl SongPlayer {
             channels: &mut self.channels,
             patch_parts: &self.patch_parts,
             volume: self.volume,
+            owners: &self.owners,
+            speed: self.speed,
+            tempo: self.tempo,
+            tick_length: self.tick_length,
         };
         self.player.seek(&self.song, order, row, &mut adapter);
         self.player.set_repeat(self.repeat);
@@ -494,6 +620,116 @@ impl SongPlayer {
         self.into = 0;
         for ch in &mut self.channels {
             (ch.arpeggiator, ch.stepper, ch.fresh) = (false, None, false);
+            (ch.extra, ch.bend, ch.bending) = (0, 0.0, None);
+            (ch.gate_from, ch.gate_off, ch.gate_due) = (0, false, false);
+        }
+    }
+
+    /// Work out which instrument each sample belongs to.
+    fn find_owners(&mut self) {
+        self.owners = (0..self.song.samples.len()).map(|s| self.song.instruments.iter().position(|i| i.keymap.contains(&(s as u16))).map_or(u16::MAX, |i| i as u16)).collect();
+    }
+
+    /// Take away every gate the song has put on a part.
+    fn ungate(&mut self, voices: &mut Voices<'_>) {
+        for ch in &mut self.channels {
+            if (ch.gated as usize) < NUM_PARTS {
+                voices.set_param(ch.gated, GATE_DEPTH, 0.0, 0.0);
+            }
+            ch.gated = NO_PART;
+        }
+    }
+
+    /// Move a channel's note so far from the pitch the song gives it, over some seconds.
+    fn bend_to(voices: &mut Voices<'_>, c: usize, ch: &mut Channel, semitones: f32, seconds: f32) {
+        ch.bend = semitones;
+        if ch.patch {
+            voices.set_pitch(ch.part, c as u32 + 1, note_of_rate(ch.rate) as f32 + semitones, seconds);
+        } else if ch.rate > 0.0 {
+            voices.set_rate(ch.part, c as u32 + 1, (ch.rate * (semitones as f64 / 12.0).exp2()) as f32, seconds);
+        }
+    }
+
+    /// What is left of a row once its tick has been played: the vibrato,
+    /// the bend and the gate its events asked for, and the beat.
+    fn after_tick(&mut self, voices: &mut Voices<'_>) {
+        let p = self.player.position();
+        let per_tick = self.tick_length / voices.sample_rate() as f64;
+        let seconds = |time: &Time| (time.ticks(p.speed, p.tempo) * per_tick) as f32;
+        for c in 0..self.channels.len() {
+            let mut ch = self.channels[c];
+            if let Some(x) = self.song.extra(core::mem::take(&mut ch.extra)) {
+                if let Some(v) = x.vibrato {
+                    voices.set_vibrato(ch.part, c as u32 + 1, v.depth, v.rate, seconds(&v.delay));
+                }
+                if let Some(bend) = x.bend {
+                    let legs = match bend.shape {
+                        BendShape::To => [(bend.to, bend.over, 1.0), (0.0, bend.over, 0.0)],
+                        BendShape::Slide => [(ch.bend + bend.to, bend.over, 1.0), (0.0, bend.over, 0.0)],
+                        BendShape::Scoop => [(bend.to, bend.over, 0.0), (0.0, bend.over, 1.0)],
+                        BendShape::Dip => [(bend.to, bend.over, 0.5), (0.0, bend.over, 0.5)],
+                    };
+                    let count = if matches!(bend.shape, BendShape::To | BendShape::Slide) { 1 } else { 2 };
+                    ch.bending = Some(Bending { legs, count, at: 0, next: 0.0, counting: false });
+                }
+            }
+            if core::mem::take(&mut ch.gate_due) {
+                let gate = match (ch.gate_off, self.song.extra(ch.gate_from).and_then(|x| x.gate.as_ref())) {
+                    (true, _) => None,
+                    (false, Some(GateChange::On(gate))) => Some(gate),
+                    _ => self.song.instruments.get(ch.instrument as usize).and_then(|i| i.gate.as_ref()),
+                };
+                if ch.gated != ch.part && (ch.gated as usize) < NUM_PARTS {
+                    voices.set_param(ch.gated, GATE_DEPTH, 0.0, 0.0);
+                    ch.gated = NO_PART;
+                }
+                match gate {
+                    Some(g) if (ch.part as usize) < NUM_PARTS => {
+                        voices.set_gate(ch.part, &g.levels);
+                        // (Steps to a beat: a beat is four rows.)
+                        let values = [(GATE_DEPTH, g.depth), (GATE_RATE, (4.0 / g.rate.rows()) as f32), (GATE_SMOOTH, g.smooth), (GATE_SWING, g.swing), (GATE_SENDS, g.sends as u8 as f32), (GATE_STEREO, g.stereo as u8 as f32)];
+                        for (id, value) in values {
+                            voices.set_param(ch.part, id, value, 0.0);
+                        }
+                        ch.gated = ch.part;
+                    }
+                    _ if ch.gated == ch.part => {
+                        voices.set_param(ch.part, GATE_DEPTH, 0.0, 0.0);
+                        ch.gated = NO_PART;
+                    }
+                    _ => {}
+                }
+            }
+            self.channels[c] = ch;
+        }
+        // The engine's beat is the song's: four rows to the beat, and the
+        // top of the pattern the start of a bar.
+        let beats = 6.0 * p.tempo as f32 / p.speed.max(1) as f32;
+        if beats != self.told {
+            self.told = beats;
+            voices.set_tempo(beats);
+        }
+        if p.tick == 0 {
+            voices.clock(p.row as f32 / 4.0);
+        }
+        self.speed = p.speed;
+    }
+
+    /// Begin every leg of the channels' bends that is due by now.
+    fn take_bends(&mut self, voices: &mut Voices<'_>) {
+        let p = self.player.position();
+        for c in 0..self.channels.len() {
+            let mut ch = self.channels[c];
+            let Some(mut b) = ch.bending else { continue };
+            while b.at < b.count && self.step_frame(b.next) <= self.into {
+                let (to, time, part) = b.legs[b.at as usize];
+                let ticks = time.ticks(p.speed, p.tempo) * part;
+                SongPlayer::bend_to(voices, c, &mut ch, to, (ticks * self.tick_length / voices.sample_rate() as f64) as f32);
+                b.next += ticks;
+                b.at += 1;
+            }
+            ch.bending = (b.at < b.count).then_some(b);
+            self.channels[c] = ch;
         }
     }
 
@@ -556,6 +792,8 @@ impl Sequencer for SongPlayer {
             self.tick_frames = self.play_tick(voices);
             self.into = 0;
             if self.state != STATE_PLAYING {
+                self.told = 0.0;
+                voices.set_tempo(0.0);
                 return self.tick_frames;
             }
             // A tick has gone by for every arpeggio that was running. One
@@ -564,8 +802,15 @@ impl Sequencer for SongPlayer {
             let tempo = self.player.position().tempo;
             let stretch = if self.tempo != 0 { tempo as f64 / self.tempo as f64 } else { 1.0 };
             self.tempo = tempo;
+            self.after_tick(voices);
             for ch in &mut self.channels {
                 ch.fresh = false;
+                if let Some(b) = &mut ch.bending {
+                    if b.counting {
+                        b.next -= 1.0;
+                    }
+                    b.counting = true;
+                }
                 let Some(stepper) = &mut ch.stepper else { continue };
                 if stepper.counting {
                     stepper.next -= 1.0;
@@ -577,11 +822,15 @@ impl Sequencer for SongPlayer {
             }
         }
         self.take_steps(voices);
+        self.take_bends(voices);
         // Back at the next step that falls inside this tick, or at the next tick.
         let mut wait = self.tick_frames - self.into;
         for ch in &self.channels {
             if let Some(stepper) = &ch.stepper {
                 wait = wait.min(self.step_frame(stepper.next).saturating_sub(self.into));
+            }
+            if let Some(b) = &ch.bending {
+                wait = wait.min(self.step_frame(b.next).saturating_sub(self.into));
             }
         }
         let wait = wait.max(1);
@@ -598,6 +847,7 @@ impl Sequencer for SongPlayer {
         self.player.set_repeat(self.repeat);
         self.player.hold_order(self.loop_pattern);
         self.rewind();
+        self.told = 0.0;
         self.state = STATE_STOPPED;
         self.publish();
     }
@@ -677,6 +927,11 @@ impl Sequencer for SongPlayer {
             }
             _ => {}
         }
+        if self.state != STATE_PLAYING && self.told != 0.0 {
+            // The beat is the host's again.
+            self.told = 0.0;
+            voices.set_tempo(0.0);
+        }
         self.publish();
         now
     }
@@ -694,6 +949,10 @@ impl SongPlayer {
             channels: &mut self.channels,
             patch_parts: &self.patch_parts,
             volume: self.volume,
+            owners: &self.owners,
+            speed: self.speed,
+            tempo: self.tempo,
+            tick_length: self.tick_length,
         };
         let length = self.player.tick(&self.song, 0, &mut adapter);
         // Step macros that keep time with the song go by once a tick.
@@ -858,6 +1117,11 @@ pub fn replace(engine: &mut Engine, song: Song, first_slot: u16, raw: bool) -> R
         let fresh = SongPlayer::new(new, engine.sample_rate(), player.first_part, first_slot);
         player.song = fresh.song;
         player.shared = fresh.shared;
+        player.owners = fresh.owners;
+        // (What a channel's row or gate named was in the old song's lists.)
+        for ch in &mut player.channels {
+            (ch.extra, ch.gate_from, ch.gate_due) = (0, 0, true);
+        }
         player.patch_parts.resize(player.song.instruments.len(), NO_PART);
         player.player.retarget(&player.song);
         player.publish();
@@ -902,6 +1166,7 @@ pub fn remove(engine: &mut Engine) {
     // parts of synth patches, without a click.
     engine.apply(&Event::song(0.0, SONG_STOP, 0.0, 0.0));
     engine.set_sequencer(None);
+    engine.song_tempo = 0.0;
     for c in 0..channels {
         engine.apply(&Event::all_notes_off(0.0, (first_part + c) as u16, true));
     }

@@ -109,8 +109,13 @@ impl Engine {
         self.arps.iter().filter(|a| a.live).count()
     }
 
-    fn tempo(&self) -> f32 {
-        self.globals[TEMPO - GLOBAL_BASE]
+    /// Beats a minute: a playing song's, or else the `tempo` parameter.
+    pub(super) fn tempo(&self) -> f32 {
+        if self.song_tempo > 0.0 {
+            self.song_tempo
+        } else {
+            self.globals[TEMPO - GLOBAL_BASE]
+        }
     }
 
     /// Make an arpeggiator, in a free place or else the place of the one

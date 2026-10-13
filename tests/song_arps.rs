@@ -446,3 +446,300 @@ fn the_example_song_plays_the_same_in_blocks_of_any_size_and_survives_saving() {
         assert!(l.iter().zip(&bl).all(|(a, b)| a.to_bits() == b.to_bits()) && r.iter().zip(&br).all(|(a, b)| a.to_bits() == b.to_bits()), "block {block}");
     }
 }
+
+// ---------------------------------------------------------------- patterns, gates, glides and bends
+
+/// The pitch around a frame, in semitones above C-6 (the note these tests play).
+fn pitch_at(x: &[f32], frame: usize) -> f64 {
+    let part = &x[frame - 300..frame + 300];
+    let rises: Vec<f64> = (1..part.len()).filter(|&i| part[i - 1] <= 0.0 && part[i] > 0.0).map(|i| (i - 1) as f64 + (-part[i - 1] / (part[i] - part[i - 1])) as f64).collect();
+    let period = (rises[rises.len() - 1] - rises[0]) / (rises.len() - 1) as f64;
+    12.0 * (SR as f64 / period / (261.6256 * 4.0)).log2()
+}
+
+fn round_trips(song: &Song) {
+    assert_eq!(&native::load(&native::save(song).json, &|_| None).unwrap(), song, "{}", native::save(song).json);
+    assert_eq!(&binary::load(&binary::save(song)).unwrap(), song);
+    assert_eq!(&binary::save(song)[..6], b"SYSG\x02\x00");
+    assert!(native::save(song).json.contains(r#""version": 2,"#));
+}
+
+#[test]
+fn an_arp_follows_a_pattern_written_in_the_song() {
+    let events = r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "m7", "rate": "1/16", "pattern": "1 - 3 2 _ 1 3 5^"}}"#;
+    let s = song("", events);
+    assert_eq!(s.arp_patterns.len(), 1);
+    assert_eq!(s.arp_patterns[0].to_text().as_deref(), Some("1 - 3 2 _ 1 3 5^"));
+    round_trips(&s);
+    assert!(native::save(&s).json.contains(r#""arp": {"chord": [0, 3, 7, 10], "pattern": "1 - 3 2 _ 1 3 5^"}"#), "{}", native::save(&s).json);
+    let mut e = playing(s);
+    let (struck, x) = strikes(&mut e, 5292 * 16);
+    // A rest on the second row and a tie on the fifth: six notes to the bar, twice.
+    let rows: Vec<usize> = struck.iter().map(|s| s.0 / 5292).collect();
+    assert!(struck.iter().all(|s| s.0 % 5292 == 0), "on the rows' first frames");
+    assert_eq!(rows, [0, 2, 3, 5, 6, 7, 8, 10, 11, 13, 14, 15]);
+    // C, G, Eb (held through the tie), C, G and the C above, which is the chord's fifth note.
+    assert_eq!(notes(&struck, &x, 2000, 6), [0, 7, 3, 0, 7, 12]);
+    // The tied note sounds through the row it is tied over; the rest is silent.
+    assert!(x[5292 * 4 + 500..5292 * 4 + 2000].iter().any(|v| v.abs() > 0.1));
+    assert!(x[5292 + 3000..5292 * 2 - 10].iter().all(|v| v.abs() < 0.01));
+
+    // A named pattern, a list of steps, and the same under another chord.
+    let s = song(
+        "",
+        r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj", "pattern": "bounce"}},
+        {"row": 8, "ch": 0, "arp": {"chord": [5, 9, 12], "pattern": "bounce"}},
+        {"row": 16, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj", "rate": "1/8", "pattern": [1, "-", {"note": 3, "octave": 1, "level": 6, "gate": 0.9}, "_", {"note": 2, "slide": true}]}}"#,
+    );
+    assert_eq!(s.arp_patterns.len(), 2, "one pattern used twice is kept once");
+    round_trips(&s);
+    let mut e = playing(s);
+    let (struck, x) = strikes(&mut e, 5292 * 16);
+    // Bounce is 1 2 3 2; the chord changes after eight steps and the pattern carries on in step.
+    assert_eq!(notes(&struck, &x, 2000, 12), [0, 4, 7, 4, 0, 4, 7, 4, 5, 9, 12, 9]);
+    for bad in [
+        r#"{"chord": "maj", "pattern": "1 2 x"}"#,
+        r#"{"chord": "maj", "pattern": ""}"#,
+        r#"{"chord": "maj", "pattern": []}"#,
+        r#"{"chord": "maj", "pattern": [1, "what"]}"#,
+        r#"{"chord": "maj", "pattern": [{"note": 99}]}"#,
+        r#"{"chord": "maj", "pattern": "1 2", "order": "down"}"#,
+        r#"{"chord": "maj", "pattern": 7}"#,
+    ] {
+        let text = format!(r#"{{"format": "synths-song", "version": 2, "patterns": [{{"events": [{{"row": 0, "ch": 0, "arp": {bad}}}]}}]}}"#);
+        let why = native::load(&text, &|_| None).unwrap_err().to_string();
+        assert!(why.contains("pattern") || why.contains("\"note\""), "{bad}: {why}");
+    }
+}
+
+/// How loud each row of a rendering is, as open (true) or closed.
+fn rows_open(x: &[f32], rows: std::ops::Range<usize>, row: impl Fn(usize) -> usize) -> Vec<bool> {
+    rows.map(|r| {
+        let (from, to) = (row(r), row(r + 1));
+        let part = &x[from + (to - from) / 3..to - 50];
+        (part.iter().map(|v| (v * v) as f64).sum::<f64>() / part.len() as f64).sqrt() > 0.05
+    })
+    .collect()
+}
+
+#[test]
+fn a_gate_chops_an_instrument_in_time_with_the_songs_rows() {
+    // The pad's own gate: open, closed, closed, open in sixteenths. The
+    // tempo changes on row 6, and the gate stays on the rows.
+    let top = r#""instruments": [{"name": "pad", "patch": "pad", "gate": {"pattern": "x..x", "smooth": "hard"}}, {"sample": 0}],"#;
+    let text = |events: &str| {
+        format!(
+            r#"{{"format": "synths-song", "version": 2, "channels": 2, "order": [0], "patterns": [{{"rows": 32, "events": [{events}]}}],
+            {top} "samples": [{{"wave": [100, 100, 100, 100, -100, -100, -100, -100], "loop": {{}}}}]}}"#
+        )
+    };
+    let s = native::load(&text(r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1}, {"row": 6, "ch": 1, "fx": "F96"}"#), &|_| None).unwrap();
+    assert_eq!(s.instruments[0].gate.as_ref().unwrap().levels, [1.0, 0.0, 0.0, 1.0]);
+    round_trips(&s);
+    let ticks = tick_frames((0..200).map(|tick| tick_length(if tick < 36 { 125.0 } else { 150.0 })));
+    let row = |r: usize| ticks[6 * r];
+    let mut e = playing(s.clone());
+    let x = render(&mut e, row(17), 256).0;
+    let want: Vec<bool> = (0..16).map(|r| r % 4 == 0 || r % 4 == 3).collect();
+    assert_eq!(rows_open(&x, 0..16, row), want);
+    assert_eq!(e.param(LEAD as usize, GATE_DEPTH), 1.0);
+    assert_eq!(e.param(0, TEMPO), 120.0, "the host's tempo is left as it was");
+
+    // After a seek the gate is on the rows of the place sought: here from
+    // row 5, with a note on row 6 to hear it by.
+    let s2 = native::load(&text(r#"{"row": 6, "ch": 0, "note": "C-4", "ins": 1}"#), &|_| None).unwrap();
+    let mut e = playing(s2);
+    render(&mut e, 1234, 256);
+    let at = e.time() as usize;
+    e.push(Event::song(at as f64, SONG_SEEK, 0.0, 5.0));
+    let x = render(&mut e, 5292 * 8, 256).0;
+    // Row 5 is silent (no note yet); rows 6 to 12 are gated as their numbers say.
+    assert_eq!(rows_open(&x, 1..8, |r| 5292 * r), (6..13).map(|r| r % 4 == 0 || r % 4 == 3).collect::<Vec<_>>());
+
+    // An event can put a gate on the channel, change it and take it off;
+    // the instrument's own comes back when asked.
+    let events = r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "gate": "off"},
+        {"row": 4, "ch": 0, "gate": {"pattern": "x.", "rate": "1/16", "smooth": 0.001}},
+        {"row": 8, "ch": 0, "gate": {"pattern": [1, 0.5], "rate": "1/8", "depth": 1, "smooth": 0.001}},
+        {"row": 12, "ch": 0, "gate": "instrument"}"#;
+    let s3 = native::load(&text(events), &|_| None).unwrap();
+    round_trips(&s3);
+    let json = native::save(&s3).json;
+    assert!(json.contains(r#""gate": {"pattern": "x.", "smooth": 0.001}"#) && json.contains(r#""gate": {"pattern": [1, 0.5], "rate": "1/8", "smooth": 0.001}"#), "{json}");
+    assert!(json.contains(r#""gate": "off""#) && json.contains(r#""gate": "instrument""#) && json.contains(r#""gate": {"pattern": "x..x", "smooth": 0.001}"#));
+    let mut e = playing(s3);
+    let x = render(&mut e, 5292 * 17, 256).0;
+    let open = rows_open(&x, 0..16, |r| 5292 * r);
+    assert_eq!(&open[..8], [true, true, true, true, true, false, true, false]);
+    assert_eq!(&open[12..], [true, false, false, true]);
+    // Half open is half as loud.
+    let level = |r: usize| x[5292 * r + 2000..5292 * (r + 1) - 100].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!((level(10) / level(8) - 0.5).abs() < 0.02, "{}", level(10) / level(8));
+    // When the song stops, the part it gated is the host's again.
+    e.push(Event::song(e.time() as f64, SONG_STOP, 0.0, 0.0));
+    render(&mut e, 512, 256);
+    assert_eq!(e.param(LEAD as usize, GATE_DEPTH), 0.0);
+    for bad in [r#""gate": "x.q""#, r#""gate": {"rate": "1/16"}"#, r#""gate": {"pattern": "x.", "rate": "1/5"}"#, r#""gate": {"pattern": [2]}"#, r#""gate": {"pattern": "x", "depth": 3}"#, r#""gate": 5"#] {
+        let why = native::load(&text(&format!(r#"{{"row": 0, "ch": 0, {bad}}}"#)), &|_| None).unwrap_err().to_string();
+        assert!(why.contains("gate") || why.contains("depth"), "{bad}: {why}");
+    }
+}
+
+#[test]
+fn glides_bends_slides_and_vibrato_follow_the_curves_they_say() {
+    for (tempo, speed) in [(125.0f64, 6usize), (150.0, 4)] {
+        let top = format!(r#""tempo": {tempo}, "speed": {speed},"#);
+        let row = (speed as f64 * tick_length(tempo)) as usize;
+        let near = |got: f64, want: f64, what: &str| assert!((got - want).abs() < 0.12, "tempo {tempo}: {what}: {got} against {want}");
+
+        // A glide over an eighth: the note is not struck again, and its
+        // pitch goes in a straight line from the old note to the new.
+        let s = song(&top, r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1}, {"row": 4, "ch": 0, "note": "E-6", "ins": 1, "glide": "1/8"}"#);
+        round_trips(&s);
+        let mut e = playing(s);
+        let (struck, x) = strikes(&mut e, row * 8);
+        assert_eq!(struck, [(0, 1)], "one note, struck once");
+        near(pitch_at(&x, row * 4 - 400), 0.0, "before the glide");
+        near(pitch_at(&x, row * 4 + row / 2), 1.0, "a quarter of the way");
+        near(pitch_at(&x, row * 5), 2.0, "half way");
+        near(pitch_at(&x, row * 6 + 400), 4.0, "there");
+
+        // A bend: up two semitones over an eighth from the note's start, then held.
+        let s = song(&top, r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1, "bend": {"to": "D-6", "over": "1/8"}}, {"row": 4, "ch": 0, "bend": {"to": -3, "over": {"rows": 1}}}"#);
+        round_trips(&s);
+        let mut e = playing(s);
+        let x = render(&mut e, row * 8, 256).0;
+        near(pitch_at(&x, row / 2), 0.5, "a quarter of the bend");
+        near(pitch_at(&x, row), 1.0, "half the bend");
+        near(pitch_at(&x, row * 3), 2.0, "held");
+        // Then to A below, in one row.
+        near(pitch_at(&x, row * 4 + row / 2), -0.5, "half way to the A");
+        near(pitch_at(&x, row * 6), -3.0, "on the A");
+
+        // The shorthands. A scoop comes up into the note from two below, in a sixteenth.
+        let s = song(&top, r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1, "bend": "scoop"}, {"row": 4, "ch": 0, "bend": "dip"}, {"row": 8, "ch": 0, "bend": "fall"}"#);
+        round_trips(&s);
+        let mut e = playing(s);
+        let x = render(&mut e, row * 11, 256).0;
+        near(pitch_at(&x, row / 2), -1.0, "half way up the scoop");
+        near(pitch_at(&x, row + 400), 0.0, "on the note");
+        // A dip goes down a semitone and back, over an eighth.
+        near(pitch_at(&x, row * 4 + row / 2), -0.5, "going down");
+        near(pitch_at(&x, row * 5), -1.0, "the bottom of the dip");
+        near(pitch_at(&x, row * 6 + 400), 0.0, "back");
+        // A fall drops five semitones over an eighth.
+        near(pitch_at(&x, row * 9), -2.5, "half way down the fall");
+        near(pitch_at(&x, row * 10 + 400), -5.0, "fallen");
+
+        // A slide moves the pitch from wherever it is: an octave up over the row, then back in half a second.
+        let s = song(&top, r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1}, {"row": 2, "ch": 0, "slide": 12}, {"row": 4, "ch": 0, "slide": {"to": -12, "over": {"seconds": 0.5}}}"#);
+        round_trips(&s);
+        let mut e = playing(s);
+        let x = render(&mut e, row * 4 + 30000, 256).0;
+        near(pitch_at(&x, row * 2 + row / 2), 6.0, "half way up");
+        near(pitch_at(&x, row * 3 + 400), 12.0, "an octave up");
+        near(pitch_at(&x, row * 4 + 11025), 6.0, "half way back, a quarter of a second on");
+        near(pitch_at(&x, row * 4 + 23000), 0.0, "back");
+
+        // Vibrato after a delay of an eighth: steady until then, then a
+        // third of a semitone each way, six times a second.
+        let s = song(&top, r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1, "vibrato": true}, {"row": 12, "ch": 0, "vibrato": false}"#);
+        round_trips(&s);
+        let mut e = playing(s);
+        let x = render(&mut e, row * 14, 256).0;
+        near(pitch_at(&x, row), 0.0, "before the vibrato");
+        let (top_of, bottom_of) = (row * 2 + 44100 / 24, row * 2 + 44100 / 8);
+        near(pitch_at(&x, top_of), 0.29, "the top of the first wave");
+        near(pitch_at(&x, bottom_of), -0.29, "the bottom");
+        near(pitch_at(&x, row * 13), 0.0, "switched off");
+    }
+}
+
+#[test]
+fn a_plain_glide_is_the_trackers_own_and_everything_reads_back() {
+    // "glide": true is effect 300, and a number is its speed: the same cells, the same sound.
+    let plain = song("", r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 2}, {"row": 2, "ch": 0, "note": "G-6", "ins": 2, "glide": 24}, {"row": 4, "ch": 0, "note": "C-6", "ins": 2, "glide": true}"#);
+    let coded = song("", r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 2}, {"row": 2, "ch": 0, "note": "G-6", "ins": 2, "fx": "318"}, {"row": 4, "ch": 0, "note": "C-6", "ins": 2, "fx": "300"}"#);
+    assert_eq!(plain, coded);
+    assert!(plain.extras.is_empty());
+    let (a, b) = (render(&mut playing(plain.clone()), 5292 * 8, 256).0, render(&mut playing(coded), 5292 * 8, 256).0);
+    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()) && a.iter().any(|v| v.abs() > 0.05));
+    // Saved, it is the plain key; every other effect is still an fx.
+    let json = native::save(&plain).json;
+    assert!(json.contains(r#""glide": 24}"#) && json.contains(r#""glide": true}"#) && !json.contains("\"fx\""), "{json}");
+    let other = song("", r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 2, "fx": "A04"}, {"row": 1, "ch": 0, "fx": "110"}, {"row": 2, "ch": 0, "vol": "M3"}"#);
+    let json = native::save(&other).json;
+    assert!(json.contains(r#""fx": "A04""#) && json.contains(r#""fx": "110""#) && json.contains(r#""vol": "M3""#) && json.contains(r#""version": 1,"#));
+
+    // The keys' written forms, as they are saved.
+    let all = song(
+        "",
+        r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "bend": "scoop", "vibrato": {"depth": 0.5, "rate": 5, "delay": {"ticks": 3}}},
+        {"row": 1, "ch": 0, "note": "E-4", "ins": 1, "glide": {"seconds": 0.1}, "bend": {"shape": "dip", "to": -3, "over": "1/4"}},
+        {"row": 2, "ch": 0, "slide": -7}, {"row": 3, "ch": 0, "slide": {"to": 12, "over": "1/8t"}},
+        {"row": 4, "ch": 0, "bend": {"to": 0.5, "over": {"rows": 3}}, "vibrato": true},
+        {"row": 5, "ch": 0, "note": "C-4", "ins": 1, "bend": {"shape": "scoop", "over": "1/8"}, "glide": "1/16."}"#,
+    );
+    round_trips(&all);
+    let json = native::save(&all).json;
+    for piece in [
+        r#""bend": "scoop", "vibrato": {"depth": 0.5, "rate": 5, "delay": {"ticks": 3}}}"#,
+        r#""glide": {"seconds": 0.1}, "bend": {"shape": "dip", "to": -3, "over": "1/4"}}"#,
+        r#""slide": -7}"#,
+        r#""slide": {"to": 12, "over": "1/8t"}}"#,
+        r#""bend": {"to": 0.5, "over": {"rows": 3}}, "vibrato": true}"#,
+        r#""glide": "1/16.", "bend": {"shape": "scoop", "to": -2, "over": "1/8"}}"#,
+    ] {
+        assert!(json.contains(piece), "{piece}\n{json}");
+    }
+    for bad in [
+        r#""glide": 300"#,
+        r#""glide": "soon""#,
+        r#""glide": {"rows": 1, "ticks": 2}"#,
+        r#""glide": true, "fx": "A04""#,
+        r#""bend": "wobble""#,
+        r#""bend": {"over": "1/8"}"#,
+        r#""bend": {"to": 200}"#,
+        r#""bend": {"to": "E-4"}"#,
+        r#""bend": "scoop", "slide": 2"#,
+        r#""slide": {"over": "1/8"}"#,
+        r#""vibrato": 3"#,
+        r#""vibrato": {"depth": 50}"#,
+    ] {
+        let text = format!(r#"{{"format": "synths-song", "version": 2, "patterns": [{{"events": [{{"row": 0, "ch": 0, {bad}}}]}}]}}"#);
+        let why = native::load(&text, &|_| None).unwrap_err().to_string();
+        assert!(["glide", "bend", "slide", "vibrato", "depth"].iter().any(|k| why.contains(k)), "{bad}: {why}");
+    }
+}
+
+#[test]
+fn glides_and_bends_work_on_samples_with_chords_and_through_a_replaced_song() {
+    // On a sample instrument: the square wave bends as the patch did.
+    let s = song("", r#"{"row": 0, "ch": 0, "note": "C-5", "ins": 2, "bend": {"to": 12, "over": "1/4"}}, {"row": 8, "ch": 0, "note": "C-5", "ins": 2, "glide": "1/8"}"#);
+    let mut e = playing(s);
+    let (struck, x) = strikes(&mut e, 5292 * 12);
+    assert_eq!(struck, [(0, 1)]);
+    let octaves = |at: usize| {
+        let part = &x[at - 400..at + 400];
+        let rises = (1..part.len()).filter(|&i| part[i - 1] <= 0.0 && part[i] > 0.0).count() as f64;
+        (rises * 44100.0 / 800.0 / 523.25).log2()
+    };
+    assert!((octaves(5292 * 2) - 0.5).abs() < 0.08 && (octaves(5292 * 6) - 1.0).abs() < 0.08, "{} {}", octaves(5292 * 2), octaves(5292 * 6));
+    assert!(octaves(5292 * 11).abs() < 0.08, "the glide brought it back to the note");
+
+    // A glide into a chord moves the whole chord; a bend bends all of it.
+    let s = song("", r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "maj"}, {"row": 4, "ch": 0, "note": "D-4", "ins": 1, "glide": "1/16"}"#);
+    let mut e = playing(s);
+    let (struck, x) = strikes(&mut e, 5292 * 8);
+    assert_eq!(struck, [(0, 3)]);
+    let after = &x[5292 * 6..5292 * 8];
+    assert!([2, 6, 9].iter().all(|&n| amount(after, hz(n)) > 0.02) && amount(after, hz(0)) < 0.005);
+
+    // A bend that is under way carries on through an edit of the song.
+    let before = r#"{"row": 0, "ch": 0, "note": "C-6", "ins": 1, "bend": {"to": 12, "over": "1/2"}}"#;
+    let mut e = playing(song("", before));
+    let mut x = render(&mut e, 5292 * 2 + 77, 256).0;
+    assert_eq!(song_player::replace(&mut e, song("", &format!(r#"{before}, {{"row": 20, "ch": 1, "note": "C-3", "ins": 1}}"#)), 0, false), Ok(true));
+    x.extend(render(&mut e, 5292 * 8, 256).0);
+    assert!((pitch_at(&x, 5292 * 4) - 6.0).abs() < 0.12 && (pitch_at(&x, 5292 * 9) - 12.0).abs() < 0.12);
+}
