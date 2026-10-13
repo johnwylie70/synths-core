@@ -1,0 +1,31 @@
+{
+  "format": "synths-song",
+  "version": 1,
+  "title": "Old Chords",
+  "speed": 6,
+  "tempo": 125,
+  "channels": 3,
+  "pan": [64, 192, 128],
+  "order": [0],
+  "patterns": [
+    {"rows": 16, "events": [
+      {"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "min"},
+      {"row": 0, "ch": 1, "note": "A-3", "ins": 2, "chord": "m7", "chordHz": 30, "chordOrder": "random"},
+      {"row": 2, "ch": 2, "note": "C-5", "ins": 1, "vol": 32, "fx": "047"},
+      {"row": 4, "ch": 0, "chord": [0, 4, 7, 12], "chordHz": 50, "chordOrder": "updown"},
+      {"row": 6, "ch": 2, "fx": "F90"},
+      {"row": 8, "ch": 0, "note": "F-4", "ins": 1, "chord": "maj", "chordSpeed": 2, "chordOrder": "down"},
+      {"row": 8, "ch": 1, "note": "off"},
+      {"row": 10, "ch": 1, "note": "D-4", "ins": 2, "chord": ["D-4", "A-4", "F-4"], "chordOrder": "written"},
+      {"row": 12, "ch": 0, "chord": "off"},
+      {"row": 14, "ch": 1, "chord": "sus4", "chordSpeed": 0.5}
+    ]}
+  ],
+  "instruments": [
+    {"name": "square", "sample": 0},
+    {"name": "lead", "patch": "lead"}
+  ],
+  "samples": [
+    {"name": "square", "wave": [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100], "loop": {"start": 0, "length": 32}}
+  ]
+}
