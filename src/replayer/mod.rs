@@ -15,7 +15,7 @@ pub mod ft2;
 pub mod pt;
 pub mod tables;
 
-use crate::song::{Cell, Chord, ChordOrder, ChordRate, Rules, Song, C4_RATE, MAX_CHORD, NOTE_MAX};
+use crate::song::{Arp, ArpOrder, ArpRate, Cell, Chord, Rules, Song, C4_RATE, MAX_CHORD, NOTE_MAX};
 
 /// What a channel plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,17 +43,20 @@ pub struct Start {
     pub pan: f32,
 }
 
-/// A chord for one voice to play by stepping quickly through its notes.
+/// A chord for a channel to play: its notes together, or one at a time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arpeggio {
     /// Each note, in semitones from the pitch the channel is playing.
     pub offsets: [i8; MAX_CHORD],
     /// How many of `offsets` are used, 1 to 8.
     pub count: u8,
-    /// Steps a second. A chord timed in ticks has been worked out at the
-    /// song's tempo when the chord began.
+    /// Steps a second, worked out at the song's tempo and speed when the
+    /// chord began; 0 for notes together. Voices that keep time with the
+    /// song as it changes go by `arp` instead.
     pub rate: f32,
-    pub order: ChordOrder,
+    pub order: ArpOrder,
+    /// How the notes are played one at a time; `None` for all together.
+    pub arp: Option<Arp>,
 }
 
 impl Arpeggio {
@@ -61,22 +64,26 @@ impl Arpeggio {
         &self.offsets[..(self.count as usize).min(MAX_CHORD)]
     }
 
-    fn of(chord: &Chord, tempo: u16) -> Arpeggio {
-        let rate = match chord.rate {
-            ChordRate::PerTick(steps) => steps * tempo as f32 / 2.5,
-            ChordRate::PerSecond(steps) => steps,
+    fn of(chord: &Chord, speed: u16, tempo: u16) -> Arpeggio {
+        // (The two rates songs have always had come out as they always did.)
+        let rate = match chord.arp.map(|a| a.rate) {
+            Some(ArpRate::PerTick(steps)) => steps * tempo as f32 / 2.5,
+            Some(ArpRate::PerSecond(steps)) => steps,
+            Some(rate) => (tempo as f64 / (2.5 * rate.ticks(speed, tempo))) as f32,
+            None => 0.0,
         };
-        Arpeggio { offsets: chord.offsets, count: chord.count, rate, order: chord.order }
+        let order = chord.arp.map_or(ArpOrder::Together, |a| a.order);
+        Arpeggio { offsets: chord.offsets, count: chord.count, rate, order, arp: chord.arp }
     }
 }
 
 /// The chord a channel is playing, as a row's event leaves it. True if it
 /// changed. A chord lasts until an event stops it or the channel gets a new
 /// note with no chord of its own.
-pub(crate) fn chord_after_row(now: &mut Option<Arpeggio>, chord: Option<Chord>, cell: Cell, tempo: u16) -> bool {
+pub(crate) fn chord_after_row(now: &mut Option<Arpeggio>, chord: Option<Chord>, cell: Cell, speed: u16, tempo: u16) -> bool {
     let next = match chord {
         Some(chord) if chord.is_off() => None,
-        Some(chord) => Some(Arpeggio::of(&chord, tempo)),
+        Some(chord) => Some(Arpeggio::of(&chord, speed, tempo)),
         None if (1..=NOTE_MAX).contains(&cell.note) => None,
         None => return false,
     };
@@ -123,9 +130,9 @@ pub trait Voices {
     /// them with `set_volume`. A synth patch should begin its release.
     fn release(&mut self, _frame: u32, _channel: usize) {}
 
-    /// Gives the channel's voice a chord to step through, or with `None`
-    /// takes it away. The voice plays each offset in turn at the arpeggio's
-    /// rate, on top of whatever rate it is set to, until told otherwise or
+    /// Gives the channel a chord, or with `None` takes it away. Its notes
+    /// sound together, or with `arp` one at a time: each offset in turn, on
+    /// top of whatever rate the channel is set to, until told otherwise or
     /// until the channel's next `play` (which starts without one: the
     /// replayer sends the chord again after a `play` if it still holds).
     /// Voices that ignore this play the chord's root alone.

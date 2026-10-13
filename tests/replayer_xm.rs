@@ -440,12 +440,12 @@ fn a_chord_is_one_instruction_and_lasts_until_the_next_note_or_an_off() {
         if rules == Rules::ProTracker {
             p = pattern(16, &["C-4 01 000", "", "E-4 01 000", "G-4 01 000", "", "... .. 000", "C-4 01 E93", "", "C-4 01 FFA"]);
         }
-        p.set_chord(0, 0, Some(Chord::new(&[0, 3, 7])));
-        p.set_chord(1, 0, Some(Chord { rate: ChordRate::PerSecond(60.0), ..Chord::new(&[0, 4, 7, 11]) }));
-        p.set_chord(3, 0, Some(Chord::new(&[0, 12])));
+        p.set_chord(0, 0, Some(Chord::arp(&[0, 3, 7], Arp::FAST)));
+        p.set_chord(1, 0, Some(Chord::arp(&[0, 4, 7, 11], Arp { rate: ArpRate::PerSecond(60.0), ..Arp::FAST })));
+        p.set_chord(3, 0, Some(Chord::arp(&[0, 12], Arp::FAST)));
         p.set_chord(5, 0, Some(Chord::OFF));
-        p.set_chord(6, 0, Some(Chord { rate: ChordRate::PerTick(2.0), ..Chord::new(&[0, 7]) }));
-        p.set_chord(8, 0, Some(Chord::new(&[0, 5])));
+        p.set_chord(6, 0, Some(Chord::arp(&[0, 7], Arp { rate: ArpRate::PerTick(2.0), ..Arp::FAST })));
+        p.set_chord(8, 0, Some(Chord::arp(&[0, 5], Arp::FAST)));
         let song = song(rules, 1, vec![square(64, 1)], vec![p]);
         let ticks = run_ticks(&song, 54);
         assert_eq!(
@@ -478,7 +478,7 @@ fn the_mixer_steps_a_voice_through_its_chord() {
     // An octave arpeggio at 100 steps a second on a 64-frame square at
     // 8363: 131 Hz and 261 Hz by turns, 441 frames each.
     let mut p = pattern(8, &["C-4 01 .. 000"]);
-    p.set_chord(0, 0, Some(Chord { rate: ChordRate::PerSecond(100.0), ..Chord::new(&[0, 12]) }));
+    p.set_chord(0, 0, Some(Chord::arp(&[0, 12], Arp { rate: ArpRate::PerSecond(100.0), ..Arp::FAST })));
     let song = song(Rules::FastTracker2, 1, vec![square(64, 1)], vec![p]);
     let mut player = Player::new(&song, RATE);
     let mut mixer = Mixer::new(&song, RATE);

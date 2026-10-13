@@ -7,7 +7,7 @@
 //! exactly that frame when `render` runs.
 
 use synths_core::replayer::{Arpeggio, Source, Start, Voices};
-use synths_core::song::{ChordOrder, LoopKind, Song};
+use synths_core::song::{ArpOrder, LoopKind, Song};
 
 /// Something the replayer asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -225,19 +225,25 @@ fn chord_offset(a: &Arpeggio, n: usize) -> i8 {
     if len == 0 {
         return 0;
     }
-    if a.order != ChordOrder::Written {
+    if a.order != ArpOrder::Written {
         notes.sort();
     }
     match a.order {
-        ChordOrder::Up | ChordOrder::Written => notes[n % len],
-        ChordOrder::Down => notes[len - 1 - n % len],
+        ArpOrder::Up | ArpOrder::Written => notes[n % len],
+        ArpOrder::Down => notes[len - 1 - n % len],
         // Up and back down, without playing the top or bottom twice.
-        ChordOrder::UpDown if len > 1 => {
+        ArpOrder::UpDown if len > 1 => {
             let at = n % (2 * len - 2);
             notes[if at < len { at } else { 2 * len - 2 - at }]
         }
-        ChordOrder::UpDown => notes[0],
-        ChordOrder::Random => notes[(n.wrapping_mul(2654435761) >> 7) % len],
+        ArpOrder::UpDown => notes[0],
+        ArpOrder::Random => notes[(n.wrapping_mul(2654435761) >> 7) % len],
+        ArpOrder::UpDownEnds => {
+            let at = n % (2 * len);
+            notes[if at < len { at } else { 2 * len - 1 - at }]
+        }
+        // (This mixer has one voice a channel: of notes together it plays the first.)
+        ArpOrder::Together => notes[0],
     }
 }
 

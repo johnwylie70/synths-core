@@ -16,8 +16,24 @@ use super::*;
 
 /// The four bytes a packed song begins with.
 pub const MAGIC: &[u8; 4] = b"SYSG";
-/// The version this code writes, and the highest it reads.
-pub const VERSION: u16 = 1;
+/// The highest version this code reads. It writes version 1 unless the
+/// song has a chord or an arpeggio that version 1 could not say (`CHORD_NEW`).
+pub const VERSION: u16 = 2;
+
+/// What follows an event: nothing, a chord as version 1 had it (16 bytes:
+/// always the fast one-voice arpeggio), or a chord or arpeggio in full (32).
+const CHORD_NONE: u8 = 0;
+const CHORD_OLD: u8 = 1;
+const CHORD_NEW: u8 = 2;
+
+/// Can version 1's record say this chord? It can say "off", and an
+/// arpeggio of one voice timed in ticks or seconds with nothing newer.
+fn fits_old(chord: &Chord) -> bool {
+    match chord.arp {
+        None => chord.is_off(),
+        Some(arp) => arp.plain() && arp.gate == Arp::FAST.gate && arp.accents == 0,
+    }
+}
 
 /// The four bytes that begin the instruments' `synth` texts, after the samples.
 const SYNTHS: &[u8; 4] = b"SYNT";
@@ -61,7 +77,8 @@ pub fn save(song: &Song) -> Vec<u8> {
     let mut out = Vec::new();
     let o = &mut out;
     o.extend_from_slice(MAGIC);
-    put_u16(o, VERSION);
+    let new = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some_and(|c| !fits_old(&c))));
+    put_u16(o, if new { 2 } else { 1 });
     let flags = (song.rules == Rules::ProTracker) as u16 | ((song.frequency_table == FrequencyTable::Amiga) as u16) << 1;
     put_u16(o, flags);
     o.extend_from_slice(&[song.speed, song.tempo.min(255) as u8]);
@@ -82,16 +99,34 @@ pub fn save(song: &Song) -> Vec<u8> {
         for e in &p.events {
             let c = e.cell;
             put_u16(o, e.row);
-            o.extend_from_slice(&[e.channel, e.chord.is_some() as u8, c.note, c.instrument, c.volume, c.effect, c.param]);
-            if let Some(chord) = e.chord {
-                let (kind, rate) = match chord.rate {
-                    ChordRate::PerTick(n) => (0u8, n),
-                    ChordRate::PerSecond(n) => (1, n),
-                };
-                o.extend_from_slice(&[chord.count.min(MAX_CHORD as u8), chord.order as u8, kind, 0]);
+            let kind = match &e.chord {
+                None => CHORD_NONE,
+                Some(chord) if fits_old(chord) => CHORD_OLD,
+                Some(_) => CHORD_NEW,
+            };
+            o.extend_from_slice(&[e.channel, kind, c.note, c.instrument, c.volume, c.effect, c.param]);
+            let Some(chord) = e.chord else { continue };
+            let arp = chord.arp.unwrap_or(Arp::FAST);
+            let (unit, rate, length) = match arp.rate {
+                ArpRate::PerTick(n) => (0u8, n, None),
+                ArpRate::PerSecond(n) => (1, n, None),
+                ArpRate::PerRow(n) => (2, n, None),
+                ArpRate::Note(length) => (3, 0.0, Some(length)),
+            };
+            let count = chord.count.min(MAX_CHORD as u8);
+            if kind == CHORD_OLD {
+                o.extend_from_slice(&[count, arp.order as u8, unit, 0]);
                 o.extend_from_slice(&rate.to_le_bytes());
-                o.extend(chord.offsets.iter().map(|&x| x as u8));
+            } else {
+                let length = length.unwrap_or(NoteLength { division: 0, feel: Feel::Plain });
+                o.extend_from_slice(&[count, chord.arp.is_some() as u8, arp.order as u8, arp.style as u8]);
+                o.extend_from_slice(&[unit, length.division, length.feel as u8, arp.octaves]);
+                o.extend_from_slice(&rate.to_le_bytes());
+                o.extend_from_slice(&arp.gate.to_le_bytes());
+                o.extend_from_slice(&arp.swing.to_le_bytes());
+                put_u32(o, arp.accents);
             }
+            o.extend(chord.offsets.iter().map(|&x| x as u8));
         }
     }
     for i in &song.instruments {
@@ -170,6 +205,68 @@ fn get_envelope(r: &mut Reader) -> Envelope {
     e
 }
 
+fn get_f32(r: &mut Reader) -> f32 {
+    f32::from_le_bytes([r.u8(), r.u8(), r.u8(), r.u8()])
+}
+
+/// A number from the file, kept only if it makes sense.
+fn within(x: f32, min: f32, max: f32, or: f32) -> f32 {
+    if x.is_finite() && x >= min {
+        x.min(max)
+    } else {
+        or
+    }
+}
+
+/// The chord after an event: as version 1 wrote it, or in full.
+fn get_chord(r: &mut Reader, full: bool) -> Chord {
+    let order = |n: u8, most: u8| match n.min(most) {
+        1 => ArpOrder::Down,
+        2 => ArpOrder::UpDown,
+        3 => ArpOrder::Written,
+        4 => ArpOrder::Random,
+        5 => ArpOrder::UpDownEnds,
+        6 => ArpOrder::Together,
+        _ => ArpOrder::Up,
+    };
+    let mut chord = Chord::OFF;
+    let mut arp = Arp::FAST;
+    if full {
+        let [count, is_arp, how, style] = [r.u8(), r.u8(), r.u8(), r.u8()];
+        let [unit, division, feel, octaves] = [r.u8(), r.u8(), r.u8(), r.u8()];
+        let rate = within(get_f32(r), 0.01, 1000.0, 1.0);
+        arp.order = order(how, 6);
+        arp.style = if style == 1 { ArpStyle::Strike } else { ArpStyle::Slide };
+        arp.rate = match unit {
+            1 => ArpRate::PerSecond(rate),
+            2 => ArpRate::PerRow(rate.min(64.0)),
+            3 => ArpRate::Note(NoteLength {
+                division: if division.is_power_of_two() && division <= 64 { division } else { 16 },
+                feel: [Feel::Plain, Feel::Triplet, Feel::Dotted][feel.min(2) as usize],
+            }),
+            _ => ArpRate::PerTick(rate.min(64.0)),
+        };
+        arp.octaves = octaves.clamp(1, 4);
+        arp.gate = within(get_f32(r), 0.05, 1.0, Arp::FAST.gate);
+        arp.swing = within(get_f32(r), 0.0, 0.75, 0.0);
+        arp.accents = r.u32_le();
+        chord.count = count.min(MAX_CHORD as u8);
+        chord.arp = (is_arp != 0 && count != 0).then_some(arp);
+    } else {
+        let [count, how, unit, _] = [r.u8(), r.u8(), r.u8(), r.u8()];
+        let rate = get_f32(r);
+        let rate = if rate.is_finite() && rate > 0.0 { rate.min(1000.0) } else { 1.0 };
+        arp.order = order(how, 4);
+        arp.rate = if unit == 1 { ArpRate::PerSecond(rate) } else { ArpRate::PerTick(rate) };
+        chord.count = count.min(MAX_CHORD as u8);
+        chord.arp = (count != 0).then_some(arp);
+    }
+    for slot in &mut chord.offsets {
+        *slot = r.u8() as i8;
+    }
+    chord
+}
+
 /// Unpacks a song.
 pub fn load(data: &[u8]) -> Result<Song, LoadError> {
     if !is_binary(data) {
@@ -215,25 +312,7 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
             let row = r.u16_le();
             let [channel, has_chord, note, instrument, volume, effect, param] = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8(), r.u8(), r.u8()];
             let cell = Cell { note: if note > NOTE_OFF { 0 } else { note }, instrument, volume, effect: effect.min(fx::MAX), param };
-            let chord = (has_chord != 0).then(|| {
-                let [count, order, kind, _] = [r.u8(), r.u8(), r.u8(), r.u8()];
-                let rate = f32::from_le_bytes([r.u8(), r.u8(), r.u8(), r.u8()]);
-                let rate = if rate.is_finite() && rate > 0.0 { rate.min(1000.0) } else { 1.0 };
-                let mut chord = Chord::OFF;
-                for slot in &mut chord.offsets {
-                    *slot = r.u8() as i8;
-                }
-                chord.count = count.min(MAX_CHORD as u8);
-                chord.order = match order {
-                    1 => ChordOrder::Down,
-                    2 => ChordOrder::UpDown,
-                    3 => ChordOrder::Written,
-                    4 => ChordOrder::Random,
-                    _ => ChordOrder::Up,
-                };
-                chord.rate = if kind == 1 { ChordRate::PerSecond(rate) } else { ChordRate::PerTick(rate) };
-                chord
-            });
+            let chord = (has_chord != CHORD_NONE).then(|| get_chord(&mut r, has_chord == CHORD_NEW));
             pattern.events.push(Event { row, channel, cell, chord });
         }
         song.patterns.push(pattern);

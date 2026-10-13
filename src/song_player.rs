@@ -10,7 +10,11 @@
 //! numbers stored on one side and loaded on the other.
 //!
 //! A channel of the song is a part of the engine, and the channel's one
-//! voice has the handle `channel + 1`.
+//! voice has the handle `channel + 1`. A channel playing a chord, or an
+//! arpeggio whose notes are struck, has several voices with that handle,
+//! which an arpeggiator of the engine starts and lets go; the player steps
+//! it, on the frames the song's own rows and ticks give, so that its steps
+//! keep time with the song whatever the song's tempo does.
 
 use crate::engine::{Engine, MAX_SAMPLES, NUM_PARTS};
 use crate::event::*;
@@ -18,7 +22,7 @@ use crate::params::*;
 use crate::replayer::{note_of_rate, Arpeggio, Player, Source, Start, Voices as Channels};
 use crate::sample::{LOOP_FORWARD, LOOP_OFF, LOOP_PINGPONG};
 use crate::sequencer::{Sequencer, Trigger, Voices};
-use crate::song::{ChordOrder, LoopKind, Rules, Song, C4_RATE};
+use crate::song::{ArpOrder, ArpRate, ArpStyle, LoopKind, Rules, Song, C4_RATE};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::Arc;
 
@@ -115,6 +119,34 @@ struct Channel {
     rate: f64,
     volume: f32,
     pan: f32,
+    /// The sample slot the voice plays and where it started in it.
+    slot: Option<(u16, f64)>,
+    /// The note began on this tick.
+    fresh: bool,
+    /// An arpeggiator of the engine is playing the channel's chord.
+    arpeggiator: bool,
+    /// How that arpeggiator is stepped, if it steps at all.
+    stepper: Option<Stepper>,
+}
+
+/// The steps of a channel's arpeggio, which the player takes in the song's time.
+#[derive(Clone, Copy)]
+struct Stepper {
+    rate: ArpRate,
+    /// When the next step is, in ticks from the start of the tick being played.
+    next: f64,
+    /// It has been through the end of a tick (one that began on this tick has not).
+    counting: bool,
+}
+
+/// A step this close to the start of a tick, in ticks, is on it: sums of
+/// step lengths that are not whole ticks (a triplet's) come out a hair off.
+const ON_THE_TICK: f64 = 1.0e-4;
+
+impl Channel {
+    fn new(part: u16) -> Channel {
+        Channel { part, patch: false, looped: false, heard: true, rate: 0.0, volume: 0.0, pan: 0.0, slot: None, fresh: false, arpeggiator: false, stepper: None }
+    }
 }
 
 /// The engine's voices as the replayer sees them.
@@ -158,6 +190,9 @@ impl Adapter<'_, '_> {
         if started && rate <= 0.0 {
             self.voices.set_rate(part, channel as u32 + 1, 0.0, 0.0);
         }
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.slot = started.then_some((trigger.slot, trigger.position));
+        }
         started
     }
 }
@@ -171,11 +206,12 @@ impl Channels for Adapter<'_, '_> {
         if was.part != own {
             self.voices.kill(was.part, handle);
         }
-        let mut now = Channel { part: own, patch: false, looped: false, heard: was.heard, rate: start.rate, volume: start.volume, pan: start.pan };
+        let mut now = Channel { heard: was.heard, rate: start.rate, volume: start.volume, pan: start.pan, fresh: true, ..Channel::new(own) };
         match start.source {
             Source::Sample(sample) => {
                 if self.start_sample(channel, sample, start.offset, start.rate, start.volume, start.pan) {
                     now.looped = self.song.samples.get(sample).is_some_and(|s| s.loop_range().is_some());
+                    now.slot = self.channels[channel].slot;
                 } else {
                     self.voices.kill(own, handle);
                 }
@@ -220,34 +256,75 @@ impl Channels for Adapter<'_, '_> {
     }
 
     fn stop(&mut self, _frame: u32, channel: usize) {
-        if let Some(ch) = self.channels.get(channel) {
+        if let Some(ch) = self.channels.get_mut(channel) {
             self.voices.kill(ch.part, channel as u32 + 1);
+            (ch.arpeggiator, ch.stepper) = (false, None);
         }
     }
 
     fn release(&mut self, _frame: u32, channel: usize) {
-        // A sample is faded by the replayer; a patch has a release of its own.
-        if let Some(ch) = self.channels.get(channel).filter(|ch| ch.patch) {
-            self.voices.note_off(ch.part, channel as u32 + 1);
+        let Some(ch) = self.channels.get_mut(channel) else { return };
+        let handle = channel as u32 + 1;
+        if ch.patch {
+            // A patch has a release of its own; an arpeggiator ends with its note.
+            self.voices.note_off(ch.part, handle);
+            (ch.arpeggiator, ch.stepper) = (false, None);
+        } else if ch.arpeggiator && ch.stepper.is_some() {
+            // A sample is faded by the replayer. An arpeggiator strikes no
+            // more notes; the one sounding is left to finish.
+            self.voices.arp(ch.part, handle, 0.0, 0, &[]);
+            (ch.arpeggiator, ch.stepper) = (false, None);
         }
     }
 
     fn set_arpeggio(&mut self, _frame: u32, channel: usize, arpeggio: Option<&Arpeggio>) {
-        let Some(ch) = self.channels.get(channel) else { return };
+        let Some(&was) = self.channels.get(channel) else { return };
         let handle = channel as u32 + 1;
+        let order = |order: ArpOrder| match order {
+            ArpOrder::Up => crate::arp::ORDER_UP,
+            ArpOrder::Down => crate::arp::ORDER_DOWN,
+            ArpOrder::UpDown => crate::arp::ORDER_UP_DOWN,
+            ArpOrder::Written => crate::arp::ORDER_AS_GIVEN,
+            ArpOrder::Random => crate::arp::ORDER_RANDOM,
+            ArpOrder::UpDownEnds => crate::arp::ORDER_UP_DOWN_ENDS,
+            ArpOrder::Together => crate::arp::ORDER_TOGETHER,
+        };
+        let mut now = Channel { arpeggiator: false, stepper: None, ..was };
         match arpeggio {
-            None => self.voices.arp(ch.part, handle, 0.0, 0, &[]),
+            None => self.voices.arp(was.part, handle, 0.0, 0, &[]),
+            // One voice stepping by itself, as songs have always had it.
+            Some(a) if a.arp.is_some_and(|arp| arp.plain()) => self.voices.arp(was.part, handle, a.rate, order(a.order), a.offsets()),
+            // Anything else is an arpeggiator's, stepped from here: it
+            // takes over the note that has just begun, or the one sounding.
             Some(a) => {
-                let order = match a.order {
-                    ChordOrder::Up => crate::arp::ORDER_UP,
-                    ChordOrder::Down => crate::arp::ORDER_DOWN,
-                    ChordOrder::UpDown => crate::arp::ORDER_UP_DOWN,
-                    ChordOrder::Written => crate::arp::ORDER_AS_GIVEN,
-                    ChordOrder::Random => crate::arp::ORDER_RANDOM,
+                let (style, gate, octaves, swing, accents) = match a.arp {
+                    Some(arp) => (arp.style, arp.gate, arp.octaves, arp.swing, arp.accents),
+                    None => (ArpStyle::Strike, 1.0, 1, 0.0, 0),
                 };
-                self.voices.arp(ch.part, handle, a.rate, order, a.offsets());
+                self.voices.arp_notes(was.part, handle, -1.0, order(a.order), a.offsets());
+                self.voices.arp_style(was.part, handle, if style == ArpStyle::Strike { gate } else { 0.0 }, octaves, swing, accents);
+                if let Some((slot, position)) = was.slot.filter(|_| !was.patch) {
+                    self.voices.arp_sample(was.part, handle, Some(slot), position);
+                }
+                now.arpeggiator = true;
+                now.stepper = match (a.arp, was.stepper) {
+                    // Notes together do not step. A chord given to a note
+                    // that is sounding is struck there and then.
+                    (None, _) => {
+                        if was.arpeggiator && !was.fresh {
+                            self.voices.arp_step(was.part, handle, 0.0);
+                        }
+                        None
+                    }
+                    // An arpeggio that is running keeps its place and its next step.
+                    (Some(arp), Some(stepper)) if was.arpeggiator && !was.fresh => Some(Stepper { rate: arp.rate, ..stepper }),
+                    // A new one takes its first step on this frame, once
+                    // the tick has been played and its tempo is known.
+                    (Some(arp), _) => Some(Stepper { rate: arp.rate, next: 0.0, counting: false }),
+                };
             }
         }
+        self.channels[channel] = now;
     }
 
     fn queue(&mut self, _frame: u32, channel: usize, sample: Option<usize>) {
@@ -312,6 +389,13 @@ pub struct SongPlayer {
     raw: bool,
     /// The part of a frame the last tick's length left over.
     carry: f64,
+    /// The tick being played: how many frames it has, how many of them
+    /// have gone by, and its length with its fraction of a frame.
+    tick_frames: u32,
+    into: u32,
+    tick_length: f64,
+    /// The tempo of the tick being played, to notice when it changes.
+    tempo: u16,
 }
 
 impl SongPlayer {
@@ -333,9 +417,7 @@ impl SongPlayer {
             synths: song.instruments.iter().map(|i| i.synth.clone()).collect(),
             position: core::array::from_fn(|_| AtomicU32::new(0)),
         });
-        let channels = (0..song.channels())
-            .map(|c| Channel { part: first_part + c as u16, patch: false, looped: false, heard: true, rate: 0.0, volume: 0.0, pan: 0.0 })
-            .collect();
+        let channels = (0..song.channels()).map(|c| Channel::new(first_part + c as u16)).collect();
         let s = SongPlayer {
             patch_parts: vec![NO_PART; song.instruments.len()],
             muted: vec![false; song.channels()],
@@ -352,6 +434,10 @@ impl SongPlayer {
             repeat: true,
             volume: 1.0,
             carry: 0.0,
+            tick_frames: 0,
+            into: 0,
+            tick_length: 0.0,
+            tempo: 0,
         };
         s.publish();
         s
@@ -398,7 +484,48 @@ impl SongPlayer {
         self.player.set_repeat(self.repeat);
         // A pattern being played round and round: now the one sought.
         self.player.hold_order(self.loop_pattern);
+        self.rewind();
+    }
+
+    /// The next call plays a tick, on its own frame, with nothing left of the last.
+    fn rewind(&mut self) {
         self.carry = 0.0;
+        self.tick_frames = 0;
+        self.into = 0;
+        for ch in &mut self.channels {
+            (ch.arpeggiator, ch.stepper, ch.fresh) = (false, None, false);
+        }
+    }
+
+    /// The frame of the tick being played that a step `next` ticks into it falls on.
+    fn step_frame(&self, next: f64) -> u32 {
+        if next <= ON_THE_TICK {
+            0
+        } else if next >= 1.0 - ON_THE_TICK {
+            // The next tick's, or a later one's.
+            u32::MAX
+        } else {
+            (next * self.tick_length) as u32
+        }
+    }
+
+    /// Take every step of the channels' arpeggios that is due by now.
+    fn take_steps(&mut self, voices: &mut Voices<'_>) {
+        let p = self.player.position();
+        for c in 0..self.channels.len() {
+            let ch = self.channels[c];
+            let Some(mut stepper) = ch.stepper else { continue };
+            // (No more than a tick's worth at once, whatever the rate.)
+            for _ in 0..64 {
+                if self.step_frame(stepper.next) > self.into {
+                    break;
+                }
+                let ticks = stepper.rate.ticks(p.speed, p.tempo);
+                voices.arp_step(ch.part, c as u32 + 1, (ticks * self.tick_length) as f32);
+                stepper.next += ticks;
+            }
+            self.channels[c].stepper = Some(stepper);
+        }
     }
 
     /// Bring every channel to the loudness the song's volume, the mutes
@@ -425,40 +552,41 @@ impl Sequencer for SongPlayer {
             // Nothing to do until an event says otherwise; look in now and then.
             return (voices.sample_rate() / 50.0) as u32;
         }
-        let mut adapter = Adapter {
-            voices,
-            song: &self.song,
-            first_part: self.first_part,
-            first_slot: self.first_slot,
-            channels: &mut self.channels,
-            patch_parts: &self.patch_parts,
-            volume: self.volume,
-        };
-        let length = self.player.tick(&self.song, 0, &mut adapter);
-        // Step macros that keep time with the song go by once a tick.
-        for c in 0..self.channels.len() {
-            let ch = self.channels[c];
-            voices.macro_tick(ch.part);
-        }
-        if self.player.stopped() {
-            // The last notes are left to ring, but not for ever: a synth
-            // patch's note is let go, to die away as its patch says, and a
-            // sample that loops is faded out. A sample with an end plays to it.
-            self.state = STATE_STOPPED;
-            for (c, ch) in self.channels.iter_mut().enumerate() {
-                if ch.patch {
-                    voices.note_off(ch.part, c as u32 + 1);
-                } else if ch.looped {
-                    voices.fade(ch.part, c as u32 + 1, END_FADE);
-                    ch.looped = false;
+        if self.into >= self.tick_frames {
+            self.tick_frames = self.play_tick(voices);
+            self.into = 0;
+            if self.state != STATE_PLAYING {
+                return self.tick_frames;
+            }
+            // A tick has gone by for every arpeggio that was running. One
+            // timed in seconds has as long to go as it had, though the
+            // ticks may have changed length under it.
+            let tempo = self.player.position().tempo;
+            let stretch = if self.tempo != 0 { tempo as f64 / self.tempo as f64 } else { 1.0 };
+            self.tempo = tempo;
+            for ch in &mut self.channels {
+                ch.fresh = false;
+                let Some(stepper) = &mut ch.stepper else { continue };
+                if stepper.counting {
+                    stepper.next -= 1.0;
+                    if matches!(stepper.rate, ArpRate::PerSecond(_)) {
+                        stepper.next *= stretch;
+                    }
                 }
+                stepper.counting = true;
             }
         }
-        self.publish();
-        self.carry += length;
-        let whole = self.carry.floor();
-        self.carry -= whole;
-        whole as u32
+        self.take_steps(voices);
+        // Back at the next step that falls inside this tick, or at the next tick.
+        let mut wait = self.tick_frames - self.into;
+        for ch in &self.channels {
+            if let Some(stepper) = &ch.stepper {
+                wait = wait.min(self.step_frame(stepper.next).saturating_sub(self.into));
+            }
+        }
+        let wait = wait.max(1);
+        self.into += wait;
+        wait
     }
 
     fn as_any(&mut self) -> Option<&mut dyn core::any::Any> {
@@ -469,7 +597,7 @@ impl Sequencer for SongPlayer {
         self.player.seek(&self.song, 0, 0, &mut Nowhere);
         self.player.set_repeat(self.repeat);
         self.player.hold_order(self.loop_pattern);
-        self.carry = 0.0;
+        self.rewind();
         self.state = STATE_STOPPED;
         self.publish();
     }
@@ -551,6 +679,49 @@ impl Sequencer for SongPlayer {
         }
         self.publish();
         now
+    }
+}
+
+impl SongPlayer {
+    /// Play one tick of the song, on this frame. Returns how many whole
+    /// frames it lasts.
+    fn play_tick(&mut self, voices: &mut Voices<'_>) -> u32 {
+        let mut adapter = Adapter {
+            voices,
+            song: &self.song,
+            first_part: self.first_part,
+            first_slot: self.first_slot,
+            channels: &mut self.channels,
+            patch_parts: &self.patch_parts,
+            volume: self.volume,
+        };
+        let length = self.player.tick(&self.song, 0, &mut adapter);
+        // Step macros that keep time with the song go by once a tick.
+        for c in 0..self.channels.len() {
+            let ch = self.channels[c];
+            voices.macro_tick(ch.part);
+        }
+        if self.player.stopped() {
+            // The last notes are left to ring, but not for ever: a synth
+            // patch's note is let go, to die away as its patch says, and a
+            // sample that loops is faded out. A sample with an end plays to
+            // it. An arpeggio takes no more steps.
+            self.state = STATE_STOPPED;
+            for (c, ch) in self.channels.iter_mut().enumerate() {
+                (ch.arpeggiator, ch.stepper) = (false, None);
+                if ch.patch {
+                    voices.note_off(ch.part, c as u32 + 1);
+                } else if ch.looped {
+                    voices.fade(ch.part, c as u32 + 1, END_FADE);
+                    ch.looped = false;
+                }
+            }
+        }
+        self.publish();
+        self.carry += length;
+        let whole = self.carry.floor();
+        self.carry -= whole;
+        whole as u32
     }
 }
 

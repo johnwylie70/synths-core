@@ -370,7 +370,7 @@ impl Replayer {
             for c in 0..self.channels.len() {
                 let event = next.next_if(|e| e.channel as usize == c);
                 let cell = event.map_or(Cell::default(), |e| e.cell);
-                if chord_after_row(&mut self.channels[c].chord, event.and_then(|e| e.chord), cell, self.tempo) {
+                if chord_after_row(&mut self.channels[c].chord, event.and_then(|e| e.chord), cell, self.speed, self.tempo) {
                     self.channels[c].status |= CHORD;
                 }
                 self.read_cell(song, c, cell);

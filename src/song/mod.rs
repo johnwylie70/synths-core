@@ -107,18 +107,101 @@ impl Cell {
 /// The most notes a chord can have.
 pub const MAX_CHORD: usize = 8;
 
-/// How fast a chord's notes are stepped through.
+/// How fast an arpeggio's notes are stepped through.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ChordRate {
+pub enum ArpRate {
     /// So many steps in each tick of the song.
     PerTick(f32),
     /// So many steps a second, whatever the song's tempo.
     PerSecond(f32),
+    /// So many steps in each row of the pattern.
+    PerRow(f32),
+    /// A step for each note of this length, counting four rows to the beat
+    /// as trackers do: a sixteenth is a row.
+    Note(NoteLength),
 }
 
-/// The order a chord's notes are stepped through in.
+/// The length of a note: a half, a quarter, an eighth and so on, plain,
+/// dotted (half as long again) or as one of a triplet (two thirds as long).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteLength {
+    /// How many make a whole note: 1, 2, 4, 8, 16, 32 or 64.
+    pub division: u8,
+    pub feel: Feel,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ChordOrder {
+pub enum Feel {
+    #[default]
+    Plain,
+    Triplet,
+    Dotted,
+}
+
+impl NoteLength {
+    /// How many rows the note lasts: a whole note is sixteen.
+    pub fn rows(&self) -> f64 {
+        let plain = 16.0 / self.division.max(1) as f64;
+        match self.feel {
+            Feel::Plain => plain,
+            Feel::Triplet => plain * 2.0 / 3.0,
+            Feel::Dotted => plain * 1.5,
+        }
+    }
+
+    /// The note a text means: "1/16", "1/8t" (of a triplet), "1/4." (dotted).
+    pub fn parse(text: &str) -> Option<NoteLength> {
+        let rest = text::trim(text).strip_prefix("1/")?;
+        let (number, feel) = match rest.as_bytes().last()? {
+            b't' | b'T' => (&rest[..rest.len() - 1], Feel::Triplet),
+            b'.' | b'd' => (&rest[..rest.len() - 1], Feel::Dotted),
+            _ => (rest, Feel::Plain),
+        };
+        let division = match number {
+            "1" => 1,
+            "2" => 2,
+            "4" => 4,
+            "8" => 8,
+            "16" => 16,
+            "32" => 32,
+            "64" => 64,
+            _ => return None,
+        };
+        Some(NoteLength { division, feel })
+    }
+
+    /// The text `parse` reads.
+    pub fn name(&self) -> String {
+        let end = match self.feel {
+            Feel::Plain => "",
+            Feel::Triplet => "t",
+            Feel::Dotted => ".",
+        };
+        text::join(&["1/", &text::int(self.division as i64), end])
+    }
+}
+
+impl ArpRate {
+    /// How many ticks a step lasts, in a song with `speed` ticks to the row
+    /// at `tempo` beats a minute (a tick lasts 2.5 / tempo seconds).
+    pub fn ticks(&self, speed: u16, tempo: u16) -> f64 {
+        let ticks = match *self {
+            ArpRate::PerTick(n) => 1.0 / n as f64,
+            ArpRate::PerSecond(n) => tempo as f64 / (2.5 * n as f64),
+            ArpRate::PerRow(n) => speed as f64 / n as f64,
+            ArpRate::Note(length) => speed as f64 * length.rows(),
+        };
+        if ticks.is_finite() {
+            ticks.clamp(1.0e-3, 1.0e6)
+        } else {
+            1.0
+        }
+    }
+}
+
+/// The order an arpeggio's notes are stepped through in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArpOrder {
     /// Lowest to highest, round and round.
     #[default]
     Up,
@@ -128,28 +211,87 @@ pub enum ChordOrder {
     /// In the order the chord lists them.
     Written,
     Random,
+    /// Up and then back down, with the top and the bottom note played twice.
+    UpDownEnds,
+    /// Every note at once on each step: a chord struck again and again.
+    Together,
 }
 
-/// A chord played the way the Commodore 64 played them: one voice stepping
-/// through its notes so fast that the ear hears them together. It belongs
-/// to a note in a pattern and carries on until the channel's next note, or
-/// until an event switches it off.
+/// How an arpeggio moves from one note to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArpStyle {
+    /// One voice, as the Commodore 64 played chords: the pitch jumps and
+    /// the note's envelope carries on.
+    #[default]
+    Slide,
+    /// Each step is a new note, struck afresh, as a player's arpeggio is.
+    Strike,
+}
+
+/// How a chord's notes are played one at a time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arp {
+    pub rate: ArpRate,
+    pub order: ArpOrder,
+    pub style: ArpStyle,
+    /// Struck notes: how much of its step each is held, 0.05 to 1.
+    pub gate: f32,
+    /// How many octaves the pattern runs up through, 1 to 4.
+    pub octaves: u8,
+    /// How far every second step is put back, 0 to 0.75 of a step.
+    pub swing: f32,
+    /// How hard each step is struck: four bits a step, the first lowest, 15
+    /// for full and 0 for a rest, as long as its last level that is not 0.
+    /// 0 for every step at full.
+    pub accents: u32,
+}
+
+impl Arp {
+    /// What a `chord` meant before chords and arpeggios were told apart,
+    /// and still the Commodore 64's chord: one voice, a step a tick, upwards.
+    pub const FAST: Arp = Arp { rate: ArpRate::PerTick(1.0), order: ArpOrder::Up, style: ArpStyle::Slide, gate: 0.5, octaves: 1, swing: 0.0, accents: 0 };
+
+    /// A player's arpeggio: a new note each sixteenth, upwards, held for
+    /// half its step.
+    pub const SIXTEENTHS: Arp = Arp { rate: ArpRate::Note(NoteLength { division: 16, feel: Feel::Plain }), style: ArpStyle::Strike, ..Arp::FAST };
+
+    /// Is this one a voice can play by itself, as songs have always had
+    /// it: one voice, timed in ticks or seconds, with nothing newer asked?
+    /// (Then it is timed at the tempo of the row it begins on.)
+    pub fn plain(&self) -> bool {
+        self.style == ArpStyle::Slide
+            && matches!(self.rate, ArpRate::PerTick(_) | ArpRate::PerSecond(_))
+            && (self.order as u8) <= ArpOrder::Random as u8
+            && self.octaves <= 1
+            && self.swing == 0.0
+    }
+
+    /// The accents as a list: each step's level, 0 to 15.
+    pub fn accent_list(&self) -> Vec<u8> {
+        let len = 8 - self.accents.leading_zeros() as usize / 4;
+        (0..len).map(|i| (self.accents >> (4 * i) & 15) as u8).collect()
+    }
+}
+
+/// A chord: several notes on one note of a pattern, sounding together, or
+/// with `arp` one at a time. It belongs to a note and carries on until the
+/// channel's next note, or until an event switches it off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chord {
     /// Each note of the chord, in semitones from the note it is on; the note
     /// itself is 0 and has to be listed to be heard.
     pub offsets: [i8; MAX_CHORD],
-    /// How many of `offsets` are used. None means "stop the chord".
+    /// How many of `offsets` are used. None means "stop the arpeggio".
     pub count: u8,
-    pub rate: ChordRate,
-    pub order: ChordOrder,
+    /// How the notes are played one at a time; `None` for all together.
+    pub arp: Option<Arp>,
 }
 
 impl Chord {
-    /// The event that stops a channel's chord.
-    pub const OFF: Chord = Chord { offsets: [0; MAX_CHORD], count: 0, rate: ChordRate::PerTick(1.0), order: ChordOrder::Up };
+    /// The event that stops a channel's arpeggio.
+    pub const OFF: Chord = Chord { offsets: [0; MAX_CHORD], count: 0, arp: None };
 
-    /// A chord of these offsets (at most 8 are kept), one step a tick, upwards.
+    /// A chord of these offsets (at most 8 are kept), sounding together.
     pub fn new(offsets: &[i8]) -> Chord {
         let mut chord = Chord::OFF;
         for (slot, o) in chord.offsets.iter_mut().zip(offsets) {
@@ -157,6 +299,11 @@ impl Chord {
         }
         chord.count = offsets.len().min(MAX_CHORD) as u8;
         chord
+    }
+
+    /// A chord of these offsets, played one at a time.
+    pub fn arp(offsets: &[i8], arp: Arp) -> Chord {
+        Chord { arp: Some(arp), ..Chord::new(offsets) }
     }
 
     pub fn offsets(&self) -> &[i8] {
@@ -167,12 +314,12 @@ impl Chord {
         self.count == 0
     }
 
-    /// The chord that the trackers' arpeggio effect 0xy plays: the note, x
+    /// The arpeggio that the trackers' effect 0xy plays: the note, x
     /// semitones up and y semitones up, a step a tick. For an editor turning
-    /// an imported effect into a chord; the replayer plays 0xy itself, tick
-    /// by tick, because the old trackers' quirks do not fit a plain chord.
+    /// an imported effect into an arpeggio; the replayer plays 0xy itself,
+    /// tick by tick, because the old trackers' quirks do not fit a plain one.
     pub fn from_effect(param: u8) -> Chord {
-        Chord { order: ChordOrder::Written, ..Chord::new(&[0, (param >> 4) as i8, (param & 15) as i8]) }
+        Chord::arp(&[0, (param >> 4) as i8, (param & 15) as i8], Arp { order: ArpOrder::Written, ..Arp::FAST })
     }
 
     /// The offsets a chord's name means: "maj", "min", "m7", "sus4" and so
@@ -231,8 +378,8 @@ impl Chord {
     }
 }
 
-/// A cell and where it is in its pattern, with the chord it starts or
-/// stops, if any.
+/// A cell and where it is in its pattern, with the chord or arpeggio it
+/// starts or stops, if any.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Event {
     pub row: u16,

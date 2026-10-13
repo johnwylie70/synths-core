@@ -12,7 +12,10 @@ use super::sha256::{hex, sha256};
 use super::*;
 
 pub const FORMAT: &str = "synths-song";
-pub const VERSION: i64 = 1;
+/// The version this code reads up to. Version 2 tells a chord (its notes
+/// together) from an arpeggio (one at a time); in version 1 a `chord` was
+/// always the fast one-voice arpeggio.
+pub const VERSION: i64 = 2;
 
 /// A sample with this many frames or fewer, in 8 bits, is written into the
 /// JSON itself as a list of numbers; anything bigger goes in a WAV file.
@@ -48,13 +51,26 @@ pub fn is_native(text: &str) -> bool {
 const VOLUME_COMMANDS: [char; 10] = ['-', '+', 'D', 'U', 'S', 'V', 'P', 'L', 'R', 'M'];
 const VIBRATO_WAVES: [&str; 4] = ["sine", "square", "ramp-up", "ramp-down"];
 
-const CHORD_ORDERS: [(&str, ChordOrder); 5] = [
-    ("up", ChordOrder::Up),
-    ("down", ChordOrder::Down),
-    ("updown", ChordOrder::UpDown),
-    ("written", ChordOrder::Written),
-    ("random", ChordOrder::Random),
+/// The orders of an arpeggio. The first five are the ones `chordOrder` had.
+const ARP_ORDERS: [(&str, ArpOrder); 7] = [
+    ("up", ArpOrder::Up),
+    ("down", ArpOrder::Down),
+    ("updown", ArpOrder::UpDown),
+    ("written", ArpOrder::Written),
+    ("random", ArpOrder::Random),
+    ("updown2", ArpOrder::UpDownEnds),
+    ("together", ArpOrder::Together),
 ];
+
+/// The style an arpeggio has when it does not say: notes struck when it is
+/// timed as music is, in note lengths or rows; one voice whose pitch jumps
+/// when it is timed in ticks or seconds, as a sound chip's is.
+fn default_style(rate: ArpRate) -> ArpStyle {
+    match rate {
+        ArpRate::Note(_) | ArpRate::PerRow(_) => ArpStyle::Strike,
+        ArpRate::PerTick(_) | ArpRate::PerSecond(_) => ArpStyle::Slide,
+    }
+}
 
 fn effect_letter(effect: u8) -> char {
     char::from_digit(effect as u32, 36).unwrap_or('0').to_ascii_uppercase()
@@ -211,25 +227,46 @@ fn write_event(o: &mut Out, e: &Event) {
     match e.chord {
         None => {}
         Some(chord) if chord.is_off() => {
-            o.key("chord").s("\"off\"");
+            o.key("arp").s("\"off\"");
         }
-        Some(chord) => {
-            o.key("chord").list(chord.offsets().iter().map(|&x| x as i64));
-            match chord.rate {
-                ChordRate::PerTick(1.0) => {}
-                ChordRate::PerTick(n) => {
-                    o.key("chordSpeed");
-                    text::push_number(&mut o.0, n as f64);
+        Some(Chord { arp: None, .. }) => {
+            o.key("chord").list(e.chord.iter().flat_map(|c| c.offsets()).map(|&x| x as i64));
+        }
+        Some(chord @ Chord { arp: Some(arp), .. }) => {
+            o.key("arp").s("{\"chord\": ").list(chord.offsets().iter().map(|&x| x as i64));
+            let number = |o: &mut Out, key: &str, n: f32| {
+                o.key(key);
+                text::push_number(&mut o.0, n as f64);
+            };
+            match arp.rate {
+                ArpRate::Note(_) if arp.rate == Arp::SIXTEENTHS.rate => {}
+                ArpRate::Note(length) => {
+                    o.key("rate").quoted(&length.name());
                 }
-                ChordRate::PerSecond(n) => {
-                    o.key("chordHz");
-                    text::push_number(&mut o.0, n as f64);
-                }
+                ArpRate::PerRow(n) => number(o, "perRow", n),
+                ArpRate::PerTick(n) => number(o, "perTick", n),
+                ArpRate::PerSecond(n) => number(o, "hz", n),
             }
-            if chord.order != ChordOrder::Up {
-                let name = CHORD_ORDERS.iter().find(|(_, order)| *order == chord.order).map_or("up", |(n, _)| n);
-                o.key("chordOrder").s("\"").s(name).s("\"");
+            if arp.order != ArpOrder::Up {
+                let name = ARP_ORDERS.iter().find(|(_, order)| *order == arp.order).map_or("up", |(n, _)| n);
+                o.key("order").s("\"").s(name).s("\"");
             }
+            if arp.style != default_style(arp.rate) {
+                o.key("style").s(if arp.style == ArpStyle::Strike { "\"strike\"" } else { "\"slide\"" });
+            }
+            if arp.octaves != 1 {
+                o.key("octaves").n(arp.octaves as i64);
+            }
+            if arp.gate != Arp::FAST.gate {
+                number(o, "gate", arp.gate);
+            }
+            if arp.swing != 0.0 {
+                number(o, "swing", arp.swing);
+            }
+            if arp.accents != 0 {
+                o.key("accent").list(arp.accent_list().into_iter().map(|x| x as i64));
+            }
+            o.s("}");
         }
     }
     o.s("}");
@@ -292,7 +329,9 @@ pub fn save_in_one(song: &Song) -> String {
 fn write(song: &Song, mut blobs: Option<&mut Vec<Blob>>) -> String {
     let mut out = Out(String::new());
     let o = &mut out;
-    o.s("{\n  \"format\": \"").s(FORMAT).s("\",\n  \"version\": ").n(VERSION);
+    // A song with no chord in it says nothing an older reader would get wrong.
+    let chords = song.patterns.iter().any(|p| p.events.iter().any(|e| e.chord.is_some()));
+    o.s("{\n  \"format\": \"").s(FORMAT).s("\",\n  \"version\": ").n(if chords { VERSION } else { 1 });
     o.s(",\n  \"title\": ").quoted(&song.title);
     o.s(",\n  \"rules\": ").s(if song.rules == Rules::ProTracker { "\"protracker\"" } else { "\"ft2\"" });
     o.s(",\n  \"slides\": ").s(if song.frequency_table == FrequencyTable::Amiga { "\"amiga\"" } else { "\"linear\"" });
@@ -449,14 +488,12 @@ fn number(v: &Value, key: &str, min: f64, max: f64) -> Result<Option<f32>, LoadE
     }
 }
 
-/// An event's chord: a name ("min", "Cm7"), a list of semitone offsets, a
-/// list of note names, or "off". A name that begins with its root note
-/// gives the event its note if it has none.
-fn read_chord(e: &Value, cell: &mut Cell) -> Result<Option<Chord>, LoadError> {
-    let Some(v) = e.get("chord") else { return Ok(None) };
+/// The notes of a chord: a name ("min", "Cm7"), a list of semitone offsets
+/// or a list of note names. A name that begins with its root note gives the
+/// event its note if it has none.
+fn read_notes(v: &Value, cell: &mut Cell) -> Result<Chord, LoadError> {
     let bad = || invalid("\"chord\" must be a name like \"min\" or \"Cm7\", up to 8 offsets like [0, 3, 7], note names, or \"off\"");
-    let mut chord = match v {
-        Value::String(s) if s == "off" => return Ok(Some(Chord::OFF)),
+    match v {
         Value::String(s) => {
             let Some((root, offsets)) = Chord::named(s) else { return bad() };
             if let Some(root) = root {
@@ -466,7 +503,7 @@ fn read_chord(e: &Value, cell: &mut Cell) -> Result<Option<Chord>, LoadError> {
                     return invalid_text(text::join(&["the chord \"", s, "\" is not built on the event's note"]));
                 }
             }
-            Chord::new(offsets)
+            Ok(Chord::new(offsets))
         }
         Value::Array(items) if !items.is_empty() && items.len() <= MAX_CHORD => {
             let mut offsets = Vec::with_capacity(items.len());
@@ -484,25 +521,109 @@ fn read_chord(e: &Value, cell: &mut Cell) -> Result<Option<Chord>, LoadError> {
                     _ => return bad(),
                 }
             }
-            Chord::new(&offsets)
+            Ok(Chord::new(&offsets))
         }
-        _ => return bad(),
-    };
-    let speed = number(e, "chordSpeed", 0.01, 64.0)?;
-    let hz = number(e, "chordHz", 0.1, 1000.0)?;
-    chord.rate = match (speed, hz) {
-        (Some(_), Some(_)) => return invalid("give \"chordSpeed\" (steps a tick) or \"chordHz\" (steps a second), not both"),
-        (Some(n), None) => ChordRate::PerTick(n),
-        (None, Some(n)) => ChordRate::PerSecond(n),
-        (None, None) => ChordRate::PerTick(1.0),
-    };
-    if let Some(name) = text(e, "chordOrder")? {
-        chord.order = match CHORD_ORDERS.iter().find(|(n, _)| *n == name) {
-            Some((_, order)) => *order,
-            None => return invalid("\"chordOrder\" must be \"up\", \"down\", \"updown\", \"written\" or \"random\""),
-        };
+        _ => bad(),
     }
-    Ok(Some(chord))
+}
+
+fn read_order(name: &str, key: &str, known: &[(&str, ArpOrder)]) -> Result<ArpOrder, LoadError> {
+    match known.iter().find(|(n, _)| *n == name) {
+        Some((_, order)) => Ok(*order),
+        None => {
+            let mut what = text::join(&["\"", key, "\" must be"]);
+            for (i, (n, _)) in known.iter().enumerate() {
+                what.push_str(if i == 0 { " \"" } else if i + 1 == known.len() { " or \"" } else { ", \"" });
+                what.push_str(n);
+                what.push('"');
+            }
+            invalid_text(what)
+        }
+    }
+}
+
+/// An arpeggio as an event's `arp` has it: `{"chord": ..., "rate": "1/16", ...}`.
+fn read_arp(v: &Value, cell: &mut Cell) -> Result<Chord, LoadError> {
+    if !matches!(v, Value::Object(_)) {
+        return invalid("\"arp\" must be {\"chord\": ..., \"rate\": \"1/16\", ...} or \"off\"");
+    }
+    let Some(notes) = v.get("chord") else { return invalid("an \"arp\" needs a \"chord\": the notes it plays") };
+    let mut chord = read_notes(notes, cell)?;
+    let note = match v.get("rate") {
+        None | Some(Value::Null) => None,
+        Some(r) => match r.as_str().and_then(NoteLength::parse) {
+            Some(length) => Some(ArpRate::Note(length)),
+            None => return invalid("an arp's \"rate\" must be a note length: \"1/1\" to \"1/64\", with t for a triplet (\"1/8t\") or a dot for dotted (\"1/8.\")"),
+        },
+    };
+    let rates = [
+        note,
+        number(v, "perRow", 0.01, 64.0)?.map(ArpRate::PerRow),
+        number(v, "perTick", 0.01, 64.0)?.map(ArpRate::PerTick),
+        number(v, "hz", 0.1, 1000.0)?.map(ArpRate::PerSecond),
+    ];
+    if rates.iter().flatten().count() > 1 {
+        return invalid("an arp has one of \"rate\" (a note length), \"perRow\", \"perTick\" and \"hz\", not more");
+    }
+    let mut arp = Arp { rate: rates.into_iter().flatten().next().unwrap_or(Arp::SIXTEENTHS.rate), ..Arp::FAST };
+    if let Some(name) = text(v, "order")? {
+        arp.order = read_order(name, "order", &ARP_ORDERS)?;
+    }
+    arp.style = match text(v, "style")? {
+        None => default_style(arp.rate),
+        Some("slide") => ArpStyle::Slide,
+        Some("strike") => ArpStyle::Strike,
+        Some(_) => return invalid("an arp's \"style\" must be \"strike\" (each step a new note) or \"slide\" (one voice whose pitch jumps)"),
+    };
+    arp.octaves = int(v, "octaves", 1, 4, 1)? as u8;
+    arp.gate = number(v, "gate", 0.05, 1.0)?.unwrap_or(Arp::FAST.gate);
+    arp.swing = number(v, "swing", 0.0, 0.75)?.unwrap_or(0.0);
+    let accents = list(v, "accent")?;
+    for (i, level) in accents.iter().enumerate() {
+        match level.as_i64() {
+            Some(level) if i < 8 && (0..=15).contains(&level) && (level > 0 || i + 1 < accents.len()) => arp.accents |= (level as u32) << (4 * i),
+            _ => return invalid("an arp's \"accent\" must be up to 8 levels from 0 (a rest) to 15 (full), the last not 0"),
+        }
+    }
+    chord.arp = Some(arp);
+    Ok(chord)
+}
+
+/// What an event says of chords: `chord`, its notes together; `arp`, its
+/// notes one at a time; or, from a song written before the two were told
+/// apart (version 1, or `chordSpeed`, `chordHz` or `chordOrder` beside the
+/// chord), a `chord` that is the fast one-voice arpeggio.
+fn read_chord(e: &Value, cell: &mut Cell, version: i64) -> Result<Option<Chord>, LoadError> {
+    if e.get("arp").is_none() && e.get("chord").is_none() {
+        return Ok(None);
+    }
+    let (speed, hz, order) = (number(e, "chordSpeed", 0.01, 64.0)?, number(e, "chordHz", 0.1, 1000.0)?, text(e, "chordOrder")?);
+    let old = speed.is_some() || hz.is_some() || order.is_some();
+    let off = |v: &Value| v.as_str() == Some("off");
+    match (e.get("arp"), e.get("chord")) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => invalid("an event has a \"chord\" (its notes together) or an \"arp\" (one at a time), not both: an arp's notes are its own \"chord\""),
+        (Some(_), None) if old => invalid("\"chordSpeed\", \"chordHz\" and \"chordOrder\" go with \"chord\"; an \"arp\" has \"perTick\", \"hz\" and \"order\" of its own"),
+        (Some(v), None) | (None, Some(v)) if off(v) => Ok(Some(Chord::OFF)),
+        (Some(v), None) => read_arp(v, cell).map(Some),
+        (None, Some(v)) => {
+            let mut chord = read_notes(v, cell)?;
+            if old || version < 2 {
+                let mut arp = Arp::FAST;
+                arp.rate = match (speed, hz) {
+                    (Some(_), Some(_)) => return invalid("give \"chordSpeed\" (steps a tick) or \"chordHz\" (steps a second), not both"),
+                    (Some(n), None) => ArpRate::PerTick(n),
+                    (None, Some(n)) => ArpRate::PerSecond(n),
+                    (None, None) => ArpRate::PerTick(1.0),
+                };
+                if let Some(name) = order {
+                    arp.order = read_order(name, "chordOrder", &ARP_ORDERS[..5])?;
+                }
+                chord.arp = Some(arp);
+            }
+            Ok(Some(chord))
+        }
+    }
 }
 
 fn read_envelope(v: Option<&Value>) -> Result<Envelope, LoadError> {
@@ -600,7 +721,7 @@ fn fill(v: &Value, blob: &dyn Fn(&str) -> Option<Vec<u8>>, song: &mut Song) -> R
             if let Some(effect) = e.get("fx") {
                 (cell.effect, cell.param) = read_effect(effect)?;
             }
-            let chord = read_chord(e, &mut cell)?;
+            let chord = read_chord(e, &mut cell, version)?;
             pattern.events.push(Event { row, channel, cell, chord });
         }
     }

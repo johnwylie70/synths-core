@@ -187,7 +187,7 @@ fn mistakes_in_a_song_are_reported_in_words() {
     assert_eq!(native::load(r#"{"format": "something-else"}"#, &no_files), Err(LoadError::NotRecognised));
     assert_eq!(native::load(r#"[1, 2]"#, &no_files), Err(LoadError::NotRecognised));
     assert!(matches!(native::load("{", &no_files), Err(LoadError::Invalid(_))));
-    let newer = r#"{"format": "synths-song", "version": 2}"#;
+    let newer = r#"{"format": "synths-song", "version": 3}"#;
     assert!(matches!(native::load(newer, &no_files), Err(LoadError::Invalid(m)) if m.contains("newer")));
 }
 
@@ -244,7 +244,7 @@ fn the_example_song_loads_and_plays_to_its_end() {
 }
 
 #[test]
-fn chords_are_written_on_events_by_name_by_offsets_or_by_notes() {
+fn in_a_version_1_song_a_chord_is_the_fast_arpeggio_by_name_by_offsets_or_by_notes() {
     let text = r#"{"format": "synths-song", "version": 1, "channels": 1,
       "patterns": [{"rows": 16, "events": [
         {"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "min"},
@@ -259,21 +259,25 @@ fn chords_are_written_on_events_by_name_by_offsets_or_by_notes() {
     let song = native::load(text, &no_files).unwrap();
     let p = &song.patterns[0];
     let chord = |row: u16| p.chord(row, 0).unwrap();
-    assert_eq!(chord(0), Chord::new(&[0, 3, 7]));
-    assert_eq!(chord(1), Chord { order: ChordOrder::Down, ..Chord::new(&[0, 3, 7, 10]) });
+    assert_eq!(chord(0), Chord::arp(&[0, 3, 7], Arp::FAST));
+    assert_eq!(chord(1), Chord::arp(&[0, 3, 7, 10], Arp { order: ArpOrder::Down, ..Arp::FAST }));
     // A name with a root gives the event its note when it has none.
     assert_eq!(p.cell(2, 0).note, parse_note("F#4").unwrap());
-    assert_eq!(chord(2), Chord { rate: ChordRate::PerTick(2.0), ..Chord::new(&[0, 4, 7, 11]) });
-    assert_eq!(chord(3), Chord { rate: ChordRate::PerSecond(50.0), order: ChordOrder::UpDown, ..Chord::new(&[0, 4, 7, 12]) });
-    assert_eq!(chord(4), Chord { order: ChordOrder::Written, ..Chord::new(&[0, 4, 7, -12]) });
+    assert_eq!(chord(2), Chord::arp(&[0, 4, 7, 11], Arp { rate: ArpRate::PerTick(2.0), ..Arp::FAST }));
+    assert_eq!(chord(3), Chord::arp(&[0, 4, 7, 12], Arp { rate: ArpRate::PerSecond(50.0), order: ArpOrder::UpDown, ..Arp::FAST }));
+    assert_eq!(chord(4), Chord::arp(&[0, 4, 7, -12], Arp { order: ArpOrder::Written, ..Arp::FAST }));
     assert!(p.cell(5, 0).is_empty());
     assert_eq!(chord(5).offsets(), [0, 5, 7]);
     assert!(chord(6).is_off());
 
-    // Saved, they are offsets, and load back as the same song.
+    // Saved, they are arpeggios as version 2 writes them, with offsets
+    // for notes, and load back as the same song.
     let saved = native::save(&song);
-    assert!(saved.json.contains(r#""chord": [0, 4, 7, 12], "chordHz": 50, "chordOrder": "updown""#), "{}", saved.json);
-    assert!(saved.json.contains(r#"{"row": 6, "ch": 0, "chord": "off"}"#));
+    assert!(saved.json.contains(r#""version": 2,"#), "{}", saved.json);
+    assert!(saved.json.contains(r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": [0, 3, 7], "perTick": 1}}"#), "{}", saved.json);
+    assert!(saved.json.contains(r#""arp": {"chord": [0, 4, 7, 12], "hz": 50, "order": "updown"}"#), "{}", saved.json);
+    assert!(saved.json.contains(r#"{"row": 6, "ch": 0, "arp": "off"}"#));
+    assert!(!saved.json.contains("chordHz") && !saved.json.contains("chordOrder") && !saved.json.contains("chordSpeed"));
     assert_eq!(load_saved(&saved).unwrap(), song);
 
     let wrap = |event: &str| format!(r#"{{"format": "synths-song", "version": 1, "patterns": [{{"events": [{event}]}}]}}"#);
@@ -291,6 +295,172 @@ fn chords_are_written_on_events_by_name_by_offsets_or_by_notes() {
     }
 }
 
+/// A song of one pattern with these events, in version 2 unless it says otherwise.
+fn with_events(events: &str) -> String {
+    format!(r#"{{"format": "synths-song", "version": 2, "channels": 2, "patterns": [{{"rows": 32, "events": [{events}]}}], "instruments": [{{"sample": 0}}], "samples": [{{"wave": [50, -50], "loop": {{}}}}]}}"#)
+}
+
+#[test]
+fn a_chord_is_its_notes_together_and_an_arp_is_its_notes_one_at_a_time() {
+    let text = with_events(
+        r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "m7"},
+        {"row": 1, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "m7", "rate": "1/16", "order": "up", "octaves": 2, "gate": 0.5}},
+        {"row": 2, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj", "hz": 50}},
+        {"row": 3, "ch": 0, "ins": 1, "chord": "Gm"},
+        {"row": 4, "ch": 0, "note": "D-4", "arp": {"chord": ["D-4", "F-4", "A-4"]}},
+        {"row": 5, "ch": 0, "arp": {"chord": "F#sus4", "rate": "1/8t", "order": "updown2", "style": "slide", "swing": 0.25}},
+        {"row": 6, "ch": 0, "arp": {"chord": [0, 7], "perRow": 2, "order": "together", "gate": 0.25, "accent": [15, 0, 8]}},
+        {"row": 7, "ch": 0, "arp": {"chord": [0, 7], "perTick": 0.5, "style": "strike", "order": "random"}},
+        {"row": 8, "ch": 0, "arp": {"chord": [0, 12], "rate": "1/4.", "order": "down"}},
+        {"row": 9, "ch": 0, "arp": "off"},
+        {"row": 10, "ch": 0, "chord": "off"},
+        {"row": 11, "ch": 0, "note": "C-4", "chord": "maj", "chordHz": 50},
+        {"row": 12, "ch": 0, "note": "C-4", "chord": "maj", "chordOrder": "down"}"#,
+    );
+    let song = native::load(&text, &no_files).unwrap();
+    let p = &song.patterns[0];
+    let chord = |row: u16| p.chord(row, 0).unwrap();
+    let note = |division, feel| ArpRate::Note(NoteLength { division, feel });
+    let strike = Arp::SIXTEENTHS;
+    assert_eq!(strike, Arp { rate: note(16, Feel::Plain), order: ArpOrder::Up, style: ArpStyle::Strike, gate: 0.5, octaves: 1, swing: 0.0, accents: 0 });
+    // The four notes together.
+    assert_eq!(chord(0), Chord::new(&[0, 3, 7, 10]));
+    assert_eq!(chord(0).arp, None);
+    // A trance arpeggio in sixteenths over two octaves.
+    assert_eq!(chord(1), Chord::arp(&[0, 3, 7, 10], Arp { octaves: 2, ..strike }));
+    // The Commodore 64's chord: timed in seconds, so one voice unless it says otherwise.
+    assert_eq!(chord(2), Chord::arp(&[0, 4, 7], Arp { rate: ArpRate::PerSecond(50.0), ..Arp::FAST }));
+    assert!(chord(2).arp.unwrap().plain() && !chord(1).arp.unwrap().plain());
+    // A chord's root is the event's note when it has none, for both.
+    assert_eq!((chord(3), p.cell(3, 0).note), (Chord::new(&[0, 3, 7]), parse_note("G-4").unwrap()));
+    // An arp that says nothing but its notes: sixteenths, up, struck, held half a step.
+    assert_eq!(chord(4), Chord::arp(&[0, 3, 7], strike));
+    assert_eq!((chord(5), p.cell(5, 0).note), (Chord::arp(&[0, 5, 7], Arp { rate: note(8, Feel::Triplet), order: ArpOrder::UpDownEnds, style: ArpStyle::Slide, swing: 0.25, ..strike }), parse_note("F#4").unwrap()));
+    assert_eq!(chord(6), Chord::arp(&[0, 7], Arp { rate: ArpRate::PerRow(2.0), order: ArpOrder::Together, gate: 0.25, accents: 0x80F, ..strike }));
+    assert_eq!(chord(7), Chord::arp(&[0, 7], Arp { rate: ArpRate::PerTick(0.5), order: ArpOrder::Random, ..strike }));
+    assert_eq!(chord(8), Chord::arp(&[0, 12], Arp { rate: note(4, Feel::Dotted), order: ArpOrder::Down, ..strike }));
+    assert!(chord(9).is_off() && chord(10).is_off());
+    // The keys of before, beside a chord, still mean what they meant.
+    assert_eq!(chord(11), Chord::arp(&[0, 4, 7], Arp { rate: ArpRate::PerSecond(50.0), ..Arp::FAST }));
+    assert_eq!(chord(12), Chord::arp(&[0, 4, 7], Arp { order: ArpOrder::Down, ..Arp::FAST }));
+
+    // Saved: the new shape, with what is at its default left out, and the same song again.
+    let saved = native::save(&song);
+    for line in [
+        r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": [0, 3, 7, 10]}"#,
+        r#"{"row": 1, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": [0, 3, 7, 10], "octaves": 2}}"#,
+        r#"{"row": 2, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": [0, 4, 7], "hz": 50}}"#,
+        r#"{"row": 4, "ch": 0, "note": "D-4", "arp": {"chord": [0, 3, 7]}}"#,
+        r#""arp": {"chord": [0, 5, 7], "rate": "1/8t", "order": "updown2", "style": "slide", "swing": 0.25}}"#,
+        r#"{"row": 6, "ch": 0, "arp": {"chord": [0, 7], "perRow": 2, "order": "together", "gate": 0.25, "accent": [15, 0, 8]}}"#,
+        r#"{"row": 7, "ch": 0, "arp": {"chord": [0, 7], "perTick": 0.5, "order": "random", "style": "strike"}}"#,
+        r#"{"row": 8, "ch": 0, "arp": {"chord": [0, 12], "rate": "1/4.", "order": "down"}}"#,
+        r#"{"row": 9, "ch": 0, "arp": "off"}"#,
+        r#"{"row": 11, "ch": 0, "note": "C-4", "arp": {"chord": [0, 4, 7], "hz": 50}}"#,
+        r#"{"row": 12, "ch": 0, "note": "C-4", "arp": {"chord": [0, 4, 7], "perTick": 1, "order": "down"}}"#,
+    ] {
+        assert!(saved.json.contains(line), "{line}\n{}", saved.json);
+    }
+    assert!(saved.json.contains(r#""version": 2,"#));
+    assert_eq!(load_saved(&saved).unwrap(), song);
+    // And packed: the same song both ways, in version 2 of the packed form.
+    let packed = binary::save(&song);
+    assert_eq!(&packed[..6], b"SYSG\x02\x00");
+    assert_eq!(binary::load(&packed).unwrap(), song);
+    assert_eq!(binary::save(&binary::load(&packed).unwrap()), packed);
+}
+
+#[test]
+fn the_version_says_what_a_bare_chord_means() {
+    let events = r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "maj"}"#;
+    let two = native::load(&with_events(events), &no_files).unwrap();
+    assert_eq!(two.patterns[0].chord(0, 0), Some(Chord::new(&[0, 4, 7])));
+    for version in [r#""version": 1,"#, ""] {
+        let one = native::load(&with_events(events).replace(r#""version": 2,"#, version), &no_files).unwrap();
+        assert_eq!(one.patterns[0].chord(0, 0), Some(Chord::arp(&[0, 4, 7], Arp::FAST)));
+        // A version 1 song may still use the new key.
+        let arp = r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "arp": {"chord": "maj"}}"#;
+        let one = native::load(&with_events(arp).replace(r#""version": 2,"#, version), &no_files).unwrap();
+        assert_eq!(one.patterns[0].chord(0, 0), Some(Chord::arp(&[0, 4, 7], Arp::SIXTEENTHS)));
+    }
+    // A song with no chord in it is still written as version 1, and one
+    // that only has what version 1 could say still packs as version 1.
+    let plain = native::load(&with_events(r#"{"row": 0, "ch": 0, "note": "C-4", "ins": 1}"#), &no_files).unwrap();
+    assert!(native::save(&plain).json.contains(r#""version": 1,"#));
+    assert_eq!(&binary::save(&plain)[..6], b"SYSG\x01\x00");
+    let old = native::load(&with_events(r#"{"row": 0, "ch": 0, "note": "C-4", "chord": "maj", "chordHz": 60}, {"row": 4, "ch": 0, "arp": "off"}"#), &no_files).unwrap();
+    assert_eq!(&binary::save(&old)[..6], b"SYSG\x01\x00");
+    assert_eq!(binary::load(&binary::save(&old)).unwrap(), old);
+    assert_eq!(&binary::save(&two)[..6], b"SYSG\x02\x00");
+}
+
+#[test]
+fn every_rate_an_arp_can_have() {
+    // Ticks to a step at 6 ticks to the row and 125 beats a minute, where a
+    // tick is a fiftieth of a second and a row is a sixteenth note.
+    for (rate, ticks) in [
+        (r#""rate": "1/1""#, 96.0),
+        (r#""rate": "1/2""#, 48.0),
+        (r#""rate": "1/4""#, 24.0),
+        (r#""rate": "1/8""#, 12.0),
+        (r#""rate": "1/16""#, 6.0),
+        (r#""rate": "1/32""#, 3.0),
+        (r#""rate": "1/64""#, 1.5),
+        (r#""rate": "1/4t""#, 16.0),
+        (r#""rate": "1/8t""#, 8.0),
+        (r#""rate": "1/16t""#, 4.0),
+        (r#""rate": "1/8.""#, 18.0),
+        (r#""rate": "1/16.""#, 9.0),
+        (r#""perRow": 1"#, 6.0),
+        (r#""perRow": 3"#, 2.0),
+        (r#""perRow": 0.25"#, 24.0),
+        (r#""perTick": 1"#, 1.0),
+        (r#""perTick": 0.5"#, 2.0),
+        (r#""hz": 50"#, 1.0),
+        (r#""hz": 12.5"#, 4.0),
+    ] {
+        let text = with_events(&format!(r#"{{"row": 0, "ch": 0, "note": "C-4", "arp": {{"chord": "maj", {rate}}}}}"#));
+        let song = native::load(&text, &no_files).unwrap();
+        let arp = song.patterns[0].chord(0, 0).unwrap().arp.unwrap();
+        assert!((arp.rate.ticks(6, 125) - ticks).abs() < 1.0e-9, "{rate}: {}", arp.rate.ticks(6, 125));
+        // Struck when it is timed as music is, one voice when as a chip's.
+        assert_eq!(arp.style == ArpStyle::Strike, rate.contains("rate") || rate.contains("perRow"), "{rate}");
+        assert_eq!(load_saved(&native::save(&song)).unwrap(), song, "{rate}");
+        assert_eq!(binary::load(&binary::save(&song)).unwrap(), song, "{rate}");
+    }
+    // The song's speed moves what is counted in rows, and its tempo what is in seconds.
+    let sixteenth = ArpRate::Note(NoteLength::parse("1/16").unwrap());
+    assert_eq!((sixteenth.ticks(3, 125), sixteenth.ticks(6, 250), ArpRate::PerSecond(50.0).ticks(6, 250)), (3.0, 6.0, 2.0));
+    assert_eq!(NoteLength::parse("1/8t").unwrap().name(), "1/8t");
+    assert_eq!(NoteLength::parse("1/3"), None);
+}
+
+#[test]
+fn mistakes_in_a_chord_or_an_arp_are_reported_in_words() {
+    let message = |event: &str| match native::load(&with_events(event), &no_files) {
+        Err(LoadError::Invalid(m)) => m,
+        other => panic!("{event}: {other:?}"),
+    };
+    assert!(message(r#"{"chord": "maj", "arp": {"chord": "maj"}}"#).contains("not both"));
+    assert!(message(r#"{"arp": {"rate": "1/16"}}"#).contains("needs a \"chord\""));
+    assert!(message(r#"{"arp": "maj"}"#).contains("\"arp\" must be"));
+    assert!(message(r#"{"arp": {"chord": "maj", "rate": "1/5"}}"#).contains("note length"));
+    assert!(message(r#"{"arp": {"chord": "maj", "rate": 16}}"#).contains("note length"));
+    assert!(message(r#"{"arp": {"chord": "maj", "rate": "1/16", "hz": 50}}"#).contains("not more"));
+    assert!(message(r#"{"arp": {"chord": "maj", "perRow": 0}}"#).contains("\"perRow\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "hz": 5000}}"#).contains("\"hz\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "order": "sideways"}}"#).contains("\"up\", \"down\", \"updown\", \"written\", \"random\", \"updown2\" or \"together\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "style": "pluck"}}"#).contains("\"strike\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "octaves": 5}}"#).contains("\"octaves\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "gate": 0}}"#).contains("\"gate\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "swing": 0.9}}"#).contains("\"swing\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "accent": [15, 0]}}"#).contains("\"accent\""));
+    assert!(message(r#"{"arp": {"chord": "maj", "accent": [16]}}"#).contains("\"accent\""));
+    assert!(message(r#"{"arp": {"chord": "Xm"}}"#).contains("\"chord\" must be"));
+    assert!(message(r#"{"arp": {"chord": "maj"}, "chordHz": 50}"#).contains("go with \"chord\""));
+    assert!(message(r#"{"chord": "maj", "chordOrder": "together"}"#).contains("\"chordOrder\" must be \"up\", \"down\", \"updown\", \"written\" or \"random\""));
+}
+
 #[test]
 fn chord_names() {
     assert_eq!(Chord::named("maj"), Some((None, &[0i8, 4, 7][..])));
@@ -304,7 +474,7 @@ fn chord_names() {
     assert_eq!(Chord::named("M7"), Some((None, &[0i8, 4, 7, 11][..])));
     assert_eq!(Chord::named(""), None);
     assert_eq!(Chord::named("Hm"), None);
-    assert_eq!(Chord::from_effect(0x47), Chord { order: ChordOrder::Written, ..Chord::new(&[0, 4, 7]) });
+    assert_eq!(Chord::from_effect(0x47), Chord::arp(&[0, 4, 7], Arp { order: ArpOrder::Written, ..Arp::FAST }));
 }
 
 #[test]
@@ -313,7 +483,7 @@ fn a_packed_song_unpacks_as_the_same_song() {
         let mut song = busy_song(rules);
         song.restart = 1;
         song.instruments.push(Instrument { name: "lead".to_string(), patch: Some("my-lead".to_string()), ..Default::default() });
-        song.patterns[0].set_chord(0, 0, Some(Chord { rate: ChordRate::PerSecond(60.0), order: ChordOrder::UpDown, ..Chord::new(&[0, -5, 7, 12]) }));
+        song.patterns[0].set_chord(0, 0, Some(Chord::arp(&[0, -5, 7, 12], Arp { rate: ArpRate::PerSecond(60.0), order: ArpOrder::UpDown, ..Arp::FAST })));
         song.patterns[0].set_chord(9, 3, Some(Chord::OFF));
         song.instruments[0].keymap[40] = 1;
         song.samples[0].pan = None;
@@ -328,7 +498,7 @@ fn a_packed_song_unpacks_as_the_same_song() {
     // The first bytes are fixed: the magic, version 1, and the flags.
     let packed = binary::save(&busy_song(Rules::ProTracker));
     assert_eq!(&packed[..8], b"SYSG\x01\x00\x03\x00");
-    assert_eq!(binary::load(b"SYSG\x02\x00\x00\x00\x06\x7d\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00").map(|_| ()), Err(LoadError::Invalid("this packed song is newer than this player reads".to_string())));
+    assert_eq!(binary::load(b"SYSG\x03\x00\x00\x00\x06\x7d\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00").map(|_| ()), Err(LoadError::Invalid("this packed song is newer than this player reads".to_string())));
     assert_eq!(binary::load(b"SYSG\x01"), Err(LoadError::TooShort));
     assert_eq!(binary::load(b"nope"), Err(LoadError::NotRecognised));
 }
