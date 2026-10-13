@@ -1,0 +1,73 @@
+{
+  "format": "synths-song",
+  "version": 1,
+  "title": "First Steps",
+  "rules": "ft2",
+  "slides": "linear",
+  "speed": 6,
+  "tempo": 125,
+  "channels": 3,
+  "pan": [96, 160, 128],
+  "order": [0, 1, 0, 2],
+  "patterns": [
+    {"rows": 16, "events": [
+      {"row": 0, "ch": 0, "note": "C-5", "ins": 1},
+      {"row": 0, "ch": 1, "note": "C-3", "ins": 2},
+      {"row": 0, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 2, "ch": 0, "note": "E-5", "ins": 1},
+      {"row": 4, "ch": 0, "note": "G-5", "ins": 1},
+      {"row": 4, "ch": 2, "note": "C-6", "ins": 3, "vol": 24},
+      {"row": 6, "ch": 0, "note": "E-5", "ins": 1},
+      {"row": 8, "ch": 0, "note": "A-5", "ins": 1},
+      {"row": 8, "ch": 1, "note": "F-3", "ins": 2},
+      {"row": 8, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 10, "ch": 0, "note": "G-5", "ins": 1},
+      {"row": 12, "ch": 0, "note": "E-5", "ins": 1, "fx": "A02"},
+      {"row": 12, "ch": 2, "note": "C-6", "ins": 3, "vol": 24},
+      {"row": 14, "ch": 0, "note": "off"}
+    ]},
+    {"rows": 16, "events": [
+      {"row": 0, "ch": 0, "note": "D-5", "ins": 1},
+      {"row": 0, "ch": 1, "note": "G-3", "ins": 2},
+      {"row": 0, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 2, "ch": 0, "note": "F-5", "ins": 1},
+      {"row": 4, "ch": 0, "note": "A-5", "ins": 1},
+      {"row": 4, "ch": 2, "note": "C-6", "ins": 3, "vol": 24},
+      {"row": 6, "ch": 0, "note": "F-5", "ins": 1},
+      {"row": 8, "ch": 0, "note": "B-5", "ins": 1, "fx": "484"},
+      {"row": 8, "ch": 1, "note": "G-3", "ins": 2, "fx": "047"},
+      {"row": 8, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 9, "ch": 0, "fx": "484"},
+      {"row": 10, "ch": 0, "fx": "484"},
+      {"row": 11, "ch": 0, "fx": "484"},
+      {"row": 12, "ch": 0, "note": "G-5", "ins": 1},
+      {"row": 12, "ch": 2, "note": "C-6", "ins": 3, "vol": 24},
+      {"row": 14, "ch": 0, "note": "off"},
+      {"row": 14, "ch": 2, "note": "C-6", "ins": 3, "vol": 16}
+    ]},
+    {"rows": 16, "events": [
+      {"row": 0, "ch": 0, "note": "G-5", "ins": 1},
+      {"row": 0, "ch": 1, "note": "G-3", "ins": 2},
+      {"row": 0, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 2, "ch": 0, "note": "F-5", "ins": 1},
+      {"row": 4, "ch": 0, "note": "E-5", "ins": 1},
+      {"row": 4, "ch": 2, "note": "C-6", "ins": 3, "vol": 24},
+      {"row": 6, "ch": 0, "note": "D-5", "ins": 1},
+      {"row": 8, "ch": 0, "note": "C-5", "ins": 1},
+      {"row": 8, "ch": 1, "note": "C-3", "ins": 2},
+      {"row": 8, "ch": 2, "note": "C-4", "ins": 3},
+      {"row": 12, "ch": 0, "note": "off"},
+      {"row": 12, "ch": 1, "note": "off"}
+    ]}
+  ],
+  "instruments": [
+    {"name": "lead", "sample": 0, "volumeEnvelope": {"points": [[0, 64], [3, 40], [24, 24]], "sustain": 2}, "fadeout": 4096},
+    {"name": "bass", "sample": 1, "volumeEnvelope": {"points": [[0, 64], [48, 48]], "sustain": 1}, "fadeout": 2048},
+    {"name": "tick", "sample": 2, "volumeEnvelope": {"points": [[0, 48], [3, 0]]}}
+  ],
+  "samples": [
+    {"name": "square", "wave": [90, 90, 90, 90, 90, 90, 90, 90, -90, -90, -90, -90, -90, -90, -90, -90], "loop": {"start": 0, "length": 16}, "volume": 40, "transpose": -12},
+    {"name": "triangle", "wave": [0, 30, 60, 90, 120, 90, 60, 30, 0, -30, -60, -90, -120, -90, -60, -30], "loop": {"start": 0, "length": 16}, "transpose": -12},
+    {"name": "noise", "wave": [57, -92, 13, 101, -44, 76, -118, 5, 88, -61, 34, -9, 120, -77, 49, -103, 22, 66, -35, 97, -84, 11, -55, 109, -20, 73, -112, 41, -68, 90, -3, 28], "loop": {"start": 0, "length": 32}, "transpose": 24}
+  ]
+}

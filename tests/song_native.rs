@@ -214,3 +214,23 @@ fn damaged_song_text_never_panics() {
     }
     assert!(loaded > 50, "some damage leaves a song that still loads ({loaded})");
 }
+
+#[test]
+fn the_example_song_loads_and_plays_to_its_end() {
+    let text = include_str!("../examples/songs/first-steps.json");
+    let song = native::load(text, &no_files).unwrap();
+    assert_eq!(song.title, "First Steps");
+    assert_eq!((song.channels(), song.orders.len(), song.patterns.len()), (3, 4, 3));
+    let mut player = synths_core::replayer::Player::new(&song, RATE);
+    player.set_repeat(false);
+    let mut mixer = Mixer::new(&song, RATE);
+    while !player.ended() {
+        play(&song, &mut player, &mut mixer, 1024);
+    }
+    // Four patterns of 16 rows of 6 ticks of 882 frames, to the nearest block.
+    assert!(mixer.left.len().abs_diff(4 * 16 * 6 * 882) <= 1024);
+    let peak = mixer.left.iter().chain(&mixer.right).fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(peak > 0.05 && peak < 1.0, "peak {peak}");
+    // And it survives being saved.
+    assert_eq!(native::load(&native::save(&song).json, &no_files).unwrap(), song);
+}
