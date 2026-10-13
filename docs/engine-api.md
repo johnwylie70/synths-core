@@ -18,6 +18,7 @@ sound, the levels and the notes that are playing.
 - [Samples](#samples)
 - [Step macros](#step-macros)
 - [The arpeggio of a note](#the-arpeggio-of-a-note)
+- [Songs](#songs)
 - [Scope, meters and notes](#scope-meters-and-notes)
 - [How notes get voices](#how-notes-get-voices)
 - [The path of the sound](#the-path-of-the-sound)
@@ -103,6 +104,16 @@ int32_t        synths_macro_set(SynthsEngine *engine, uint32_t part, const float
 uint32_t       synths_scope_read(const SynthsEngine *engine, uint32_t source, float *out, uint32_t frames);
 uint32_t       synths_levels_read(const SynthsEngine *engine, uint32_t source, uint32_t count, float *out);
 uint32_t       synths_notes_read(const SynthsEngine *engine, uint32_t part, uint32_t *out);
+
+int32_t        synths_song_file(const uint8_t *name, uint32_t name_len, const uint8_t *data, uint32_t len);
+int32_t        synths_song_load(SynthsEngine *engine, const uint8_t *data, uint32_t len,
+                                uint32_t first_part, uint32_t first_slot);
+const uint8_t *synths_song_error(void);
+void           synths_song_unload(SynthsEngine *engine);
+uint32_t       synths_song_info(const SynthsEngine *engine, uint32_t *out);
+uint32_t       synths_song_position(const SynthsEngine *engine, uint32_t *out);
+uint32_t       synths_song_patch_name(const SynthsEngine *engine, uint32_t instrument,
+                                      uint8_t *out, uint32_t capacity);
 ```
 
 In WebAssembly a pointer is a `u32` offset into the module's `memory`, `float`
@@ -273,6 +284,61 @@ part together. Returns 8, or 0 for a part that does not exist.
 In WebAssembly `out` must be inside the module's memory: get it once with
 `synths_alloc` and keep it.
 
+### Songs
+
+These load a tracker song and read where it is; playing it is done with the
+`song` event. See [Songs](#songs) for the whole of it.
+
+**`synths_song_load(engine, data: *const u8, len, first_part, first_slot) -> i32`**
+Load a song from the bytes of a file: a MOD, an XM, or one of our own JSON
+songs (`docs/song-format.md`). The engine works out which. The song's
+channels take the parts from `first_part` on, one each, and its samples the
+sample slots from `first_slot` on; a song already loaded is unloaded first.
+The song is then ready and stopped. Returns one of:
+
+| result | meaning |
+|---|---|
+| `SONG_OK 0` | Loaded. |
+| `SONG_NULL -1` | A null pointer. |
+| `SONG_BAD -2` | Not a song the engine knows, or too damaged to load. |
+| `SONG_MISSING_FILE -3` | A JSON song names a sample file that was not given with `synths_song_file`. |
+| `SONG_NO_PARTS -4` | The song has more channels than there are parts from `first_part` on. |
+| `SONG_NO_SLOTS -5` | The song has more samples than there are slots from `first_slot` on. |
+
+It copies what it needs: `data` can be freed afterwards. It allocates, so it
+is for between renders.
+
+**`synths_song_error() -> *const u8`** Why the last `synths_song_load` failed,
+in plain words, as UTF-8 text ending in a zero byte: for a JSON song it names
+the key that is wrong. Empty after a load that worked. The pointer is good
+until the next `synths_song_load`.
+
+**`synths_song_file(name: *const u8, name_len, data: *const u8, len) -> i32`**
+Give a sample file for the next song loaded. `name` is the path the song's
+JSON gives for it (`name_len` bytes of UTF-8, no zero byte) and `data` the
+WAV file. Call it once for each file, then `synths_song_load`, which uses the
+files and forgets them. Returns 0, or -1 for a null pointer or a name that is
+not UTF-8. MOD and XM files carry their samples and need none.
+
+**`synths_song_unload(engine)`** Take the song out: its voices are cut and
+its sample slots emptied. The parts keep the settings the song gave them.
+
+**`synths_song_info(engine, out: *mut u32) -> u32`** Write eight facts about
+the loaded song into `out`: channels, orders, patterns, instruments, samples,
+first part, first slot, and its rules (0 FastTracker 2, 1 ProTracker).
+Returns 8, or 0 (writing nothing) if no song is loaded.
+
+**`synths_song_position(engine, out: *mut u32) -> u32`** Write where the song
+is into `out`, ten numbers, and return 10. Like the three functions above it
+only reads, and may be called while another thread renders. See
+[Where the song is](#where-the-song-is).
+
+**`synths_song_patch_name(engine, instrument, out: *mut u8, capacity) -> u32`**
+Copy the name of the synth patch an instrument plays into `out`, at most
+`capacity` bytes of UTF-8 with no zero byte. Instruments count from 1.
+Returns the name's whole length: 0 for an instrument that plays samples, or
+when no song is loaded. See [Instruments that are synth patches](#instruments-that-are-synth-patches).
+
 ## Events
 
 ### The event record
@@ -343,6 +409,7 @@ millisecond at 48 kHz.
 | 12 | `macro_tick` | one part or all | | | |
 | 13 | `arp` | one part or all | handle, or 0 for the part's next note | steps a second | order |
 | 14 | `arp_more` | one part or all | handle, or 0 for the part's next note | | |
+| 15 | `song` | | what to do, 0 to 6 | its first number | its second number |
 
 Events 13 and 14 also use `z` and `b`; see [their descriptions](#the-arpeggio-of-a-note).
 
@@ -412,6 +479,10 @@ ticks. See [Step macros](#step-macros).
 
 **13 `arp`**, **14 `arp_more`** Give a note an arpeggio, change it, or take it
 away. See [The arpeggio of a note](#the-arpeggio-of-a-note).
+
+**15 `song`** Steer the loaded song: play, pause, stop, seek and so on,
+chosen by `a`. `part` is ignored. With no song loaded it does nothing. See
+[Steering the song](#steering-the-song).
 
 ### Handles
 
@@ -902,6 +973,122 @@ event(now, 13 /* arp */,     0, 0, 0, 0, 3, 0x00070300);  // x: 50 a second, y: 
 event(now, 1  /* note_on */, 0, 0, 60, 0.8);
 ```
 
+## Songs
+
+The engine can play a whole tracker song by itself. A song is loaded with
+`synths_song_load` from the bytes of a MOD file, an XM file, or one of our own
+JSON songs. From then on the song's player lives inside the engine: it is
+called from within the render on the exact frame of each of the song's ticks,
+so the song keeps perfect time whatever the block size, and the host has
+nothing to schedule.
+
+MOD files are played by ProTracker's rules and XM files by FastTracker 2's,
+quirks included. Our own songs say which they want.
+
+### What a song takes over
+
+- **Parts.** Each channel of the song has a part to itself: channel 0 is
+  `first_part`, channel 1 the next, and so on. Loading sets those parts up to
+  play samples as they are: `volume` 0.5, `pan` 0, the amp envelope full on
+  at once and gone at once (`amp.attack`, `amp.decay` and `amp.release` 0,
+  `amp.sustain` 1), `velocity` 0 and `filter.type` off. For a MOD or an XM,
+  `sample.antialias` is turned off too, for the sound those trackers had; for
+  one of our own songs it is turned on. Everything else about the parts is
+  left alone, so their effect sends, drive and so on are the host's to set,
+  before or after loading. The channel's one voice has the handle
+  `channel + 1`.
+- **Sample slots.** The song's samples go into the slots from `first_slot`
+  on, in order, replacing what was there. A sample of the song that is empty
+  leaves its slot empty.
+- **The sequencer.** There is one song at a time: loading another unloads the
+  first.
+
+The host can go on playing notes of its own on other parts while a song
+plays. It should leave the song's parts and slots alone, and not use handles
+1 to the number of channels on the parts it has given to synth patches (see
+below).
+
+A MOD has 31 samples and 4 to 32 channels; an XM can have 64 channels and
+several samples for each of up to 128 instruments. `SONG_NO_PARTS` and
+`SONG_NO_SLOTS` say when a song does not fit where it was put.
+
+### Steering the song
+
+A `song` event (type 15) tells the song what to do, on the event's exact
+frame. `a` says what; `x` and `y` are its numbers.
+
+| `a` | what | `x` | `y` | |
+|---|---|---|---|---|
+| 0 | stop | | | Cut the song's voices and go back to the start. |
+| 1 | play | | | Start, or carry on after a pause. After a stop, or at the end of a song that does not repeat, it starts from the top. The first tick is played on this frame. |
+| 2 | pause | | | Hold every sample where it is, in silence, until `play`. |
+| 3 | seek | order | row | Go to a row of a place in the order. The song's voices are cut. If the song is playing it carries on from there on this frame; if not, that is where `play` will start. Numbers past the end are brought back to the last order and row. |
+| 4 | repeat | 0 off, 1 on | | On (as it is to begin with), the song goes round and round as trackers play it. Off, it stops at its end and leaves the last notes to ring. |
+| 5 | volume | 0 to 2 | | How loud the song is; 1 to begin with. It sets the `volume` of the song's parts to half of this, sliding there over 20 milliseconds. |
+| 6 | patch part | instrument, from 1 | part | Say which part plays an instrument that is a synth patch. |
+
+In JavaScript, with the `event` function of [A host loop](#a-host-loop):
+
+```js
+event(0, 15 /* song */, 0, 1 /* play */, 0, 0);
+event(0, 15 /* song */, 0, 3 /* seek */, 4, 16);   // order 4, row 16
+```
+
+A song's end is where its order list runs out, or where it comes back to a
+row it has already played (which is how a song that loops by jumping back is
+caught). A song can also be written never to end.
+
+`synths_reset` stops the song and takes it back to the start; it stays
+loaded.
+
+### Where the song is
+
+`synths_song_position` writes ten numbers:
+
+| | |
+|---|---|
+| 0 | State: 0 no song is loaded, 1 stopped, 2 playing, 3 paused. |
+| 1 | The place in the order list, from 0. |
+| 2 | The pattern playing there. |
+| 3 | The row, from 0. |
+| 4 | The tick within the row, from 0. |
+| 5 | Ticks in a row (the song's speed). |
+| 6 | Beats a minute (its tempo): a tick lasts 2.5 / tempo seconds. |
+| 7 | How many times the song has come round to its start. |
+| 8 | How many rows this pattern has. |
+| 9 | How many places the order list has. |
+
+The audio side stores these one number at a time, once a tick, and this
+function only loads them, so a display can call it on every frame it draws,
+from any thread. A reading taken in the middle of a tick can have the new
+row with the old tick; it is for drawing a cursor, not for arithmetic.
+
+### Instruments that are synth patches
+
+In one of our own songs an instrument can be a synth patch in place of
+samples: the song gives the patch a name and nothing more. The host owns the
+patch. After loading, it asks for each instrument's patch name with
+`synths_song_patch_name`, sets a part up as that patch with `param` events
+like any other, and says which part it is with a `song` event, `a` 6. A note
+of that instrument is then a note on that part (as `note_on` starts one),
+with the channel's handle, steered by the song: its pitch slides, its volume
+and pan change, and when the song lets the key go the patch's own release
+runs. An instrument whose patch has not been given a part is silent.
+
+### How it differs from the trackers
+
+The notes, timing and effects are the trackers' own, tested against the
+OpenMPT player tests. The sound of the voices is this engine's:
+
+- Volume and pan changes slide over at most 16 frames. FastTracker 2 slid
+  them over a whole tick, so its envelopes and volume slides are a little
+  smoother than they are here.
+- Panning is equal power. FastTracker 2's law differs slightly between the
+  middle and the edges.
+- The Amiga's "LED" filter (effect `E0x`) is stood in for by each channel
+  part's own filter, as a low-pass at 3300 Hz.
+- ProTracker's invert loop (`EFx`) is not played.
+
 ## Scope, meters and notes
 
 Three things a host can read at any time, to draw with. The engine keeps
@@ -1061,7 +1248,8 @@ bound.
 `scripts/build-wasm.sh` builds `target/wasm/synths_core.wasm` for the
 `wasm32-wasip1` target, then loads it in node (`scripts/check-wasm.mjs`),
 plays a note through it, reads the taps, sets a macro and times it. The
-module is about 174 KB (68 KB gzipped).
+module is about 340 KB (144 KB gzipped); the song loaders and player are
+about half of that.
 
 **Exports**: `memory` and the functions above. There is no `_start` and no
 `_initialize`; the module is ready as soon as it is instantiated.
@@ -1259,6 +1447,13 @@ engine.set_sequencer(Some(Box::new(Player { /* ... */ })));
 - `advance` runs on the audio path: no allocating, locking or waiting.
 - `Sequencer::reset` is called by `Engine::reset` (`synths_reset`), after
   every voice has been stopped; `advance` is then called on the next frame.
+- A `song` event from the host is handed to the sequencer on its frame:
+  `fn event(&mut self, event: &Event, voices: &mut Voices<'_>) -> bool`,
+  which does nothing unless it is written. Returning true has `advance`
+  called at once, on that same frame, whenever it was next due.
+- The engine's own song player is such a sequencer:
+  `synths_core::song_player::install(&mut engine, song, first_part, first_slot, raw)`
+  is what `synths_song_load` does once it has read the file.
 - A sequencer keeps being called while the engine sleeps, and wakes it by
   starting a voice.
 

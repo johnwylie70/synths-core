@@ -184,6 +184,8 @@ pub struct Engine {
     arp_at: u64,
     /// What a display reads: scope, meters, sounding notes.
     pub(crate) taps: Box<Taps>,
+    /// The song that is loaded, as a host may read it while sound is made.
+    pub(crate) song: Option<std::sync::Arc<crate::song_player::Shared>>,
     meter: [f32; 4],
     /// How much a meter's peak and mean square keep, per control period and per sample.
     peak_keep: f32,
@@ -234,6 +236,7 @@ impl Engine {
             tick_loud: false,
             arp_at: u64::MAX,
             taps: Box::new(Taps::new(NUM_PARTS)),
+            song: None,
             meter: [0.0; 4],
             peak_keep: (-(CONTROL as f32) / (0.5 * sr)).exp(),
             rms_keep: (-(CONTROL as f32) / (0.1 * sr)).exp(),
@@ -716,6 +719,7 @@ impl Engine {
                     }
                 }
             }
+            EV_SONG => self.sequencer_event(e),
             EV_MACRO_TICK => {
                 for v in self.voices.iter_mut() {
                     if v.active() && (all || v.part == part) {
@@ -807,6 +811,17 @@ impl Engine {
 
     pub fn has_sequencer(&self) -> bool {
         self.sequencer.is_some()
+    }
+
+    /// Hand a `song` event to the sequencer, and call it at once if it asks.
+    fn sequencer_event(&mut self, e: &Event) {
+        if let Some(mut s) = self.sequencer.take() {
+            if s.event(e, &mut Voices::new(self)) {
+                let wait = s.advance(&mut Voices::new(self));
+                self.sequencer_at = self.time + wait.max(1) as u64;
+            }
+            self.sequencer = Some(s);
+        }
     }
 
     /// Call the sequencer for the frame the engine has reached.

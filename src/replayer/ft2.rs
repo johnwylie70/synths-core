@@ -328,6 +328,9 @@ impl Replayer {
         self.delay_left = 0;
         self.visited.clear();
         self.visited.stopped = false;
+        self.shown.order = self.order as u16;
+        self.shown.pattern = song.orders.get(self.order).copied().unwrap_or(0);
+        self.shown.row = self.row as u16;
     }
 
     pub fn tick(&mut self, song: &Song, frame: u32, sample_rate: f64, voices: &mut dyn Voices) {
@@ -407,6 +410,7 @@ impl Replayer {
                 self.order += 1;
                 if self.order >= song.orders.len() {
                     self.order = song.restart as usize;
+                    self.visited.wrapped = true;
                 }
             }
             // The row may be past the end of the new pattern. FT2 plays it

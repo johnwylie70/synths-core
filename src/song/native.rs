@@ -159,7 +159,7 @@ fn write_event(e: &Event) -> String {
             let offsets: Vec<String> = chord.offsets().iter().map(|o| o.to_string()).collect();
             s += &format!(", \"chord\": [{}]", offsets.join(", "));
             match chord.rate {
-                ChordRate::PerTick(n) if n == 1.0 => {}
+                ChordRate::PerTick(1.0) => {}
                 ChordRate::PerTick(n) => s += &format!(", \"chordSpeed\": {n}"),
                 ChordRate::PerSecond(n) => s += &format!(", \"chordHz\": {n}"),
             }

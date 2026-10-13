@@ -177,17 +177,21 @@ pub(crate) struct Visited {
     pub repeat: bool,
     /// The song reached its end with `repeat` off, and plays no more.
     pub stopped: bool,
+    /// The order list ran out and the song went back to its restart place:
+    /// the next row played is the song beginning again.
+    pub wrapped: bool,
 }
 
 impl Visited {
     const ROWS: usize = crate::song::MAX_ROWS;
 
     pub fn new(orders: usize) -> Visited {
-        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false }
+        Visited { bits: vec![0; (orders.max(1) * Self::ROWS).div_ceil(64)], loops: 0, repeat: true, stopped: false, wrapped: false }
     }
 
     pub fn clear(&mut self) {
         self.bits.fill(0);
+        self.wrapped = false;
     }
 
     /// Counts the song as having ended (a command stopped it).
@@ -203,7 +207,8 @@ impl Visited {
     pub fn visit(&mut self, order: usize, row: usize, looping: bool) -> bool {
         let i = order * Self::ROWS + row.min(Self::ROWS - 1);
         let Some(word) = self.bits.get(i / 64).copied() else { return true };
-        if word & (1 << (i % 64)) != 0 && !looping {
+        let wrapped = core::mem::take(&mut self.wrapped);
+        if wrapped || (word & (1 << (i % 64)) != 0 && !looping) {
             self.end();
             self.clear();
         }
@@ -299,6 +304,15 @@ impl Player {
     /// called, playing carries on regardless, as most songs are made to loop.
     pub fn ended(&self) -> bool {
         self.position().loops > 0
+    }
+
+    /// True if the song reached its end with repeat off and has stopped
+    /// there; `seek` starts it again.
+    pub fn stopped(&self) -> bool {
+        match &self.core {
+            Core::Pt(r) => r.visited.stopped,
+            Core::Ft2(r) => r.visited.stopped,
+        }
     }
 
     /// Chooses what happens at the song's end: carry on round (the default),

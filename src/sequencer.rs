@@ -21,6 +21,13 @@ pub trait Sequencer: Send {
     /// The engine was reset: every voice has been stopped. The next call to
     /// `advance` comes on the next frame rendered.
     fn reset(&mut self) {}
+
+    /// A `song` event from the host has come due. Return true to have
+    /// `advance` called straight away, on this same frame, whenever it was
+    /// next due (a song told to play starts on the event's frame).
+    fn event(&mut self, _event: &Event, _voices: &mut Voices<'_>) -> bool {
+        false
+    }
 }
 
 /// How to start a sample on a part: what a tracker channel needs for a note.

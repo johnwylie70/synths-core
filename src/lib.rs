@@ -26,6 +26,8 @@ pub mod replayer;
 pub mod sample;
 pub mod sequencer;
 pub mod song;
+pub mod song_abi;
+pub mod song_player;
 pub mod taps;
 pub mod voice;
 

@@ -132,7 +132,7 @@ impl Replayer {
     }
 
     pub fn position(&self) -> Position {
-        Position { tick: self.tick.min(self.speed), speed: self.speed, tempo: self.tempo, loops: self.visited.loops, ..self.shown }
+        Position { tick: if self.tick < self.speed { self.tick } else { 0 }, speed: self.speed, tempo: self.tempo, loops: self.visited.loops, ..self.shown }
     }
 
     pub fn seek(&mut self, song: &Song, order: usize, row: usize, voices: &mut dyn Voices) {
@@ -150,6 +150,9 @@ impl Replayer {
         self.delay_left = 0;
         self.visited.clear();
         self.visited.stopped = false;
+        self.shown.order = self.order as u16;
+        self.shown.pattern = song.orders.get(self.order).copied().unwrap_or(0);
+        self.shown.row = self.row as u16;
     }
 
     pub fn tick(&mut self, song: &Song, frame: u32, voices: &mut dyn Voices) {
@@ -211,6 +214,7 @@ impl Replayer {
         self.order = self.order.wrapping_add(1) & 127;
         if self.order >= song.orders.len() {
             self.order = 0;
+            self.visited.wrapped = true;
         }
         if self.row >= song.rows_at(self.order) as usize {
             self.row = 0;
