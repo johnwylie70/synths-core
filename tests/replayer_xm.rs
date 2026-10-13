@@ -419,3 +419,81 @@ fn the_mixer_plays_loops_both_ways() {
     assert_eq!(heard(1, u32::MAX)[..3], [1, 2, 3]);
     assert_eq!(heard(0, 4), [0; 12]);
 }
+
+/// One channel's chord instructions: the tick, and the offsets (none for off).
+fn chords(ticks: &[Vec<(usize, Command)>]) -> Vec<(usize, Vec<i8>, f32)> {
+    let mut out = Vec::new();
+    for (t, tick) in ticks.iter().enumerate() {
+        for (_, command) in tick {
+            if let Command::Arpeggio(a) = command {
+                out.push((t, a.map_or(Vec::new(), |a| a.offsets().to_vec()), a.map_or(0.0, |a| a.rate)));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_chord_is_one_instruction_and_lasts_until_the_next_note_or_an_off() {
+    for rules in [Rules::FastTracker2, Rules::ProTracker] {
+        let mut p = pattern(16, &["C-4 01 .. 000", "", "E-4 01 .. 000", "G-4 01 .. 000", "", "... .. .. 000", "C-4 01 .. E93", "", "C-4 01 .. FFA"]);
+        if rules == Rules::ProTracker {
+            p = pattern(16, &["C-4 01 000", "", "E-4 01 000", "G-4 01 000", "", "... .. 000", "C-4 01 E93", "", "C-4 01 FFA"]);
+        }
+        p.set_chord(0, 0, Some(Chord::new(&[0, 3, 7])));
+        p.set_chord(1, 0, Some(Chord { rate: ChordRate::PerSecond(60.0), ..Chord::new(&[0, 4, 7, 11]) }));
+        p.set_chord(3, 0, Some(Chord::new(&[0, 12])));
+        p.set_chord(5, 0, Some(Chord::OFF));
+        p.set_chord(6, 0, Some(Chord { rate: ChordRate::PerTick(2.0), ..Chord::new(&[0, 7]) }));
+        p.set_chord(8, 0, Some(Chord::new(&[0, 5])));
+        let song = song(rules, 1, vec![square(64, 1)], vec![p]);
+        let ticks = run_ticks(&song, 54);
+        assert_eq!(
+            chords(&ticks),
+            [
+                // One step a tick is 50 a second at 125 beats a minute.
+                (0, vec![0, 3, 7], 50.0),
+                // A chord on a row with no note changes the one sounding.
+                (6, vec![0, 4, 7, 11], 60.0),
+                // A note with no chord ends it.
+                (12, vec![], 0.0),
+                (18, vec![0, 12], 50.0),
+                (30, vec![], 0.0),
+                // Every time the note is started again, it is given the chord again.
+                (36, vec![0, 7], 100.0),
+                (39, vec![0, 7], 100.0),
+                // The tempo the row finds is the tempo it is timed by.
+                (48, vec![0, 5], 50.0),
+            ],
+            "{rules:?}"
+        );
+        // The chord comes straight after the note it belongs to.
+        let at = ticks[0].iter().position(|(_, c)| matches!(c, Command::Play(_))).unwrap();
+        assert!(ticks[0][at + 1..].iter().any(|(_, c)| matches!(c, Command::Arpeggio(Some(_)))));
+    }
+}
+
+#[test]
+fn the_mixer_steps_a_voice_through_its_chord() {
+    // An octave arpeggio at 100 steps a second on a 64-frame square at
+    // 8363: 131 Hz and 261 Hz by turns, 441 frames each.
+    let mut p = pattern(8, &["C-4 01 .. 000"]);
+    p.set_chord(0, 0, Some(Chord { rate: ChordRate::PerSecond(100.0), ..Chord::new(&[0, 12]) }));
+    let song = song(Rules::FastTracker2, 1, vec![square(64, 1)], vec![p]);
+    let mut player = Player::new(&song, RATE);
+    let mut mixer = Mixer::new(&song, RATE);
+    play(&song, &mut player, &mut mixer, 441 * 8);
+    // The time from one upward crossing to the next is the wave's period:
+    // 337.5 frames on the even steps, half that on the odd ones.
+    let rises: Vec<usize> = (1..mixer.left.len()).filter(|&i| mixer.left[i - 1] <= 0.0 && mixer.left[i] > 0.0).collect();
+    let mut seen = [0; 2];
+    for pair in rises.windows(2) {
+        let (step, next) = (pair[0] / 441, pair[1] / 441);
+        if step == next {
+            let want = if step % 2 == 0 { 337.5 } else { 168.75 };
+            assert!((pair[1] as f64 - pair[0] as f64 - want).abs() < 2.0, "step {step}: a period of {} frames", pair[1] - pair[0]);
+            seen[step % 2] += 1;
+        }
+    }
+    assert!(seen[0] >= 2 && seen[1] >= 4, "{seen:?}");
+}

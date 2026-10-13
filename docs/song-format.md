@@ -81,8 +81,41 @@ An event:
 | `ins` | The instrument, from 1. |
 | `vol` | A number 0 to 64 sets the volume. A two-character text is a volume-column command, below. |
 | `fx` | An effect: a letter or digit and two hexadecimal digits, as a tracker shows it (`"A04"`, `"F7D"`, `"R23"`). `[10, 4]` is read too. |
+| `chord` | A chord for the note to play as a fast arpeggio; see [Chords](#chords). |
+| `chordSpeed`, `chordHz`, `chordOrder` | How fast and in what order the chord's notes go by. |
 
 C-4 plays a sample at 8363 frames a second (unless the sample is tuned otherwise), and is middle C for a synth patch.
+
+### Chords
+
+One channel can sound like a chord by stepping through the chord's notes very quickly, the way Commodore 64 music does. In this format that is not an effect code: the note's event says which chord.
+
+```json
+{"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "min"},
+{"row": 4, "ch": 0, "note": "F-4", "ins": 1, "chord": [0, 4, 7, 12], "chordOrder": "updown"},
+{"row": 8, "ch": 0, "ins": 1, "chord": "Gm7", "chordHz": 60},
+{"row": 12, "ch": 0, "chord": "off"}
+```
+
+`chord` is one of:
+
+- A kind of chord by name, built on the event's note: `"maj"`, `"min"` (or `"m"`), `"dim"`, `"aug"`, `"sus2"`, `"sus4"`, `"5"`, `"6"`, `"m6"`, `"7"`, `"maj7"`, `"m7"`, `"dim7"`, `"m7b5"`, `"9"`, `"maj9"`, `"m9"`, `"add9"`, `"oct"`.
+- A chord with its root, as on a song sheet: `"C"`, `"Cm7"`, `"F#maj7"`, `"Bb7"`. If the event has no `note`, the root in octave 4 becomes its note; if it has one, the root must be that note.
+- A list of 1 to 8 numbers: each note of the chord in semitones from the event's note. The note itself is 0, and is only played if it is in the list.
+- A list of 1 to 8 note names, which needs the event to have a `note` to measure them from.
+- `"off"`, to stop the channel's chord and leave its note sounding plain.
+
+A chord carries on, row after row, until the channel's next note. That note plays plain unless it has a chord of its own. An event with a chord and no note changes the chord of the note that is sounding.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `chordSpeed` | Steps in each tick, so the chord keeps time with the song. May be a fraction. | 1 |
+| `chordHz` | Steps a second, whatever the tempo. 50 is the classic rate. Give this or `chordSpeed`, not both. | |
+| `chordOrder` | `"up"` (lowest to highest, round and round), `"down"`, `"updown"`, `"written"` (as listed) or `"random"`. | `"up"` |
+
+A writer always writes a chord as its list of numbers, so a name survives loading and saving as the chord it meant, not as the name.
+
+The player hands a chord to the voice as one instruction, and the voice does the stepping, so the steps do not have to fall on ticks. This is separate from the trackers' arpeggio effect `0xy`, which is kept for songs that came from MOD and XM files and behaves exactly as those trackers did: three notes, a step a tick, restarting on every row.
 
 ### Volume-column commands
 

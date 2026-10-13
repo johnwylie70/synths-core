@@ -96,12 +96,148 @@ impl Cell {
     }
 }
 
-/// A cell and where it is in its pattern.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The most notes a chord can have.
+pub const MAX_CHORD: usize = 8;
+
+/// How fast a chord's notes are stepped through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChordRate {
+    /// So many steps in each tick of the song.
+    PerTick(f32),
+    /// So many steps a second, whatever the song's tempo.
+    PerSecond(f32),
+}
+
+/// The order a chord's notes are stepped through in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChordOrder {
+    /// Lowest to highest, round and round.
+    #[default]
+    Up,
+    Down,
+    /// Up and then back down.
+    UpDown,
+    /// In the order the chord lists them.
+    Written,
+    Random,
+}
+
+/// A chord played the way the Commodore 64 played them: one voice stepping
+/// through its notes so fast that the ear hears them together. It belongs
+/// to a note in a pattern and carries on until the channel's next note, or
+/// until an event switches it off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chord {
+    /// Each note of the chord, in semitones from the note it is on; the note
+    /// itself is 0 and has to be listed to be heard.
+    pub offsets: [i8; MAX_CHORD],
+    /// How many of `offsets` are used. None means "stop the chord".
+    pub count: u8,
+    pub rate: ChordRate,
+    pub order: ChordOrder,
+}
+
+impl Chord {
+    /// The event that stops a channel's chord.
+    pub const OFF: Chord = Chord { offsets: [0; MAX_CHORD], count: 0, rate: ChordRate::PerTick(1.0), order: ChordOrder::Up };
+
+    /// A chord of these offsets (at most 8 are kept), one step a tick, upwards.
+    pub fn new(offsets: &[i8]) -> Chord {
+        let mut chord = Chord::OFF;
+        for (slot, o) in chord.offsets.iter_mut().zip(offsets) {
+            *slot = *o;
+        }
+        chord.count = offsets.len().min(MAX_CHORD) as u8;
+        chord
+    }
+
+    pub fn offsets(&self) -> &[i8] {
+        &self.offsets[..(self.count as usize).min(MAX_CHORD)]
+    }
+
+    pub fn is_off(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The chord that the trackers' arpeggio effect 0xy plays: the note, x
+    /// semitones up and y semitones up, a step a tick. For an editor turning
+    /// an imported effect into a chord; the replayer plays 0xy itself, tick
+    /// by tick, because the old trackers' quirks do not fit a plain chord.
+    pub fn from_effect(param: u8) -> Chord {
+        Chord { order: ChordOrder::Written, ..Chord::new(&[0, (param >> 4) as i8, (param & 15) as i8]) }
+    }
+
+    /// The offsets a chord's name means: "maj", "min", "m7", "sus4" and so
+    /// on. A name may begin with its root note ("Cm7", "F#maj7"), which is
+    /// given back as a number from 0 (C) to 11 (B).
+    pub fn named(name: &str) -> Option<(Option<u8>, &'static [i8])> {
+        let name = name.trim();
+        let b = name.as_bytes();
+        let letter = match b.first().map(u8::to_ascii_uppercase) {
+            Some(b'C') => Some(0i8),
+            Some(b'D') => Some(2),
+            Some(b'E') => Some(4),
+            Some(b'F') => Some(5),
+            Some(b'G') => Some(7),
+            Some(b'A') => Some(9),
+            Some(b'B') => Some(11),
+            _ => None,
+        };
+        // A root is a capital letter: "dim" and "add9" are kinds, not notes.
+        let letter = letter.filter(|_| b[0].is_ascii_uppercase());
+        let (root, kind) = match letter {
+            None => (None, name),
+            Some(l) => match b.get(1) {
+                Some(b'#') => (Some((l + 1).rem_euclid(12) as u8), &name[2..]),
+                Some(b'b') => (Some((l - 1).rem_euclid(12) as u8), &name[2..]),
+                _ => (Some(l as u8), &name[1..]),
+            },
+        };
+        let offsets: &'static [i8] = match kind {
+            "" | "maj" | "major" | "M" => &[0, 4, 7],
+            "m" | "min" | "minor" => &[0, 3, 7],
+            "dim" => &[0, 3, 6],
+            "aug" | "+" => &[0, 4, 8],
+            "sus2" => &[0, 2, 7],
+            "sus4" | "sus" => &[0, 5, 7],
+            "5" => &[0, 7],
+            "6" => &[0, 4, 7, 9],
+            "m6" | "min6" => &[0, 3, 7, 9],
+            "7" => &[0, 4, 7, 10],
+            "maj7" | "M7" => &[0, 4, 7, 11],
+            "m7" | "min7" => &[0, 3, 7, 10],
+            "dim7" => &[0, 3, 6, 9],
+            "m7b5" => &[0, 3, 6, 10],
+            "9" => &[0, 4, 7, 10, 14],
+            "maj9" | "M9" => &[0, 4, 7, 11, 14],
+            "m9" | "min9" => &[0, 3, 7, 10, 14],
+            "add9" => &[0, 4, 7, 14],
+            "oct" | "octave" => &[0, 12],
+            _ => return None,
+        };
+        // A bare kind is not allowed to be empty: "" names nothing.
+        if root.is_none() && kind.is_empty() {
+            return None;
+        }
+        Some((root, offsets))
+    }
+}
+
+/// A cell and where it is in its pattern, with the chord it starts or
+/// stops, if any.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Event {
     pub row: u16,
     pub channel: u8,
     pub cell: Cell,
+    pub chord: Option<Chord>,
+}
+
+impl Event {
+    /// True if the event says nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.cell.is_empty() && self.chord.is_none()
+    }
 }
 
 /// A pattern: so many rows, and the cells that are not empty, in order of
@@ -122,16 +258,32 @@ impl Pattern {
     }
 
     /// Puts a cell in the pattern, replacing what was there; an empty cell
-    /// removes it.
+    /// removes it. A chord at that place stays.
     pub fn set(&mut self, row: u16, channel: u8, cell: Cell) {
-        match (self.find(row, channel), cell.is_empty()) {
+        let chord = self.chord(row, channel);
+        self.put(Event { row, channel, cell, chord });
+    }
+
+    /// Sets or removes the chord at a place, leaving its cell as it is.
+    pub fn set_chord(&mut self, row: u16, channel: u8, chord: Option<Chord>) {
+        let cell = self.cell(row, channel);
+        self.put(Event { row, channel, cell, chord });
+    }
+
+    fn put(&mut self, event: Event) {
+        match (self.find(event.row, event.channel), event.is_empty()) {
             (Ok(i), true) => {
                 self.events.remove(i);
             }
-            (Ok(i), false) => self.events[i].cell = cell,
+            (Ok(i), false) => self.events[i] = event,
             (Err(_), true) => {}
-            (Err(i), false) => self.events.insert(i, Event { row, channel, cell }),
+            (Err(i), false) => self.events.insert(i, event),
         }
+    }
+
+    /// The chord at a row and channel, if one starts or stops there.
+    pub fn chord(&self, row: u16, channel: u8) -> Option<Chord> {
+        self.find(row, channel).ok().and_then(|i| self.events[i].chord)
     }
 
     /// The cell at a row and channel; empty if nothing is there.
@@ -150,7 +302,7 @@ impl Pattern {
     /// pattern, so the rest of the code can rely on the order.
     pub fn tidy(&mut self, channels: usize) {
         let rows = self.rows;
-        self.events.retain(|e| e.row < rows && (e.channel as usize) < channels && !e.cell.is_empty());
+        self.events.retain(|e| e.row < rows && (e.channel as usize) < channels && !e.is_empty());
         self.events.sort_by_key(|e| (e.row, e.channel));
         self.events.dedup_by_key(|e| (e.row, e.channel));
     }

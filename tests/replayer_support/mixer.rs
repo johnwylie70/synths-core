@@ -6,8 +6,8 @@
 //! The replayer's calls are queued with their frame and take effect at
 //! exactly that frame when `render` runs.
 
-use synths_core::replayer::{Source, Start, Voices};
-use synths_core::song::{LoopKind, Song};
+use synths_core::replayer::{Arpeggio, Source, Start, Voices};
+use synths_core::song::{ChordOrder, LoopKind, Song};
 
 /// Something the replayer asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,6 +20,7 @@ pub enum Command {
     Stop,
     Release,
     Queue(Option<usize>),
+    Arpeggio(Option<Arpeggio>),
     Filter(bool),
 }
 
@@ -45,6 +46,9 @@ struct Voice {
     pan: f32,
     pan_now: f32,
     pan_step: f32,
+    /// The chord being stepped through, and how many frames it has run for.
+    arpeggio: Option<Arpeggio>,
+    arpeggio_frames: u64,
     /// A sample waiting to take over at the end of this one's pass.
     queued: Option<Option<usize>>,
     /// The frame a note started on: settings that arrive on the same frame
@@ -140,6 +144,10 @@ impl<'a> Mixer<'a> {
                 }
             }
             Command::Stop => v.sample = None,
+            Command::Arpeggio(a) => {
+                v.arpeggio = a;
+                v.arpeggio_frames = 0;
+            }
             Command::Queue(q) => {
                 if v.sample.is_none() {
                     start_queued(v, song, q);
@@ -191,7 +199,12 @@ impl<'a> Mixer<'a> {
                 l += x * gl;
                 r += x * gr;
 
-                let step = v.rate / self.out_rate;
+                let mut step = v.rate / self.out_rate;
+                if let Some(a) = &v.arpeggio {
+                    let n = (v.arpeggio_frames as f64 * a.rate as f64 / self.out_rate) as usize;
+                    step *= (chord_offset(a, n) as f64 / 12.0).exp2();
+                    v.arpeggio_frames += 1;
+                }
                 v.pos += if v.backwards { -step } else { step };
                 advance(v, self.song);
             }
@@ -201,6 +214,30 @@ impl<'a> Mixer<'a> {
         }
         // Anything for a later frame waits for the next call.
         self.pending = pending.split_off(next);
+    }
+}
+
+/// The offset an arpeggio is on at its `n`th step.
+fn chord_offset(a: &Arpeggio, n: usize) -> i8 {
+    let mut notes = a.offsets;
+    let notes = &mut notes[..a.count as usize];
+    let len = notes.len();
+    if len == 0 {
+        return 0;
+    }
+    if a.order != ChordOrder::Written {
+        notes.sort();
+    }
+    match a.order {
+        ChordOrder::Up | ChordOrder::Written => notes[n % len],
+        ChordOrder::Down => notes[len - 1 - n % len],
+        // Up and back down, without playing the top or bottom twice.
+        ChordOrder::UpDown if len > 1 => {
+            let at = n % (2 * len - 2);
+            notes[if at < len { at } else { 2 * len - 2 - at }]
+        }
+        ChordOrder::UpDown => notes[0],
+        ChordOrder::Random => notes[(n.wrapping_mul(2654435761) >> 7) % len],
     }
 }
 
@@ -282,6 +319,9 @@ impl Voices for Mixer<'_> {
     }
     fn queue(&mut self, frame: u32, channel: usize, sample: Option<usize>) {
         self.push(frame, channel, Command::Queue(sample));
+    }
+    fn set_arpeggio(&mut self, frame: u32, channel: usize, arpeggio: Option<&Arpeggio>) {
+        self.push(frame, channel, Command::Arpeggio(arpeggio.copied()));
     }
     fn set_filter(&mut self, frame: u32, on: bool) {
         self.push(frame, 0, Command::Filter(on));

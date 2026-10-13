@@ -43,6 +43,14 @@ pub fn is_native(text: &str) -> bool {
 const VOLUME_COMMANDS: [char; 10] = ['-', '+', 'D', 'U', 'S', 'V', 'P', 'L', 'R', 'M'];
 const VIBRATO_WAVES: [&str; 4] = ["sine", "square", "ramp-up", "ramp-down"];
 
+const CHORD_ORDERS: [(&str, ChordOrder); 5] = [
+    ("up", ChordOrder::Up),
+    ("down", ChordOrder::Down),
+    ("updown", ChordOrder::UpDown),
+    ("written", ChordOrder::Written),
+    ("random", ChordOrder::Random),
+];
+
 fn effect_letter(effect: u8) -> char {
     char::from_digit(effect as u32, 36).unwrap_or('0').to_ascii_uppercase()
 }
@@ -143,6 +151,23 @@ fn write_event(e: &Event) -> String {
     }
     if c.effect != 0 || c.param != 0 {
         s += &format!(", \"fx\": \"{}{:02X}\"", effect_letter(c.effect), c.param);
+    }
+    match e.chord {
+        None => {}
+        Some(chord) if chord.is_off() => s += ", \"chord\": \"off\"",
+        Some(chord) => {
+            let offsets: Vec<String> = chord.offsets().iter().map(|o| o.to_string()).collect();
+            s += &format!(", \"chord\": [{}]", offsets.join(", "));
+            match chord.rate {
+                ChordRate::PerTick(n) if n == 1.0 => {}
+                ChordRate::PerTick(n) => s += &format!(", \"chordSpeed\": {n}"),
+                ChordRate::PerSecond(n) => s += &format!(", \"chordHz\": {n}"),
+            }
+            if chord.order != ChordOrder::Up {
+                let name = CHORD_ORDERS.iter().find(|(_, o)| *o == chord.order).map_or("up", |(n, _)| n);
+                s += &format!(", \"chordOrder\": \"{name}\"");
+            }
+        }
     }
     s + "}"
 }
@@ -313,6 +338,73 @@ fn read_effect(v: &Value) -> Result<(u8, u8), LoadError> {
     }
 }
 
+/// A number under a key, within limits, if the key is there.
+fn number(v: &Value, key: &str, min: f64, max: f64) -> Result<Option<f32>, LoadError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => match n.as_f64() {
+            Some(n) if n >= min && n <= max => Ok(Some(n as f32)),
+            _ => invalid(format!("\"{key}\" must be a number from {min} to {max}")),
+        },
+    }
+}
+
+/// An event's chord: a name ("min", "Cm7"), a list of semitone offsets, a
+/// list of note names, or "off". A name that begins with its root note
+/// gives the event its note if it has none.
+fn read_chord(e: &Value, cell: &mut Cell) -> Result<Option<Chord>, LoadError> {
+    let Some(v) = e.get("chord") else { return Ok(None) };
+    let bad = || invalid("\"chord\" must be a name like \"min\" or \"Cm7\", up to 8 offsets like [0, 3, 7], note names, or \"off\"");
+    let mut chord = match v {
+        Value::String(s) if s == "off" => return Ok(Some(Chord::OFF)),
+        Value::String(s) => {
+            let Some((root, offsets)) = Chord::named(s) else { return bad() };
+            if let Some(root) = root {
+                if cell.note == NOTE_NONE {
+                    cell.note = 49 + root;
+                } else if cell.note > NOTE_MAX || (cell.note - 1) % 12 != root {
+                    return invalid(format!("the chord \"{s}\" is not built on the event's note"));
+                }
+            }
+            Chord::new(offsets)
+        }
+        Value::Array(items) if !items.is_empty() && items.len() <= MAX_CHORD => {
+            let mut offsets = Vec::with_capacity(items.len());
+            for item in items {
+                let offset = match item {
+                    // A note name: how far it is from the event's own note.
+                    Value::String(_) if (1..=NOTE_MAX).contains(&cell.note) => {
+                        read_note(item).ok().filter(|n| (1..=NOTE_MAX).contains(n)).map(|n| n as i64 - cell.note as i64)
+                    }
+                    Value::String(_) => return invalid("a chord of note names needs the event to have a \"note\""),
+                    n => n.as_i64(),
+                };
+                match offset {
+                    Some(o) if (-96..=96).contains(&o) => offsets.push(o as i8),
+                    _ => return bad(),
+                }
+            }
+            Chord::new(&offsets)
+        }
+        _ => return bad(),
+    };
+    let speed = number(e, "chordSpeed", 0.01, 64.0)?;
+    let hz = number(e, "chordHz", 0.1, 1000.0)?;
+    chord.rate = match (speed, hz) {
+        (Some(_), Some(_)) => return invalid("give \"chordSpeed\" (steps a tick) or \"chordHz\" (steps a second), not both"),
+        (Some(n), None) => ChordRate::PerTick(n),
+        (None, Some(n)) => ChordRate::PerSecond(n),
+        (None, None) => ChordRate::PerTick(1.0),
+    };
+    if let Some(name) = text(e, "chordOrder")? {
+        chord.order = match CHORD_ORDERS.iter().find(|(n, _)| *n == name) {
+            Some((_, order)) => *order,
+            None => return invalid("\"chordOrder\" must be \"up\", \"down\", \"updown\", \"written\" or \"random\""),
+        };
+    }
+    Ok(Some(chord))
+}
+
 fn read_envelope(v: Option<&Value>) -> Result<Envelope, LoadError> {
     let Some(v) = v else { return Ok(Envelope::default()) };
     let mut e = Envelope { enabled: v.get("on") != Some(&Value::Bool(false)), ..Default::default() };
@@ -397,7 +489,8 @@ pub fn load(source: &str, blob: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Song
             if let Some(effect) = e.get("fx") {
                 (cell.effect, cell.param) = read_effect(effect)?;
             }
-            pattern.events.push(Event { row, channel, cell });
+            let chord = read_chord(e, &mut cell)?;
+            pattern.events.push(Event { row, channel, cell, chord });
         }
         song.patterns.push(pattern);
     }

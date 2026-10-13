@@ -20,7 +20,7 @@
 //! and the OpenMPT test modules. Not done: FT2's MIDI vibrato.
 
 use super::tables::{ft2_linear_period, AUTO_VIBRATO_SINE, FT2_AMIGA_PERIODS, HALF_SINE};
-use super::{pan_of, Position, Source, Start, Visited, Voices};
+use super::{chord_after_row, pan_of, Arpeggio, Position, Source, Start, Visited, Voices};
 use crate::song::{fx, Cell, Envelope, FrequencyTable, Instrument, Song, C4_RATE, NOTE_OFF};
 
 // What has changed on a channel since the voices were last told.
@@ -32,6 +32,8 @@ const RELEASE: u8 = 16;
 /// The volume change is a sudden one (a new note, a set volume, a cut) and
 /// not a step of a slide or an envelope.
 const QUICK: u8 = 32;
+/// The channel's chord began, changed or ended.
+const CHORD: u8 = 64;
 
 /// The highest instrument number FT2 takes notice of.
 const MAX_INSTRUMENT: u8 = 128;
@@ -181,6 +183,8 @@ struct Channel {
     final_pan: u8,
 
     status: u8,
+    /// The chord the channel is playing (our own songs only).
+    chord: Option<Arpeggio>,
     /// The global volume changed after this channel had its turn; its
     /// volume is sent on the next tick.
     volume_due: bool,
@@ -351,7 +355,11 @@ impl Replayer {
             let events = song.pattern_at(self.order).map_or(&[][..], |p| p.row(self.row as u16));
             let mut next = events.iter().peekable();
             for c in 0..self.channels.len() {
-                let cell = next.next_if(|e| e.channel as usize == c).map_or(Cell::default(), |e| e.cell);
+                let event = next.next_if(|e| e.channel as usize == c);
+                let cell = event.map_or(Cell::default(), |e| e.cell);
+                if chord_after_row(&mut self.channels[c].chord, event.and_then(|e| e.chord), cell, self.tempo) {
+                    self.channels[c].status |= CHORD;
+                }
                 self.read_cell(song, c, cell);
                 self.shape(song, c);
             }
@@ -430,6 +438,10 @@ impl Replayer {
                     Some(source) => {
                         let start = Start { source, offset: ch.start_at, rate, volume: ch.final_volume, pan };
                         voices.play(frame, c, &start);
+                        // A new voice starts without a chord: give it the channel's.
+                        if ch.chord.is_some() {
+                            voices.set_arpeggio(frame, c, ch.chord.as_ref());
+                        }
                     }
                     None => voices.stop(frame, c),
                 }
@@ -443,6 +455,9 @@ impl Replayer {
                 if status & PERIOD != 0 {
                     voices.set_rate(frame, c, rate);
                 }
+            }
+            if status & CHORD != 0 && !(status & TRIGGER != 0 && ch.chord.is_some()) {
+                voices.set_arpeggio(frame, c, ch.chord.as_ref());
             }
             if status & RELEASE != 0 {
                 voices.release(frame, c);

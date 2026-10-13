@@ -12,7 +12,7 @@
 //! the sample as it plays, and E8x.
 
 use super::tables::{HALF_SINE, PT_PERIOD_TABLE, PT_ROW};
-use super::{pan_of, Position, Source, Start, Visited, Voices};
+use super::{chord_after_row, pan_of, Arpeggio, Position, Source, Start, Visited, Voices};
 use crate::song::{fx, Cell, Song, NOTE_MAX};
 
 /// Half the PAL Amiga's clock: a period of 1 would play this many frames a
@@ -73,6 +73,8 @@ struct Channel {
     /// What the voice was last told.
     sent_period: u16,
     sent_volume: i16,
+    /// The chord the channel is playing (our own songs only).
+    chord: Option<Arpeggio>,
     /// A sample was started on this tick.
     started: bool,
     /// A sample has been started at some time. Until then the chip's channel
@@ -227,10 +229,17 @@ impl Replayer {
         let events = song.pattern_at(self.order).map_or(&[][..], |p| p.row(self.row as u16));
         let mut next = events.iter().peekable();
         for c in 0..self.channels.len() {
-            let cell = next.next_if(|e| e.channel as usize == c).map_or(Cell::default(), |e| e.cell);
+            let event = next.next_if(|e| e.channel as usize == c);
+            let cell = event.map_or(Cell::default(), |e| e.cell);
+            let chord_changed = chord_after_row(&mut self.channels[c].chord, event.and_then(|e| e.chord), cell, self.tempo);
             self.channels[c].started = false;
             self.play_cell(song, c, cell, frame, voices);
             let ch = &mut self.channels[c];
+            // A note that starts takes the chord with it; this is for a chord
+            // that begins or ends on a note already sounding.
+            if chord_changed && !(ch.started && ch.chord.is_some()) {
+                voices.set_arpeggio(frame, c, ch.chord.as_ref());
+            }
             send_volume(ch, ch.volume, c, frame, voices);
             // An instrument number that did not start a note still changes
             // which sample the channel is on: the chip moves to it when the
@@ -502,6 +511,9 @@ fn restart_sample(ch: &mut Channel, c: usize, frame: u32, voices: &mut dyn Voice
         pan: ch.pan,
     };
     voices.play(frame, c, &start);
+    if ch.chord.is_some() {
+        voices.set_arpeggio(frame, c, ch.chord.as_ref());
+    }
 }
 
 /// Sets where a tone portamento is going: the row's note, in the channel's

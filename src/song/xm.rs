@@ -111,7 +111,7 @@ pub fn load(data: &[u8]) -> Result<Song, LoadError> {
                     cell.note = NOTE_NONE;
                 }
                 if !cell.is_empty() {
-                    pattern.events.push(Event { row, channel: ch as u8, cell });
+                    pattern.events.push(Event { row, channel: ch as u8, cell, chord: None });
                 }
             }
         }

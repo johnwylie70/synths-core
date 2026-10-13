@@ -15,7 +15,7 @@ pub mod ft2;
 pub mod pt;
 pub mod tables;
 
-use crate::song::{Rules, Song, C4_RATE};
+use crate::song::{Cell, Chord, ChordOrder, ChordRate, Rules, Song, C4_RATE, MAX_CHORD, NOTE_MAX};
 
 /// What a channel plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,48 @@ pub struct Start {
     pub volume: f32,
     /// -1 (left) to 1 (right).
     pub pan: f32,
+}
+
+/// A chord for one voice to play by stepping quickly through its notes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arpeggio {
+    /// Each note, in semitones from the pitch the channel is playing.
+    pub offsets: [i8; MAX_CHORD],
+    /// How many of `offsets` are used, 1 to 8.
+    pub count: u8,
+    /// Steps a second. A chord timed in ticks has been worked out at the
+    /// song's tempo when the chord began.
+    pub rate: f32,
+    pub order: ChordOrder,
+}
+
+impl Arpeggio {
+    pub fn offsets(&self) -> &[i8] {
+        &self.offsets[..(self.count as usize).min(MAX_CHORD)]
+    }
+
+    fn of(chord: &Chord, tempo: u16) -> Arpeggio {
+        let rate = match chord.rate {
+            ChordRate::PerTick(steps) => steps * tempo as f32 / 2.5,
+            ChordRate::PerSecond(steps) => steps,
+        };
+        Arpeggio { offsets: chord.offsets, count: chord.count, rate, order: chord.order }
+    }
+}
+
+/// The chord a channel is playing, as a row's event leaves it. True if it
+/// changed. A chord lasts until an event stops it or the channel gets a new
+/// note with no chord of its own.
+pub(crate) fn chord_after_row(now: &mut Option<Arpeggio>, chord: Option<Chord>, cell: Cell, tempo: u16) -> bool {
+    let next = match chord {
+        Some(chord) if chord.is_off() => None,
+        Some(chord) => Some(Arpeggio::of(&chord, tempo)),
+        None if (1..=NOTE_MAX).contains(&cell.note) => None,
+        None => return false,
+    };
+    let changed = *now != next;
+    *now = next;
+    changed
 }
 
 /// The voices a replayer drives: one for each channel of the song.
@@ -80,6 +122,14 @@ pub trait Voices {
     /// The key was let go. Samples need nothing done: the replayer fades
     /// them with `set_volume`. A synth patch should begin its release.
     fn release(&mut self, _frame: u32, _channel: usize) {}
+
+    /// Gives the channel's voice a chord to step through, or with `None`
+    /// takes it away. The voice plays each offset in turn at the arpeggio's
+    /// rate, on top of whatever rate it is set to, until told otherwise or
+    /// until the channel's next `play` (which starts without one: the
+    /// replayer sends the chord again after a `play` if it still holds).
+    /// Voices that ignore this play the chord's root alone.
+    fn set_arpeggio(&mut self, _frame: u32, _channel: usize, _arpeggio: Option<&Arpeggio>) {}
 
     /// ProTracker only: the sample to carry on with when the one playing
     /// next reaches its end or the end of its loop (at once if it has

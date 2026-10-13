@@ -234,3 +234,67 @@ fn the_example_song_loads_and_plays_to_its_end() {
     // And it survives being saved.
     assert_eq!(native::load(&native::save(&song).json, &no_files).unwrap(), song);
 }
+
+#[test]
+fn chords_are_written_on_events_by_name_by_offsets_or_by_notes() {
+    let text = r#"{"format": "synths-song", "version": 1, "channels": 1,
+      "patterns": [{"rows": 16, "events": [
+        {"row": 0, "ch": 0, "note": "C-4", "ins": 1, "chord": "min"},
+        {"row": 1, "ch": 0, "note": "A-4", "ins": 1, "chord": "Am7", "chordOrder": "down"},
+        {"row": 2, "ch": 0, "ins": 1, "chord": "F#maj7", "chordSpeed": 2},
+        {"row": 3, "ch": 0, "note": "C-4", "chord": [0, 4, 7, 12], "chordHz": 50, "chordOrder": "updown"},
+        {"row": 4, "ch": 0, "note": "C-4", "chord": ["C-4", "E-4", "G-4", "C-3"], "chordOrder": "written"},
+        {"row": 5, "ch": 0, "chord": "sus4", "chordOrder": "random"},
+        {"row": 6, "ch": 0, "chord": "off"}
+      ]}],
+      "instruments": [{"sample": 0}], "samples": [{"wave": [50, -50], "loop": {}}]}"#;
+    let song = native::load(text, &no_files).unwrap();
+    let p = &song.patterns[0];
+    let chord = |row: u16| p.chord(row, 0).unwrap();
+    assert_eq!(chord(0), Chord::new(&[0, 3, 7]));
+    assert_eq!(chord(1), Chord { order: ChordOrder::Down, ..Chord::new(&[0, 3, 7, 10]) });
+    // A name with a root gives the event its note when it has none.
+    assert_eq!(p.cell(2, 0).note, parse_note("F#4").unwrap());
+    assert_eq!(chord(2), Chord { rate: ChordRate::PerTick(2.0), ..Chord::new(&[0, 4, 7, 11]) });
+    assert_eq!(chord(3), Chord { rate: ChordRate::PerSecond(50.0), order: ChordOrder::UpDown, ..Chord::new(&[0, 4, 7, 12]) });
+    assert_eq!(chord(4), Chord { order: ChordOrder::Written, ..Chord::new(&[0, 4, 7, -12]) });
+    assert!(p.cell(5, 0).is_empty());
+    assert_eq!(chord(5).offsets(), [0, 5, 7]);
+    assert!(chord(6).is_off());
+
+    // Saved, they are offsets, and load back as the same song.
+    let saved = native::save(&song);
+    assert!(saved.json.contains(r#""chord": [0, 4, 7, 12], "chordHz": 50, "chordOrder": "updown""#), "{}", saved.json);
+    assert!(saved.json.contains(r#"{"row": 6, "ch": 0, "chord": "off"}"#));
+    assert_eq!(load_saved(&saved).unwrap(), song);
+
+    let wrap = |event: &str| format!(r#"{{"format": "synths-song", "version": 1, "patterns": [{{"events": [{event}]}}]}}"#);
+    for bad in [
+        r#"{"chord": "Xm"}"#,
+        r#"{"chord": []}"#,
+        r#"{"chord": [0, 1, 2, 3, 4, 5, 6, 7, 8]}"#,
+        r#"{"chord": ["C-4", "E-4"]}"#,
+        r#"{"note": "D-4", "chord": "Cm"}"#,
+        r#"{"chord": "min", "chordSpeed": 2, "chordHz": 50}"#,
+        r#"{"chord": "min", "chordOrder": "sideways"}"#,
+        r#"{"chord": "min", "chordHz": 0}"#,
+    ] {
+        assert!(matches!(native::load(&wrap(bad), &no_files), Err(LoadError::Invalid(_))), "{bad}");
+    }
+}
+
+#[test]
+fn chord_names() {
+    assert_eq!(Chord::named("maj"), Some((None, &[0i8, 4, 7][..])));
+    assert_eq!(Chord::named("C"), Some((Some(0), &[0i8, 4, 7][..])));
+    assert_eq!(Chord::named("Cm7"), Some((Some(0), &[0i8, 3, 7, 10][..])));
+    assert_eq!(Chord::named("Bb7"), Some((Some(10), &[0i8, 4, 7, 10][..])));
+    assert_eq!(Chord::named("Adim"), Some((Some(9), &[0i8, 3, 6][..])));
+    assert_eq!(Chord::named("dim"), Some((None, &[0i8, 3, 6][..])));
+    assert_eq!(Chord::named("add9"), Some((None, &[0i8, 4, 7, 14][..])));
+    assert_eq!(Chord::named("m"), Some((None, &[0i8, 3, 7][..])));
+    assert_eq!(Chord::named("M7"), Some((None, &[0i8, 4, 7, 11][..])));
+    assert_eq!(Chord::named(""), None);
+    assert_eq!(Chord::named("Hm"), None);
+    assert_eq!(Chord::from_effect(0x47), Chord { order: ChordOrder::Written, ..Chord::new(&[0, 4, 7]) });
+}
