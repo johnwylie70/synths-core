@@ -13,8 +13,30 @@ use synths_core::{Engine, Event};
 
 const SR: f32 = 44100.0;
 
+/// The song functions keep the last error and the staged sample files in
+/// one place for the whole process, as suits a host with one audio thread.
+/// Tests run side by side, so they take turns at those functions.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static LAST_ERROR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn take_turn() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Load a song, for a test that already has its turn.
+fn load_in_turn(engine: &mut Engine, file: &[u8], first_slot: u32) -> i32 {
+    let code = unsafe { synths_song_load(engine, file.as_ptr(), file.len() as u32, first_slot) };
+    let why = unsafe { std::ffi::CStr::from_ptr(synths_song_error().cast()) }.to_str().unwrap().to_string();
+    LAST_ERROR.set(why);
+    code
+}
+
 fn load(engine: &mut Engine, file: &[u8], first_slot: u32) -> i32 {
-    unsafe { synths_song_load(engine, file.as_ptr(), file.len() as u32, first_slot) }
+    let _turn = take_turn();
+    load_in_turn(engine, file, first_slot)
 }
 
 fn position(engine: &Engine) -> [u32; 10] {
@@ -23,8 +45,9 @@ fn position(engine: &Engine) -> [u32; 10] {
     out
 }
 
+/// Why this thread's last load failed.
 fn error() -> String {
-    unsafe { std::ffi::CStr::from_ptr(synths_song_error().cast()) }.to_str().unwrap().to_string()
+    LAST_ERROR.with_borrow(|e| e.clone())
 }
 
 fn render(engine: &mut Engine, frames: usize, block: usize) -> (Vec<f32>, Vec<f32>) {
@@ -283,14 +306,15 @@ fn a_chord_becomes_the_engines_arpeggio_and_a_patch_becomes_a_note_on_its_part()
 
 #[test]
 fn songs_that_cannot_be_loaded_say_why() {
+    let _turn = take_turn();
     let mut engine = Engine::new(SR);
-    assert_eq!(load(&mut engine, b"not a song at all", 0), SONG_BAD);
+    assert_eq!(load_in_turn(&mut engine, b"not a song at all", 0), SONG_BAD);
     assert!(error().contains("too short"), "{}", error());
     let bad = br#"{"format": "synths-song", "version": 1, "tempo": 5}"#;
-    assert_eq!(load(&mut engine, bad, 0), SONG_BAD);
+    assert_eq!(load_in_turn(&mut engine, bad, 0), SONG_BAD);
     assert!(error().contains("\"tempo\" must be a whole number from 32 to 255"), "{}", error());
     let needs = br#"{"format": "synths-song", "version": 1, "samples": [{"file": "samples/a.wav"}]}"#;
-    assert_eq!(load(&mut engine, needs, 0), SONG_MISSING_FILE);
+    assert_eq!(load_in_turn(&mut engine, needs, 0), SONG_MISSING_FILE);
     assert!(error().contains("samples/a.wav"));
     assert_eq!(position(&engine)[0], STATE_NONE);
 
@@ -298,19 +322,19 @@ fn songs_that_cannot_be_loaded_say_why() {
     let wav = wav::write(&SampleData::Bits8(vec![1, 2, 3, 4]), 8363);
     let name = "samples/a.wav";
     assert_eq!(unsafe { synths_song_file(name.as_ptr(), name.len() as u32, wav.as_ptr(), wav.len() as u32) }, SONG_OK);
-    assert_eq!(load(&mut engine, needs, 0), SONG_OK, "{}", error());
+    assert_eq!(load_in_turn(&mut engine, needs, 0), SONG_OK, "{}", error());
     assert_eq!(error(), "");
-    assert_eq!(load(&mut engine, needs, 0), SONG_MISSING_FILE);
+    assert_eq!(load_in_turn(&mut engine, needs, 0), SONG_MISSING_FILE);
 
     let file = write_mod(&tune(Rules::ProTracker));
     // A song has parts 32 to 63: 32 channels fit, 33 do not.
     let wide = |channels: usize| write_xm(&song(Rules::FastTracker2, channels, vec![square(32, 1)], vec![pattern(4, &["C-4 01 .. 000"])]));
-    assert_eq!(load(&mut engine, &wide(33), 0), SONG_NO_PARTS);
+    assert_eq!(load_in_turn(&mut engine, &wide(33), 0), SONG_NO_PARTS);
     assert!(error().contains("33 channels"), "{}", error());
-    assert_eq!(load(&mut engine, &wide(32), 0), SONG_OK);
-    assert_eq!(load(&mut engine, &file, 1000), SONG_NO_SLOTS);
+    assert_eq!(load_in_turn(&mut engine, &wide(32), 0), SONG_OK);
+    assert_eq!(load_in_turn(&mut engine, &file, 1000), SONG_NO_SLOTS);
     assert_eq!(unsafe { synths_song_load(core::ptr::null_mut(), file.as_ptr(), 4, 0) }, SONG_NULL);
-    assert_eq!(load(&mut engine, &file, 993), SONG_OK);
+    assert_eq!(load_in_turn(&mut engine, &file, 993), SONG_OK);
 }
 
 #[test]
@@ -501,9 +525,12 @@ fn a_song_leaves_the_hosts_own_parts_alone() {
 fn any_song_can_be_packed_and_the_packed_song_loaded() {
     let mut engine = Engine::new(SR);
     for file in [write_mod(&tune(Rules::ProTracker)), write_xm(&tune(Rules::FastTracker2)), include_bytes!("../examples/songs/first-steps.json").to_vec()] {
-        let length = unsafe { synths_song_pack(file.as_ptr(), file.len() as u32) };
-        assert!(length > 0, "{}", error());
-        let packed = unsafe { core::slice::from_raw_parts(synths_song_packed(), length as usize) }.to_vec();
+        let packed = {
+            let _turn = take_turn();
+            let length = unsafe { synths_song_pack(file.as_ptr(), file.len() as u32) };
+            assert!(length > 0);
+            unsafe { core::slice::from_raw_parts(synths_song_packed(), length as usize) }.to_vec()
+        };
         assert!(binary::is_binary(&packed));
         // Loaded packed, it is the same song and sounds the same.
         let whole = render(&mut playing(&file), 20000, 512);
