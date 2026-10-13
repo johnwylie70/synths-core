@@ -68,6 +68,9 @@ pub struct ArpSpec {
     pub levels: u32,
     /// An event other than `arp` and `arp_more` has had a say in it.
     pub shaped: bool,
+    /// The pattern of steps it follows in place of its order: 1 to 64 for
+    /// one of the engine's, `PATTERN_OWN`, or 0 for none.
+    pub pattern: u8,
 }
 
 impl ArpSpec {
@@ -82,6 +85,7 @@ impl ArpSpec {
         beat: 0.0,
         levels: 0,
         shaped: false,
+        pattern: 0,
     };
 
     /// From the fields of an `arp` event: rate, order, count and the first
@@ -126,6 +130,12 @@ impl ArpSpec {
     /// From the field of an `arp_beat` event.
     pub fn set_beat(&mut self, steps: f32) {
         self.beat = if steps.is_finite() && steps > 0.0 { steps.clamp(0.01, 64.0) } else { 0.0 };
+        self.shaped = true;
+    }
+
+    /// From the field of an `arp_pattern` event.
+    pub fn set_pattern(&mut self, slot: f32) {
+        self.pattern = if slot.is_finite() && slot >= 1.0 { slot.min(PATTERN_SLOTS as f32) as u8 } else { 0 };
         self.shaped = true;
     }
 
@@ -393,5 +403,246 @@ impl Arp {
         } else {
             false
         }
+    }
+}
+
+// ---------------------------------------------------------------- patterns
+
+/// The most steps an arpeggio's pattern can have.
+pub const MAX_PATTERN: usize = 32;
+/// How many patterns the engine keeps for hosts to choose from.
+pub const PATTERN_SLOTS: usize = 64;
+/// How many bytes describe one step of a pattern.
+pub const PATTERN_STEP_SIZE: usize = 4;
+/// A step's flags: hold the last step's note on through this one.
+pub const STEP_TIE: u8 = 1;
+/// A step's flags: do not strike this note; slide the last one to it.
+pub const STEP_SLIDE: u8 = 2;
+/// The pattern number in an `ArpSpec` that means the arpeggiator was handed its steps directly.
+pub const PATTERN_OWN: u8 = 255;
+/// How loud a step with no accent is in a pattern that has accents, of 15.
+pub const PLAIN_LEVEL: u8 = 10;
+/// How long a slide into a step takes at most, in seconds.
+pub const SLIDE_TIME: f32 = 0.06;
+
+/// One step of a pattern: four bytes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PatternStep {
+    /// Which note of the chord, counted from 1 at its lowest; past the
+    /// chord's last note it carries on an octave up. Below 0 counts down
+    /// from the chord an octave below (-1 is its top note). 0 is a rest.
+    pub note: i8,
+    /// `STEP_TIE`, `STEP_SLIDE`.
+    pub flags: u8,
+    /// Octaves to move the note, -3 to 3.
+    pub octave: i8,
+    /// The low four bits: how hard it is struck, 1 to 15 (0: full). The
+    /// high four: its own gate in tenths of a step, 1 to 10 (0: the arpeggio's).
+    pub shape: u8,
+}
+
+impl PatternStep {
+    pub fn is_rest(&self) -> bool {
+        self.note == 0 && self.flags & STEP_TIE == 0
+    }
+
+    /// Does this step carry the last one's note on, and not strike its own?
+    pub fn carries(&self) -> bool {
+        self.flags & STEP_TIE != 0 || (self.flags & STEP_SLIDE != 0 && self.note != 0)
+    }
+
+    pub fn level(&self) -> f32 {
+        match self.shape & 15 {
+            0 => 1.0,
+            n => n as f32 / 15.0,
+        }
+    }
+
+    /// The step's own gate, if it has one.
+    pub fn gate(&self) -> Option<f32> {
+        match self.shape >> 4 {
+            0 => None,
+            n => Some(n.min(10) as f32 / 10.0),
+        }
+    }
+}
+
+/// The names of the patterns that are built in, and what each is.
+pub const NAMED_PATTERNS: &[(&str, &str)] = &[
+    ("bounce", "1 2 3 2"),
+    ("octaves", "1 1' 1 1'"),
+    ("root-fifth", "1 3 1' 3"),
+    ("thumb", "1 2 1 3 1 4 1 3"),
+    ("converge", "1 4 2 3"),
+    ("diverge", "2 3 1 4"),
+    ("offbeat", "- 1 - 2 - 3 - 2"),
+    ("gallop", "1^ - 1 1 2^ - 2 2"),
+    ("trance", "1^ - 3 2 - 1^ 3 -"),
+    ("acid", "1^ 1 ~3 - 1' ~1 2^ -"),
+];
+
+/// What is wrong with a pattern's text, in words.
+pub const PATTERN_HELP: &str = "an arp pattern is steps with spaces between: a chord note from 1 up, - for a rest, _ to hold the last note; after a note ' and , move it up and down an octave, ^ accents it and :1 to :9 sets its gate; ~ before a note slides into it; at most 32 steps; or the name of a built-in pattern";
+
+/// An arpeggio's pattern: a short list of steps that goes round.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Pattern {
+    pub steps: [PatternStep; MAX_PATTERN],
+    /// How many steps there are; 0 for no pattern.
+    pub len: u8,
+}
+
+impl Pattern {
+    pub const NONE: Pattern = Pattern { steps: [PatternStep { note: 0, flags: 0, octave: 0, shape: 0 }; MAX_PATTERN], len: 0 };
+
+    pub fn steps(&self) -> &[PatternStep] {
+        &self.steps[..(self.len as usize).min(MAX_PATTERN)]
+    }
+
+    /// A pattern of these steps (at most 32 are kept), each made safe.
+    pub fn new(steps: &[PatternStep]) -> Pattern {
+        let mut p = Pattern::NONE;
+        for (slot, s) in p.steps.iter_mut().zip(steps) {
+            *slot = PatternStep { note: s.note.clamp(-64, 64), flags: s.flags & (STEP_TIE | STEP_SLIDE), octave: s.octave.clamp(-3, 3), shape: s.shape };
+        }
+        p.len = steps.len().min(MAX_PATTERN) as u8;
+        p
+    }
+
+    /// From the bytes a host hands over: four a step.
+    pub fn from_bytes(bytes: &[u8]) -> Pattern {
+        let mut steps = [PatternStep::default(); MAX_PATTERN];
+        let mut n = 0;
+        for (slot, b) in steps.iter_mut().zip(bytes.chunks_exact(PATTERN_STEP_SIZE)) {
+            *slot = PatternStep { note: b[0] as i8, flags: b[1], octave: b[2] as i8, shape: b[3] };
+            n += 1;
+        }
+        Pattern::new(&steps[..n])
+    }
+
+    /// From its text: `"1 - 3 2 _ 1 3 5^"`, or the name of a built-in
+    /// pattern. `PATTERN_HELP` says what the text can be.
+    pub fn parse(text: &str) -> Result<Pattern, &'static str> {
+        let text = text.trim();
+        let text = NAMED_PATTERNS.iter().find(|(name, _)| *name == text).map_or(text, |(_, steps)| steps);
+        let mut p = Pattern::NONE;
+        let mut accents = false;
+        for token in text.split_ascii_whitespace() {
+            if p.len as usize >= MAX_PATTERN {
+                return Err(PATTERN_HELP);
+            }
+            let mut step = PatternStep::default();
+            let mut rest = token.as_bytes();
+            match token {
+                "-" | "." => rest = &[],
+                "_" => {
+                    step.flags = STEP_TIE;
+                    rest = &[];
+                }
+                _ => {
+                    if let [b'~', more @ ..] = rest {
+                        step.flags = STEP_SLIDE;
+                        rest = more;
+                    }
+                    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+                    let n = rest[..digits].iter().fold(0u32, |n, b| (n * 10 + (b - b'0') as u32).min(1000));
+                    if digits == 0 || n == 0 || n > MAX_PATTERN as u32 {
+                        return Err(PATTERN_HELP);
+                    }
+                    step.note = n as i8;
+                    rest = &rest[digits..];
+                }
+            }
+            while let [mark, more @ ..] = rest {
+                rest = more;
+                match mark {
+                    b'\'' if step.octave < 3 => step.octave += 1,
+                    b',' if step.octave > -3 => step.octave -= 1,
+                    b'^' => {
+                        step.shape |= 15;
+                        accents = true;
+                    }
+                    b':' => match rest {
+                        [d @ b'1'..=b'9', more @ ..] if step.shape >> 4 == 0 => {
+                            step.shape |= (d - b'0') << 4;
+                            rest = more;
+                        }
+                        _ => return Err(PATTERN_HELP),
+                    },
+                    _ => return Err(PATTERN_HELP),
+                }
+            }
+            p.steps[p.len as usize] = step;
+            p.len += 1;
+        }
+        if p.len == 0 {
+            return Err(PATTERN_HELP);
+        }
+        if accents {
+            // The steps without an accent stand back for those with one.
+            for s in p.steps[..p.len as usize].iter_mut().filter(|s| s.note != 0 && s.shape & 15 == 0) {
+                s.shape |= PLAIN_LEVEL;
+            }
+        }
+        Ok(p)
+    }
+
+    /// The pattern as text `parse` reads back as the same pattern, if text can say it.
+    pub fn to_text(&self) -> Option<String> {
+        let steps = self.steps();
+        let accents = steps.iter().any(|s| s.note != 0 && s.shape & 15 != 0);
+        let mut out = String::new();
+        for s in steps {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            let (level, gate) = (s.shape & 15, s.shape >> 4);
+            if s.note == 0 {
+                if s.octave != 0 || s.shape != 0 || s.flags & STEP_SLIDE != 0 {
+                    return None;
+                }
+                out.push(if s.flags & STEP_TIE != 0 { '_' } else { '-' });
+                continue;
+            }
+            let plain = if accents { PLAIN_LEVEL } else { 0 };
+            if s.note < 0 || s.note as usize > MAX_PATTERN || s.flags & STEP_TIE != 0 || gate > 9 || (level != plain && level != 15) || (level == 15 && !accents) {
+                return None;
+            }
+            if s.flags & STEP_SLIDE != 0 {
+                out.push('~');
+            }
+            out.push_str(&crate::math::small_int(s.note as u32));
+            for _ in 0..s.octave.unsigned_abs() {
+                out.push(if s.octave > 0 { '\'' } else { ',' });
+            }
+            if level == 15 {
+                out.push('^');
+            }
+            if gate > 0 {
+                out.push(':');
+                out.push((b'0' + gate) as char);
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+}
+
+impl ArpSpec {
+    /// How far from the note the arpeggio is on a pattern's step is, in
+    /// semitones: its place in the chord's notes from the lowest up,
+    /// carrying on into the octaves above and below.
+    pub fn pattern_offset(&self, step: &PatternStep) -> i16 {
+        let n = (self.count as usize).clamp(1, MAX_OFFSETS);
+        let list = &self.offsets[..n];
+        let place = if step.note > 0 { step.note as i32 - 1 } else { step.note as i32 };
+        let which = place.rem_euclid(n as i32) as usize;
+        let mut note = list[which.min(n - 1)];
+        for (i, &a) in list.iter().enumerate() {
+            if list.iter().enumerate().filter(|&(j, &b)| b < a || (b == a && j < i)).count() == which {
+                note = a;
+            }
+        }
+        note as i16 + 12 * (place.div_euclid(n as i32) + step.octave as i32) as i16
     }
 }

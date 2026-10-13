@@ -772,3 +772,53 @@ fn the_tempo_is_a_parameter_of_the_engine() {
     };
     assert_eq!([spec(1.0), spec(2.0), spec(3.0), spec(4.0), spec(8.0)], [24000.0, 12000.0, 8000.0, 6000.0, 3000.0]);
 }
+
+#[test]
+fn on_a_sample_map_struck_notes_pick_their_own_zones_and_a_jumping_voice_keeps_its_own() {
+    use synths_core::zones::Zone;
+    // Five recordings, at C2 to C6, each louder than the last so that the
+    // level says which one is playing; each covers the keys nearest it.
+    let piano = |gate: f32| {
+        let mut e = plain_engine();
+        e.set_param(0, OSC1_WAVE, 4.0);
+        e.set_param(0, VELOCITY_SENS, 0.0);
+        let zones: Vec<Zone> = [36u8, 48, 60, 72, 84]
+            .iter()
+            .enumerate()
+            .map(|(i, &root)| {
+                e.load_sample(i, &sine(hz(root as f32), 0.1 * (i + 1) as f32, SR as usize), 1, SR).unwrap();
+                Zone::new(i as u16, if i == 0 { 0 } else { root - 6 }, if i == 4 { 127 } else { root + 5 }, root as f32)
+            })
+            .collect();
+        e.set_zones(0, &zones, 0).unwrap();
+        // C4 and G4, up through two octaves: C4, G4, C5, G5.
+        Ask { rate: 10.0, gate, octaves: 2, ..Ask::new(&[0, 7]) }.start(&mut e, 0.0, 0, 1, 60.0, 1.0);
+        let x = render(&mut e, 4800 * 4, 128).0;
+        let levels: Vec<i32> = (0..4).map(|k| (peak(&x[k * 4800 + 400..k * 4800 + 4000]) * 10.0).round() as i32).collect();
+        (levels, heard(&x, 60.0, 4800, 4))
+    };
+    // Struck: each step is a new note, in the zone its own key falls in
+    // (G4 is past the boundary between the third recording and the fourth).
+    assert_eq!(piano(0.9), (vec![3, 4, 4, 5], vec![0, 7, 12, 19]));
+    // One voice whose pitch jumps: the recording it began with, all the way up.
+    assert_eq!(piano(0.0), (vec![3, 3, 3, 3], vec![0, 7, 12, 19]));
+}
+
+#[test]
+fn a_voice_can_be_given_a_vibrato_that_begins_after_a_delay() {
+    let mut e = sine_engine();
+    e.push(Event::note_on(0.0, 0, 1, 69.0, 1.0));
+    // Half a semitone each way, 5 times a second, after a quarter of a second.
+    e.push(Event::voice_vibrato(0.0, 0, 1, 0.5, 5.0, 0.25));
+    e.push(Event::voice_vibrato(48000.0, 0, 1, 0.0, 0.0, 0.0));
+    let x = render(&mut e, 60000, 128).0;
+    let cents = |from: usize, to: usize| 1200.0 * (frequency(&x[from..to], SR) / 440.0).log2();
+    assert!(cents(1000, 11000).abs() < 1.0, "steady until the delay is over");
+    // A quarter of a cycle in, it is at the top; three quarters in, at the bottom.
+    let (top, bottom) = (12000 + 2400, 12000 + 7200);
+    assert!((cents(top - 400, top + 400) - 50.0).abs() < 4.0, "{}", cents(top - 400, top + 400));
+    assert!((cents(bottom - 400, bottom + 400) + 50.0).abs() < 4.0);
+    // Over whole cycles it averages to the note, and a depth of 0 stops it.
+    assert!(cents(12000, 12000 + 28800).abs() < 2.0);
+    assert!(cents(49000, 59000).abs() < 1.0);
+}

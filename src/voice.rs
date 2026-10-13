@@ -92,6 +92,9 @@ pub struct Voice {
     fade_new: bool,
     /// The fade is over: the voice ends.
     faded: bool,
+    /// A vibrato of the voice's own (`voice_vibrato`): semitones each way,
+    /// Hz, seconds still to wait before it begins, and where in its wave it is.
+    vibrato: [f32; 4],
     /// What the zone of a sample map changes for this voice (`use_zone`).
     /// The key its sample was recorded at, or not a number for the base
     /// note of the sample's slot, as it is for a voice with no zone.
@@ -193,6 +196,7 @@ impl Voice {
             fade_step: 0.0,
             fade_new: false,
             faded: false,
+            vibrato: [0.0; 4],
             zone_root: f32::NAN,
             zone_tune: 0.0,
             zone_gain: 1.0,
@@ -250,6 +254,12 @@ impl Voice {
     #[inline]
     pub fn current_note(&self) -> f32 {
         self.note_target
+    }
+
+    /// Give the voice a vibrato of its own: `depth` semitones each way at
+    /// `rate` Hz, beginning after `delay` seconds. A depth of 0 stops it.
+    pub fn set_vibrato(&mut self, depth: f32, rate: f32, delay: f32) {
+        self.vibrato = [depth.clamp(0.0, 12.0), rate.clamp(0.0, 40.0), delay.clamp(0.0, 60.0), 0.0];
     }
 
     /// How hard the note was struck, 0..1.
@@ -545,8 +555,24 @@ impl Voice {
         let step = self.macro_player.advance(steps, elapsed as f32 * p[MACRO_RATE] * inv_sr, p[MACRO_SYNC] >= 0.5);
         let noise_step = step.wave == STEP_NOISE;
 
+        // The voice's own vibrato, once its delay is over.
+        let mut wobble = 0.0;
+        if self.vibrato[0] > 0.0 {
+            let [depth, rate, delay, phase] = self.vibrato;
+            let seconds = elapsed as f32 * inv_sr;
+            if delay > seconds {
+                self.vibrato[2] = delay - seconds;
+            } else {
+                let phase = phase + rate * (seconds - delay);
+                self.vibrato[2] = 0.0;
+                self.vibrato[3] = phase - phase.floor();
+                wobble = depth * fast_sin(self.vibrato[3]);
+            }
+        }
+
         // Pitch. `bend` is everything that moves the pitch away from the note.
         let bend = step.pitch
+            + wobble
             + self.arp.offset
             + p[TRANSPOSE]
             + p[TUNE] * 0.01

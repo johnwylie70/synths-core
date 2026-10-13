@@ -207,6 +207,13 @@ impl<'a> Voices<'a> {
         self.engine.apply(&Event::arp_beat(0.0, part, handle, steps));
     }
 
+    /// Have the handle's arpeggiator follow a pattern of steps of its own
+    /// in place of its order (`None`: go by its order again), from its next
+    /// step. Send it after the arpeggio is given.
+    pub fn arp_pattern(&mut self, part: u16, handle: u32, pattern: Option<&crate::arp::Pattern>) {
+        self.engine.arp_own_pattern(part, handle, pattern);
+    }
+
     /// Take the next step of the handle's arpeggio now, lasting `frames`
     /// frames (0: as long as the last): for an arpeggio with no clock of
     /// its own (a rate below 0), which a sequencer steps in its own time.
@@ -221,6 +228,25 @@ impl<'a> Voices<'a> {
     /// and before its first step.
     pub fn arp_sample(&mut self, part: u16, handle: u32, slot: Option<u16>, position: f64) {
         self.engine.arp_sample(part, handle, slot, position);
+    }
+
+    /// Give a part's trance gate its pattern: a level for each step, 0
+    /// (closed) to 1 (open), at most 32. The part's `gate.` parameters say
+    /// how deep, how fast and how smooth it is. False if there are too many.
+    pub fn set_gate(&mut self, part: u16, levels: &[f32]) -> bool {
+        self.engine.set_gate(part, levels).is_ok()
+    }
+
+    /// Say which beat it is on this frame, as the `clock` event does: the
+    /// trance gates count their steps from it.
+    pub fn clock(&mut self, beat: f32) {
+        self.engine.apply(&Event::clock(0.0, beat));
+    }
+
+    /// Give the handle's voices a vibrato, as the `voice_vibrato` event
+    /// does: `depth` semitones each way at `rate` Hz, after `delay` seconds.
+    pub fn set_vibrato(&mut self, part: u16, handle: u32, depth: f32, rate: f32, delay: f32) {
+        self.engine.apply(&Event::voice_vibrato(0.0, part, handle, depth, rate, delay));
     }
 
     /// Fade the handle's voices to nothing in a straight line over `seconds`

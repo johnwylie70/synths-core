@@ -17,6 +17,7 @@ pub mod env;
 pub mod event;
 pub mod filter;
 pub mod fx;
+pub mod gate;
 pub mod input;
 pub mod input_abi;
 pub mod lfo;
@@ -24,6 +25,7 @@ pub mod macros;
 pub mod math;
 pub mod osc;
 pub mod params;
+pub mod pattern_abi;
 pub mod presets;
 #[cfg(feature = "songs")]
 pub mod replayer;

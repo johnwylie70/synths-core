@@ -60,6 +60,8 @@ pub(super) struct Arpeggiator {
     sample: i32,
     position: f64,
     rng: Rng,
+    /// The pattern of steps it follows, if it has one (`len` above 0).
+    pattern: Pattern,
 }
 
 impl Arpeggiator {
@@ -85,6 +87,7 @@ impl Arpeggiator {
         sample: -1,
         position: 0.0,
         rng: Rng(1),
+        pattern: Pattern::NONE,
     };
 
     /// Is this the arpeggiator a handle on a part means?
@@ -138,7 +141,124 @@ impl Engine {
             ..Arpeggiator::NONE
         };
         self.arp_at = self.time;
+        self.arp_take_pattern(i);
         i
+    }
+
+    /// Bring an arpeggiator's steps into line with the pattern its arpeggio names.
+    fn arp_take_pattern(&mut self, i: usize) {
+        match self.arps[i].spec.pattern {
+            0 => self.arps[i].pattern.len = 0,
+            PATTERN_OWN => {}
+            n => self.arps[i].pattern = self.patterns[(n as usize - 1).min(PATTERN_SLOTS - 1)],
+        }
+    }
+
+    /// Put a pattern of steps in one of the engine's places for them, 1
+    /// to 64, for arpeggios to follow (`arp_pattern`). An arpeggio that is
+    /// following that one takes the new steps at its next step.
+    pub fn set_arp_pattern(&mut self, slot: usize, pattern: &Pattern) -> Result<(), SampleError> {
+        if slot == 0 || slot > PATTERN_SLOTS {
+            return Err(SampleError::BadSlot);
+        }
+        self.patterns[slot - 1] = *pattern;
+        for i in 0..MAX_ARPEGGIATORS {
+            if self.arps[i].live && self.arps[i].spec.pattern as usize == slot {
+                self.arp_take_pattern(i);
+            }
+        }
+        Ok(())
+    }
+
+    /// The pattern in one of the engine's places, 1 to 64.
+    pub fn arp_pattern(&self, slot: usize) -> Option<&Pattern> {
+        self.patterns.get(slot.wrapping_sub(1))
+    }
+
+    /// Hand the handle's arpeggiator a pattern of steps of its own (or,
+    /// with `None`, take its pattern away). See `Voices::arp_pattern`.
+    pub(crate) fn arp_own_pattern(&mut self, part: u16, handle: u32, pattern: Option<&Pattern>) {
+        for a in self.arps.iter_mut().filter(|a| a.is(part, handle)) {
+            match pattern {
+                Some(p) if p.len > 0 => {
+                    a.pattern = *p;
+                    a.spec.pattern = PATTERN_OWN;
+                }
+                _ => {
+                    a.pattern.len = 0;
+                    a.spec.pattern = 0;
+                }
+            }
+        }
+    }
+
+    /// Sound a step of an arpeggio that follows a pattern.
+    #[inline(never)]
+    fn arp_pattern_step(&mut self, i: usize) {
+        let mut a = self.arps[i];
+        a.strike_at = NEVER;
+        let (now, sr, id) = (self.time, self.sample_rate, a.id);
+        let len = a.pattern.steps().len().max(1);
+        let k = a.strike_step as usize;
+        let (step, next) = (a.pattern.steps[k % len], a.pattern.steps[(k + 1) % len]);
+        // Each time round, the pattern is an octave higher, through the octaves asked for.
+        let lift = 12 * ((k / len) % a.spec.octaves.clamp(1, MAX_OCTAVES) as usize) as i16;
+        let struck = a.spec.gate > 0.0;
+        let held = |v: &Voice| v.state == VoiceState::Held && v.arp.owner == id;
+        let any_held = self.voices.iter().any(held);
+        self.wake();
+        // When what this step leaves sounding is let go: not at all if the
+        // next step carries it on.
+        let gate = step.gate().unwrap_or(a.spec.gate) as f64;
+        let off = if !struck || next.carries() || gate >= 1.0 || a.strike_length <= 0.0 { NEVER } else { now.saturating_add(((gate * a.strike_length) as u64).max(1)) };
+        if step.is_rest() {
+            if struck {
+                self.arp_let_go(id);
+                a.off_at = NEVER;
+            }
+        } else if step.flags & STEP_TIE != 0 {
+            if struck && any_held {
+                a.off_at = off;
+            }
+        } else {
+            let offset = (a.spec.pattern_offset(&step) + lift) as f32;
+            let velocity = (a.velocity * step.level()).clamp(0.0, 1.0);
+            let slide = step.flags & STEP_SLIDE != 0 && any_held;
+            if struck && !slide {
+                self.arp_let_go(id);
+                let unison = (self.parts[a.part as usize].p[UNISON] as usize).clamp(1, 8);
+                self.arp_trim(id, ARPEGGIATOR_VOICES.saturating_sub(unison));
+                self.arp_note_on(&a, offset, velocity);
+                self.arp_trim(id, ARPEGGIATOR_VOICES);
+            } else if any_held {
+                // The note that is sounding moves: at once, or sliding there.
+                let seconds = if !slide {
+                    0.0
+                } else if a.strike_length > 0.0 {
+                    SLIDE_TIME.min((a.strike_length / sr as f64) as f32)
+                } else {
+                    SLIDE_TIME
+                };
+                for v in self.voices.iter_mut() {
+                    if held(v) {
+                        v.arp.offset = 0.0;
+                        v.arp.shift = offset;
+                        v.arp.shift_key = v.key;
+                        v.set_pitch((a.root + offset).clamp(-24.0, 160.0), seconds, sr);
+                        v.pitch_jump = !slide;
+                    }
+                }
+            } else if a.begun {
+                // One note whose pitch jumps, and the note has gone.
+                self.arps[i].live = false;
+                return;
+            } else {
+                self.arp_note_on(&a, offset, velocity);
+            }
+            a.begun = true;
+            a.off_at = off;
+        }
+        self.arps[i] = a;
     }
 
     /// A `note_on` for a part with an arpeggio waiting that an arpeggiator
@@ -269,6 +389,9 @@ impl Engine {
     /// Sound the step that is waiting.
     #[inline(never)]
     fn arp_strike(&mut self, i: usize) {
+        if self.arps[i].pattern.len > 0 {
+            return self.arp_pattern_step(i);
+        }
         let mut a = self.arps[i];
         a.strike_at = NEVER;
         let now = self.time;
@@ -467,11 +590,12 @@ impl Engine {
             EV_ARP_STYLE => spec.set_style(e.x, e.y, e.z, e.b),
             EV_ARP_BEAT => spec.set_beat(e.x),
             EV_ARP_NOTES => spec.set_notes(e.x, e.y, e.z, e.b),
+            EV_ARP_PATTERN => spec.set_pattern(e.x),
             _ => {}
         };
         if handle == 0 {
             // For the next note of the part.
-            if matches!(e.kind, EV_ARP_STYLE | EV_ARP_BEAT | EV_ARP_NOTES) {
+            if matches!(e.kind, EV_ARP_STYLE | EV_ARP_BEAT | EV_ARP_NOTES | EV_ARP_PATTERN) {
                 if let Some(p) = self.parts.get_mut(part as usize) {
                     change(&mut p.next_arp);
                 }
@@ -499,8 +623,11 @@ impl Engine {
                 continue;
             }
             found = true;
+            // (Steps handed to it directly stay until a pattern is named or the arpeggio is started afresh.)
+            let own = a.spec.pattern == PATTERN_OWN && e.kind != EV_ARP && e.kind != EV_ARP_PATTERN;
+            self.arps[i].spec = ArpSpec { pattern: if own { PATTERN_OWN } else { spec.pattern }, ..spec };
+            self.arp_take_pattern(i);
             let a = &mut self.arps[i];
-            a.spec = spec;
             if e.kind == EV_ARP {
                 // `arp` starts the pattern again, at once.
                 a.step = 0;

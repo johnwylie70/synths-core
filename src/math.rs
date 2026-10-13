@@ -89,3 +89,17 @@ impl Rng {
         (self.next_u32() >> 8) as f32 * (1.0 / 16_777_216.0)
     }
 }
+
+/// A whole number below 1000 as text, with no formatting machinery.
+pub fn small_int(n: u32) -> String {
+    let mut s = String::new();
+    let n = n.min(999);
+    if n >= 100 {
+        s.push((b'0' + (n / 100) as u8) as char);
+    }
+    if n >= 10 {
+        s.push((b'0' + (n / 10 % 10) as u8) as char);
+    }
+    s.push((b'0' + (n % 10) as u8) as char);
+    s
+}

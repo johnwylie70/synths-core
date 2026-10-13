@@ -192,6 +192,17 @@ pub struct Engine {
     /// The arpeggiators, and the number the last one made was given.
     arps: Box<[arps::Arpeggiator]>,
     arp_ids: u16,
+    /// The beat, for everything that keeps time with `tempo`: the beat it
+    /// was on a frame, and how far each frame since has moved it. (Counted
+    /// from a frame, not added up chunk by chunk, so that it is the same
+    /// however a host slices time.)
+    beat: f64,
+    beat_frame: u64,
+    beat_rate: f64,
+    /// The parts' trance gates.
+    gates: Box<[crate::gate::Gate]>,
+    /// The patterns of steps hosts have set for arpeggios to follow.
+    patterns: Box<[crate::arp::Pattern]>,
     /// What a display reads: scope, meters, sounding notes.
     pub(crate) taps: Box<Taps>,
     /// The song that is loaded, as a host may read it while sound is made.
@@ -253,6 +264,11 @@ impl Engine {
             arp_at: u64::MAX,
             arps: vec![arps::Arpeggiator::NONE; crate::arp::MAX_ARPEGGIATORS].into_boxed_slice(),
             arp_ids: 0,
+            beat: 0.0,
+            beat_frame: 0,
+            beat_rate: 0.0,
+            gates: vec![crate::gate::Gate::new(); NUM_PARTS].into_boxed_slice(),
+            patterns: vec![crate::arp::Pattern::NONE; crate::arp::PATTERN_SLOTS].into_boxed_slice(),
             taps: Box::new(Taps::new(NUM_PARTS)),
             #[cfg(feature = "songs")]
             song: None,
@@ -311,6 +327,9 @@ impl Engine {
         self.live_ramps = 0;
         self.zones.rewind_all();
         self.arp_reset();
+        self.beat = 0.0;
+        self.beat_frame = self.time;
+        self.gates.iter_mut().for_each(|g| g.clear());
         self.queue.clear();
         self.delay.clear();
         self.reverb.clear();
@@ -468,6 +487,37 @@ impl Engine {
         }
         self.dirty = true;
         Ok(())
+    }
+
+    // ---- the trance gate and the beat ----
+
+    /// Give a part's gate its pattern: a level for each step, 0 (closed)
+    /// to 1 (open), at most 32. `part` may be `ALL_PARTS`. It asks for no
+    /// memory, and the gate moves to the new pattern without a click.
+    pub fn set_gate(&mut self, part: u16, levels: &[f32]) -> Result<(), SampleError> {
+        if levels.len() > crate::gate::MAX_GATE_STEPS {
+            return Err(SampleError::BadFormat);
+        }
+        if part != ALL_PARTS && part as usize >= NUM_PARTS {
+            return Err(SampleError::BadSlot);
+        }
+        for (i, g) in self.gates.iter_mut().enumerate() {
+            if part == ALL_PARTS || part as usize == i {
+                g.set(levels);
+            }
+        }
+        Ok(())
+    }
+
+    /// The levels of a part's gate pattern.
+    pub fn gate(&self, part: usize) -> &[f32] {
+        self.gates.get(part).map_or(&[], |g| g.levels())
+    }
+
+    /// The beat it is at the frame the engine has reached: it goes up by
+    /// `tempo` beats a minute, from wherever a `clock` event last put it.
+    pub fn beat(&self) -> f64 {
+        self.beat + (self.time - self.beat_frame) as f64 * self.beat_rate
     }
 
     /// What a display reads: the scope, the meters and the sounding notes.
@@ -824,6 +874,23 @@ impl Engine {
                 }
             }
             EV_SONG => self.sequencer_event(e),
+            EV_CLOCK => {
+                if e.x.is_finite() {
+                    self.beat = e.x as f64;
+                    self.beat_frame = self.time;
+                }
+            }
+            EV_VOICE_VIBRATO => {
+                if e.a != 0 && e.x.is_finite() {
+                    let rate = if e.y.is_finite() { e.y } else { 6.0 };
+                    let delay = if e.z.is_finite() { e.z } else { 0.0 };
+                    for v in self.voices.iter_mut() {
+                        if v.active() && v.handle == e.a && (all || v.part == part) {
+                            v.set_vibrato(e.x, rate, delay);
+                        }
+                    }
+                }
+            }
             EV_RECORD => self.record_event(e),
             EV_MACRO_TICK => {
                 for v in self.voices.iter_mut() {
@@ -837,7 +904,7 @@ impl Engine {
                     }
                 }
             }
-            EV_ARP_STYLE | EV_ARP_BEAT | EV_ARP_NOTES | EV_ARP_STEP => {
+            EV_ARP_STYLE | EV_ARP_BEAT | EV_ARP_NOTES | EV_ARP_STEP | EV_ARP_PATTERN => {
                 self.arp_event(e);
             }
             EV_ARP | EV_ARP_MORE => {
@@ -1159,11 +1226,24 @@ impl Engine {
                 self.run_ramps();
             }
             let n = self.stage_input(&input, done, n);
+            // A new tempo counts from this frame.
+            let rate = self.beat_per_frame();
+            if rate != self.beat_rate {
+                self.beat = self.beat();
+                self.beat_frame = self.time;
+                self.beat_rate = rate;
+            }
             self.chunk(&mut left[done..done + n], &mut right[done..done + n]);
             self.time += n as u64;
             self.tick_pos = (self.tick_pos + n) % CONTROL;
             done += n;
         }
+    }
+
+    /// How far one frame moves the beat.
+    #[inline]
+    fn beat_per_frame(&self) -> f64 {
+        self.globals[TEMPO - GLOBAL_BASE] as f64 / (60.0 * self.sample_rate as f64)
     }
 
     /// Let a meter fall back by one control period.
@@ -1302,6 +1382,7 @@ impl Engine {
         let mut sends = [[0.0f32; CONTROL]; 6];
         let mut any_send = [false; 3];
         let mut part_recorded = false;
+        let (beat, beat_since, beat_step) = (self.beat, self.time - self.beat_frame, self.beat_rate);
         for (index, part) in self.parts.iter_mut().enumerate() {
             let clicking = part.declick[0] != 0.0 || part.declick[1] != 0.0;
             // Its voice effects may still be ringing after its voices have stopped.
@@ -1365,6 +1446,25 @@ impl Engine {
                 }
             }
             part.volume = vol;
+            // The trance gate, after everything else of the part's.
+            let gate = &mut self.gates[index];
+            let mut ungated = [[0.0f32; CONTROL]; 2];
+            let gated = gate.live(p[GATE_DEPTH]);
+            let sends_before = gated && p[GATE_SENDS] < 0.5;
+            if gated {
+                if sends_before {
+                    ungated[0][..n].copy_from_slice(bl);
+                    ungated[1][..n].copy_from_slice(br);
+                }
+                let settings = crate::gate::Settings {
+                    depth: p[GATE_DEPTH],
+                    rate: p[GATE_RATE],
+                    ease: 1.0 - (-3.0 * inv_sr / p[GATE_SMOOTH].max(0.001)).exp(),
+                    swing: p[GATE_SWING],
+                    alternate: p[GATE_STEREO] >= 0.5,
+                };
+                gate.process(bl, br, beat, beat_since, beat_step, &settings);
+            }
             Engine::measure(&mut part.meter, bl, br, self.rms_take);
             self.taps.write_levels(index, Engine::levels(&part.meter));
             self.taps.write_scope(index, self.time, bl, br);
@@ -1382,9 +1482,10 @@ impl Engine {
                     any_send[k] = true;
                     let (sl, sr2) = sends.split_at_mut(k * 2 + 1);
                     let (sl, sr2) = (&mut sl[k * 2], &mut sr2[0]);
+                    let (from_l, from_r): (&[f32], &[f32]) = if sends_before { (&ungated[0][..n], &ungated[1][..n]) } else { (bl, br) };
                     for i in 0..n {
-                        sl[i] += bl[i] * amount;
-                        sr2[i] += br[i] * amount;
+                        sl[i] += from_l[i] * amount;
+                        sr2[i] += from_r[i] * amount;
                     }
                 }
             }

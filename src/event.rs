@@ -27,6 +27,9 @@ pub const EV_ARP_STYLE: u16 = 17;
 pub const EV_ARP_BEAT: u16 = 18;
 pub const EV_ARP_NOTES: u16 = 19;
 pub const EV_ARP_STEP: u16 = 20;
+pub const EV_ARP_PATTERN: u16 = 21;
+pub const EV_CLOCK: u16 = 22;
+pub const EV_VOICE_VIBRATO: u16 = 23;
 
 /// What a `record` event records (its `y`).
 pub const RECORD_INPUT: u32 = 0;
@@ -70,6 +73,9 @@ pub const EVENT_TYPES: &[(u16, &str, &str)] = &[
     (EV_ARP_BEAT, "arp_beat", "part; a: handle, or 0 for the part's next note; x: steps to a beat of the tempo parameter, 0.01..64 (0: go by the arp event's rate)"),
     (EV_ARP_NOTES, "arp_notes", "part; a: handle, or 0 for the part's next note; x: steps a second (0: as it was, below 0: one an arp_step); y: order; z: how many offsets, 0..8 (0: stop); b: offsets 0-3, a signed byte each"),
     (EV_ARP_STEP, "arp_step", "part; a: handle; x: how long the step is to last, in frames (0: as long as the last)"),
+    (EV_ARP_PATTERN, "arp_pattern", "part; a: handle, or 0 for the part's next note; x: which pattern of steps the arpeggio follows, 1..64 (set with synths_arp_pattern_set or synths_arp_pattern_text); 0: none, it goes by its order"),
+    (EV_CLOCK, "clock", "x: the beat it is at this frame, for everything that keeps time with the tempo parameter (0: the start of a bar)"),
+    (EV_VOICE_VIBRATO, "voice_vibrato", "part; a: handle; x: depth in semitones (0: none); y: rate in Hz; z: seconds before it begins"),
 ];
 
 /// One event, exactly as it is laid out in memory (little-endian).
@@ -166,6 +172,19 @@ impl Event {
     /// The next step of an arpeggio that steps when told, lasting `frames`.
     pub fn arp_step(time: f64, part: u16, handle: u32, frames: f32) -> Event {
         Event::new(time, EV_ARP_STEP, part, handle, frames, 0.0)
+    }
+    /// Have an arpeggio follow one of the engine's patterns of steps (0: none).
+    pub fn arp_pattern(time: f64, part: u16, handle: u32, slot: u32) -> Event {
+        Event::new(time, EV_ARP_PATTERN, part, handle, slot as f32, 0.0)
+    }
+    /// Say which beat it is at this frame.
+    pub fn clock(time: f64, beat: f32) -> Event {
+        Event::new(time, EV_CLOCK, 0, 0, beat, 0.0)
+    }
+    /// Give the handle's voices a vibrato: so many semitones each way, at
+    /// `rate` Hz, beginning after `delay` seconds. A depth of 0 stops it.
+    pub fn voice_vibrato(time: f64, part: u16, handle: u32, depth: f32, rate: f32, delay: f32) -> Event {
+        Event { z: delay, ..Event::new(time, EV_VOICE_VIBRATO, part, handle, depth, rate) }
     }
     /// A command for the song player (`SONG_...`), with its two numbers.
     pub fn song(time: f64, command: u32, x: f32, y: f32) -> Event {

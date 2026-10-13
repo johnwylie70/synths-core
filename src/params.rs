@@ -224,6 +224,14 @@ param_table! {
     123, FX_COMB_RATE, "fx.comb_rate", Float, 0.01, 10, 0.3, "hz", "", "Comb: how fast its note sweeps up and down.";
     124, FX_COMB_DEPTH, "fx.comb_depth", Float, 0, 1, 0, "", "", "Comb: how far its note sweeps (0: it stays put).";
 
+    // ---- the trance gate ----
+    90, GATE_DEPTH, "gate.depth", Float, 0, 1, 0, "", "", "Trance gate: how far a closed step of its pattern closes (0: no gate; 1: to silence).";
+    91, GATE_RATE, "gate.rate", Float, 0.25, 16, 4, "steps", "", "Trance gate: steps to a beat of the tempo (4 is sixteenths, 2 eighths, 8 thirty-seconds, 3 eighth-note triplets).";
+    92, GATE_SMOOTH, "gate.smooth", Float, 0.001, 0.5, 0.008, "seconds", "", "Trance gate: how long it takes to open or close. It never clicks; 0.001 is as hard as it goes.";
+    93, GATE_SWING, "gate.swing", Float, 0, 0.75, 0, "", "", "Trance gate: how far every second step is put back, as a part of a step.";
+    94, GATE_SENDS, "gate.sends", Bool, 0, 1, 1, "", "", "On: the echo, reverb and chorus are sent the gated sound, so their tails ring through the gaps. Off: they are sent the sound as it was before the gate, and only the part's own sound is chopped.";
+    95, GATE_STEREO, "gate.stereo", Bool, 0, 1, 0, "", "", "On: the gate's steps open on the left and on the right by turns.";
+
     // ---- the whole engine ----
     200, MASTER_VOLUME, "master.volume", Float, 0, 2, 0.35, "gain", "", "How loud everything is.";
     201, LIMITER, "master.limiter", Bool, 0, 1, 1, "", "", "Turns loud passages down so they do not distort. The output never goes past -1..1 either way.";
